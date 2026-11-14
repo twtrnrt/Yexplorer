@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>文件管理器 —— 架构总览 V1</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    line-height: 1.75; color: #1f2937; background: #fbfbfd;
+  }
+  h1 { font-size: 26px; border-left: 5px solid #1d4ed8; padding-left: 14px; margin-bottom: 6px; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 19px; margin-top: 36px; padding-bottom: 6px; border-bottom: 1px solid #d1d5db; color: #111827; }
+  h3 { font-size: 15px; margin-top: 22px; color: #1d4ed8; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid #d1d5db; padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #eef2ff; font-weight: 600; }
+  pre {
+    background: #111827; color: #e5e7eb; padding: 14px 16px; border-radius: 6px;
+    overflow-x: auto; font-size: 13px; line-height: 1.6;
+    font-family: Consolas, "Courier New", monospace;
+  }
+  .ok { background: #ecfdf5; border-left: 4px solid #10b981; padding: 10px 14px; margin: 14px 0; border-radius: 4px; }
+  .warn { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 10px 14px; margin: 14px 0; border-radius: 4px; }
+  .bad { background: #fef2f2; border-left: 4px solid #ef4444; padding: 10px 14px; margin: 14px 0; border-radius: 4px; }
+  ul, ol { margin: 8px 0 8px 4px; padding-left: 22px; }
+  code { background: #eef2ff; padding: 1px 5px; border-radius: 3px; font-family: Consolas, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<h1>文件管理器 —— 架构总览（V1）</h1>
+<div class="sub">
+  技术栈：C++17 + Win32 API + Shell COM + ComCtl32 &nbsp;|&nbsp;
+  目标平台：Windows 10 / 11 x64 &nbsp;|&nbsp;
+  仓库：<code>C:\git\explorer</code> &nbsp;|&nbsp;
+  更新：2026-11-14
+</div>
+
+<h2>一、项目定位与边界</h2>
+
+<p>做一个<strong>日常可用</strong>的 Windows 文件管理器，替代系统自带资源管理器的<strong>窗口部分</strong>。</p>
+
+<div class="ok">
+<strong>要做的：</strong>
+<ul>
+  <li>独立 GUI 进程，双击启动；后续通过注册表接管「打开文件夹」动作</li>
+  <li>底层用 <code>IShellFolder</code> 枚举，和资源管理器同源，支持此电脑 / 回收站 / 网络等虚拟文件夹</li>
+  <li>原生控件：TreeView（目录树）、ListView（文件列表）、Toolbar、地址栏</li>
+  <li>文件操作用 <code>IFileOperation</code>，复用系统原生进度、冲突弹窗、回收站、撤销</li>
+  <li>原生右键菜单、OLE 拖拽、系统图标与缩略图</li>
+</ul>
+</div>
+
+<div class="bad">
+<strong>明确不做的：</strong>
+<ul>
+  <li><strong>不替换 <code>explorer.exe</code> 进程本身。</strong>桌面、任务栏、开始菜单都由它提供，
+      强行替换属于不受支持的黑改方案，会丢任务栏和桌面，稳定性极差</li>
+  <li>不做自定义美化（Mica、圆角、自绘主题）——样式不是本项目目标</li>
+  <li>V1 不做数据库索引（详见第五节）</li>
+</ul>
+</div>
+
+<h2>二、技术选型与理由</h2>
+
+<table>
+<tr><th>维度</th><th>选择</th><th>理由</th></tr>
+<tr><td>语言</td><td>C++17</td><td>操作 Shell COM 最顺手，生态案例最多；原生机器码，无 GC 停顿</td></tr>
+<tr><td>界面</td><td>Win32 + ComCtl32 原生控件</td><td>交互行为与系统原生一致；不做自绘框架</td></tr>
+<tr><td>目录枚举</td><td><code>IShellFolder</code></td><td>而非 <code>FindFirstFile</code>。这是能打开「此电脑/回收站/网络/压缩文件夹」的关键</td></tr>
+<tr><td>文件列表</td><td>ListView 虚拟模式 <code>LVS_OWNERDATA</code></td><td>不把所有条目塞进控件，按需回调填充，十万级文件不卡</td></tr>
+<tr><td>文件操作</td><td><code>IFileOperation</code></td><td>系统原生引擎：进度条、冲突处理、回收站、撤销全都白拿</td></tr>
+<tr><td>COM 生命周期</td><td><code>Microsoft::WRL::ComPtr</code></td><td>SDK 自带，零第三方依赖，自动 AddRef/Release，规避本项目最大风险点</td></tr>
+</table>
+
+<h3>第三方依赖（全部 header-only，MIT，产物仍是单 exe）</h3>
+
+<table>
+<tr><th>库</th><th>用途</th><th>状态</th></tr>
+<tr><td>WIL（Windows Implementation Library）</td><td>HRESULT 转异常、错误信息、句柄 RAII</td><td>待引入</td></tr>
+<tr><td>nlohmann/json</td><td>配置文件读写</td><td>待引入</td></tr>
+<tr><td>spdlog</td><td>日志，开发期排查用</td><td>待引入</td></tr>
+<tr><td>MSVC AddressSanitizer</td><td>越界 / UAF 检测（编译器开关，非第三方）</td><td>待启用</td></tr>
+</table>
+
+<div class="warn">
+<strong>明确不引入：</strong>Qt、wxWidgets（自绘或过重，与「贴近原生」冲突）、Boost（C++17 标准库已覆盖需求）。
+WTL 暂缓，等骨架跑通后按需评估。
+</div>
+
+<h2>三、模块划分</h2>
+
+<pre>
+explorer/
+├─ src/
+│  ├─ core/
+│  │  ├─ App.cpp/h          程序生命周期、COM 初始化
+│  │  ├─ Config.cpp/h       配置读写（JSON）
+│  │  └─ AsyncTask.cpp/h    线程池 + 取消令牌（目录枚举专用）
+│  ├─ shell/
+│  │  ├─ ShellFolder.cpp/h  IShellFolder 封装，枚举条目        ← 阶段 1
+│  │  ├─ ShellItem.cpp/h    IShellItem 封装，名称/大小/时间/图标
+│  │  ├─ ShellIcon.cpp/h    SHGetFileInfo 图标 + 覆盖图标缓存  ← 阶段 6
+│  │  ├─ ShellContextMenu.cpp/h  IContextMenu 原生右键菜单      ← 阶段 5
+│  │  └─ ShellFileOp.cpp/h  IFileOperation 复制/删除/回收站     ← 阶段 4
+│  ├─ ui/
+│  │  ├─ MainWnd.cpp/h      主窗口与消息分发                   ← 阶段 0 ✅
+│  │  ├─ FileListView.cpp/h 虚拟 ListView（核心）              ← 阶段 2
+│  │  ├─ AddressBar.cpp/h   地址栏 + 导航历史                  ← 阶段 3
+│  │  └─ ToolBar.cpp/h      前进 / 后退 / 向上
+│  └─ main.cpp              入口                                ← 阶段 0 ✅
+├─ res/  app.manifest、app.rc、图标
+├─ third/ 第三方 header-only 库
+└─ docs/ 本文件、踩坑记录、进度与状态
+</pre>
+
+<p><strong>依赖方向：</strong><code>ui → shell → core</code>，单向，不允许反向依赖。
+UI 层不直接调 Win32 Shell API，一律走 <code>shell/</code> 封装。</p>
+
+<h2>四、V1 功能基线</h2>
+
+<table>
+<tr><th>分类</th><th>功能</th></tr>
+<tr><td>导航</td><td>地址栏输入路径、前进 / 后退 / 向上、导航历史</td></tr>
+<tr><td>列表</td><td>虚拟 ListView、详细信息视图、按名称/大小/时间排序</td></tr>
+<tr><td>Shell 能力</td><td>本地磁盘、U 盘、网络位置、此电脑、回收站</td></tr>
+<tr><td>文件操作</td><td>复制、剪切、粘贴、F2 重命名、Del 删除、Shift+Del 永久删除、打开、属性</td></tr>
+<tr><td>交互</td><td>系统原生右键菜单、OLE 拖拽（同窗口与跨窗口）</td></tr>
+<tr><td>持久化</td><td>窗口大小、列宽、历史、收藏夹、开关项（JSON 文件）</td></tr>
+</table>
+
+<h2>五、关于数据库：V1 不做，理由如下</h2>
+
+<p>曾考虑「把文件结构全部存数据库、软件从库里读」来加速。结论是<strong>不做</strong>：</p>
+
+<ul>
+  <li><strong>本地 SSD 场景不会更快。</strong>NTFS 与文件系统缓存本身已是内存级高速缓存，
+      多一层 SQLite 查询只是多一次 IO。目录读取的物理上限由磁盘决定，绕过内核没有收益。</li>
+  <li><strong>一致性是致命问题。</strong>别的程序（原生资源管理器、脚本）随时增删改文件，
+      数据库必须靠 <code>ReadDirectoryChangesW</code> 或定时扫描同步；SMB 网络盘大量不支持变更通知，
+      一旦失同步，列表会显示已删除的文件、看不到新文件——对文件管理器是不可接受的 bug。</li>
+  <li><strong>每次文件操作都要多写一次库</strong>，反而增加延迟。</li>
+</ul>
+
+<p>真正有收益的只有一种场景：<strong>慢速远程大目录</strong>（NAS / SMB，几万条目）。
+因此这个能力放到 V2，做成<strong>可选开关</strong>的离线索引模块，只对用户主动指定的网络目录生效，
+默认关闭，绝不作为主数据源。</p>
+
+<h2>六、性能设计要点</h2>
+
+<ol>
+  <li><strong>UI 线程永不做重活。</strong>目录枚举、图标读取全抛后台线程，带取消令牌；
+      切换目录时立即取消上一个枚举任务。</li>
+  <li><strong>虚拟列表。</strong>ListView 强制 <code>LVS_OWNERDATA</code>，按需回调填充，不预载全部条目。</li>
+  <li><strong>图标 LRU 缓存。</strong>避免重复调用 <code>SHGetFileInfo</code>。</li>
+  <li><strong>第三方 Shell 扩展开关。</strong>这是最大的提速点——原生资源管理器卡顿，
+      多数是网盘、杀毒的外壳扩展拖的。给自己的程序加个「不加载第三方扩展」的开关。</li>
+  <li><strong>缩略图延迟加载。</strong>只对可视区域拉取。</li>
+  <li><strong>进程隔离的天然优势。</strong>我们是独立 exe，某个扩展或缩略图崩溃不会连带拖死整个界面。</li>
+</ol>
+
+<div class="warn">
+<strong>性能预期要说清楚：</strong>不要期望「全方位比原生快很多」。
+本地方向小目录，速度和原生持平（底层都是同一套内核）。
+优势体现在<strong>大目录不卡死、网络盘响应更稳、不受第三方扩展拖累</strong>——
+赢在「流畅与不阻塞」，不是赢在磁盘 IO 带宽。
+</div>
+
+<h2>七、迭代规划</h2>
+
+<table>
+<tr><th>阶段</th><th>内容</th><th>状态</th></tr>
+<tr><td>0</td><td>骨架自检：主窗口 + COM + ComCtl32 v6 + 消息循环</td><td>✅ 完成</td></tr>
+<tr><td>1</td><td>Shell 层：<code>IShellFolder</code> 枚举 + 异步任务框架</td><td>下一步</td></tr>
+<tr><td>2</td><td>虚拟 ListView 文件列表</td><td>—</td></tr>
+<tr><td>3</td><td>地址栏与导航历史</td><td>—</td></tr>
+<tr><td>4</td><td>系统原生文件操作</td><td>—</td></tr>
+<tr><td>5</td><td>原生右键菜单 + OLE 拖拽</td><td>—</td></tr>
+<tr><td>6</td><td>配置持久化 + 图标缓存 + 性能开关</td><td>—</td></tr>
+<tr><td>7</td><td>注册表接管 + 整体联调</td><td>—</td></tr>
+<tr><td>V2</td><td>可选：网络目录离线索引（SQLite）</td><td>远景</td></tr>
+</table>
+
+<h2>八、构建与验证</h2>
+
+<pre>
+编译器：MSVC v143（VS2022 17.14）    位置 C:\dev\vs2022
+SDK   ：Windows SDK 10.0.26100.0
+git   ：C:\dev\git\bin\git.exe（不在 PATH）
+
+编译命令：
+  & "C:\dev\vs2022\MSBuild\Current\Bin\MSBuild.exe" `
+    "C:\git\explorer\Explorer.sln" /p:Configuration=Debug /p:Platform=x64
+
+产物：bin\x64\Debug\FileExplorer.exe
+</pre>
+
+<p>每个阶段的验收标准写在 <code>docs/进度与状态.md</code> 里，
+踩过的坑写在 <code>docs/踩坑记录.md</code> 里。新开窗口接手时，先读这两份。</p>
+
+</body>
+</html>

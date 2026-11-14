@@ -1,0 +1,53 @@
+// ============================================================================
+// 文件管理器（自研 Explorer 替代品）
+// 文件：res/app.rc —— 资源脚本
+//
+// 作用：
+//   1. 把 app.manifest 嵌入 exe（这是 ComCtl32 v6 生效的关键一步）
+//   2. 写入版本信息（在资源管理器里右键 exe → 属性 → 详细信息 能看到）
+//
+// 注意：本文件刻意全部使用 ASCII 字符，不放中文。
+//       原因是 rc.exe 对非 ASCII 源文件的编码处理依赖 BOM，容易出问题，
+//       为了编译链路稳定，版本信息先用英文；需要中文时再单独处理编码。
+// ============================================================================
+
+#include <windows.h>
+
+// ----------------------------------------------------------------------------
+// 1. 嵌入应用程序清单
+//    CREATEPROCESS_MANIFEST_RESOURCE_ID (值 1) 是清单的标准资源 ID，
+//    必须用 1，否则系统不会把它当作进程清单加载。
+// ----------------------------------------------------------------------------
+1 RT_MANIFEST "app.manifest"
+
+// ----------------------------------------------------------------------------
+// 2. 版本信息
+// ----------------------------------------------------------------------------
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     1,0,0,0
+ PRODUCTVERSION  1,0,0,0
+ FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+ FILEFLAGS       0
+ FILEOS          VOS_NT_WINDOWS32
+ FILETYPE        VFT_APP
+ FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 语言 0x0804 = 简体中文，代码页 1200 = Unicode
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "Personal Project"
+            VALUE "FileDescription",  "File Explorer (custom implementation)"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "FileExplorer"
+            VALUE "OriginalFilename", "FileExplorer.exe"
+            VALUE "ProductName",      "File Explorer"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

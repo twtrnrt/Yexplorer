@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ============================================================================
+  文件管理器 —— 项目文件
+  文件：Explorer.vcxproj
+
+  说明：
+    - 目标平台：x64，只做 Win10/11 桌面程序
+    - 编译标准：C++17，加 /utf-8 让源码里的中文注释按 UTF-8 正确解析
+    - 字符集：Unicode（全程宽字符，匹配 Shell 接口习惯）
+    - 输出：bin\x64\Debug(Release)\FileExplorer.exe
+      （刻意不叫 Explorer.exe，避免和系统进程同名造成混淆）
+  ============================================================================
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ==================== 配置列表 ==================== -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <!-- ==================== 全局属性 ==================== -->
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{7E3A9C41-2D5B-4F8A-B6C1-9E0D2A4B7F31}</ProjectGuid>
+    <RootNamespace>Explorer</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <!-- ==================== Debug 配置属性 ==================== -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <!--
+      清单只由 res\app.rc 手工嵌入（1 RT_MANIFEST）。
+      这里必须关掉 MSBuild 的自动清单生成，否则会生成第二份清单资源，
+      链接时 CVTRES 报 CVT1100「资源重复」。
+      注意：GenerateManifest 是项目级属性，必须写在 PropertyGroup 里，
+            写到 Link 的元数据里不会生效。
+    -->
+    <GenerateManifest>false</GenerateManifest>
+  </PropertyGroup>
+
+  <!-- ==================== Release 配置属性 ==================== -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <GenerateManifest>false</GenerateManifest>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <!-- ==================== 输出目录 ==================== -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>FileExplorer</TargetName>
+  </PropertyGroup>
+
+  <!-- ==================== 编译器设置（两套配置共用部分） ==================== -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <!-- /utf-8：源码按 UTF-8 解析，保证中文注释不乱码 -->
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;WIN32;_WINDOWS;_WIN32_WINNT=0x0A00;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- 清单只由 res\app.rc 手工嵌入，这里必须关掉自动生成，否则清单会重复嵌入导致 CVT1100 -->
+      <GenerateManifest>false</GenerateManifest>
+      <AdditionalDependencies>comctl32.lib;ole32.lib;shell32.lib;shlwapi.lib;user32.lib;gdi32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;WIN32;_WINDOWS;_WIN32_WINNT=0x0A00;WIN32_LEAN_AND_MEAN;NOMINMAX;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>comctl32.lib;ole32.lib;shell32.lib;shlwapi.lib;user32.lib;gdi32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!--
+    资源编译设置：把 res 目录加入包含路径，
+    这样 app.rc 里的 "app.manifest" 能被正确找到。
+  -->
+  <ItemDefinitionGroup>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)res;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+
+  <!-- ==================== 源文件列表 ==================== -->
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\ui\MainWnd.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="src\ui\MainWnd.h" />
+  </ItemGroup>
+
+  <!-- ==================== 资源文件 ==================== -->
+  <ItemGroup>
+    <ResourceCompile Include="res\app.rc" />
+    <None Include="res\app.manifest" />
+    <None Include=".gitignore" />
+    <None Include="README.md" />
+  </ItemGroup>
+
+  <!-- ==================== 第三方头文件目录（后续加入库时在这里挂） ==================== -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)third;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
