@@ -118,6 +118,21 @@ public:
     // 开始原地改名（F2）
     void BeginRenameSelected();
 
+    // 是否正在原地改名（列表上有个编辑框挂着）
+    // 目录监视触发的自动刷新要避开这个时刻，否则编辑框会被冲掉
+    bool IsEditingLabel() const { return m_editingLabel; }
+
+    // ---- 拖放相关 ----
+
+    // 落点命中测试：如果这个客户区坐标压在某个"文件夹行"上，返回那个文件夹的完整路径。
+    // 返回空串表示没压在文件夹上（空白处、或者压在文件行上）。
+    // 拖进列表时用它判断"是要放进这个子文件夹，还是放进当前目录"。
+    std::wstring HitTestFolderPath(POINT ptClient) const;
+
+    // 把某个文件夹行画成"拖放高亮"（系统自带的 LVIS_DROPHILITED 效果）。
+    // 传空串表示清除所有高亮。路径没变时直接返回，不做任何事（拖动过程中会被高频调用）。
+    void SetDropHighlight(const std::wstring& folderPath);
+
     LRESULT HandleNotify(LPARAM lParam);
 
 private:
@@ -156,4 +171,10 @@ private:
 
     // 被剪切（Ctrl+X）的完整路径列表：这些行画成灰色/半透明
     std::vector<std::wstring> m_cutPaths;
+
+    // 当前被"拖放高亮"的文件夹（拖进来的东西会落进它），空串表示没有
+    std::wstring              m_dropHighlightPath;
+
+    // 是否正在原地改名（LVN_BEGINLABELEDIT 到 LVN_ENDLABELEDIT 之间）
+    bool                      m_editingLabel = false;
 };

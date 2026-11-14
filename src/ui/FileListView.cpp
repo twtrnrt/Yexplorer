@@ -218,6 +218,9 @@ void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
 
     m_result = std::move(result);
 
+    // 内容换了，之前记下的"拖放高亮"行号就对不上了，清掉（拖动中 DragOver 会重新设）
+    m_dropHighlightPath.clear();
+
     int itemCount = (m_result != nullptr) ? static_cast<int>(m_result->entries.size()) : 0;
 
     // LVSICF_NOINVALIDATEALL：不整屏重画，控件只重画需要变的区域
@@ -295,6 +298,9 @@ void FileListView::MergeResult(std::shared_ptr<shell::EnumerateResult> result)
     }
 
     m_result = std::move(result);
+
+    // 内容变了，行号可能挪位：之前的高亮作废（继续拖动时 DragOver 会重新设）
+    m_dropHighlightPath.clear();
 
     int newCount = static_cast<int>(m_result->entries.size());
     ListView_SetItemCountEx(m_hWnd, newCount, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
@@ -566,6 +572,89 @@ std::wstring FileListView::ItemPath(size_t index) const
         return std::wstring();
     }
     return m_result->entries[index].fullPath;
+}
+
+// ============================================================================
+// 拖放：落点命中测试 + 文件夹高亮
+//
+// 场景：从资源管理器拖一个文件到本程序列表里，鼠标如果正好压在某个文件夹
+// 那一行上，文件应该放进这个文件夹（和资源管理器一样），而不是放进当前目录。
+// 为了让用户看得出"要放进哪一个"，那一行会用系统自带的拖放高亮显示。
+// ============================================================================
+
+std::wstring FileListView::HitTestFolderPath(POINT ptClient) const
+{
+    if (m_hWnd == nullptr || m_result == nullptr)
+    {
+        return std::wstring();
+    }
+
+    if (ptClient.x < 0 || ptClient.y < 0)
+    {
+        return std::wstring();
+    }
+
+    LVHITTESTINFO hit = {};
+    hit.pt = ptClient;
+
+    // 返回命中的行号，-1 表示没压在行上（空白区、表头、下方留白）
+    int row = ListView_HitTest(m_hWnd, &hit);
+
+    if (row < 0 || static_cast<size_t>(row) >= m_result->entries.size())
+    {
+        return std::wstring();
+    }
+
+    // 整行都算命中（列表开了"整行选中"，压在其他列上也应该认这个文件夹）
+    const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(row)];
+
+    // 只有文件夹才能作为落点；压在文件行上按"没命中"处理，退回当前目录
+    if (!entry.isFolder)
+    {
+        return std::wstring();
+    }
+
+    return entry.fullPath;
+}
+
+void FileListView::SetDropHighlight(const std::wstring& folderPath)
+{
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    // 拖动过程中 DragOver 会一直调过来，路径没变就立刻返回，不做全表扫描
+    if (m_dropHighlightPath == folderPath)
+    {
+        return;
+    }
+
+    if (!m_dropHighlightPath.empty() && !folderPath.empty() &&
+        _wcsicmp(m_dropHighlightPath.c_str(), folderPath.c_str()) == 0)
+    {
+        return;
+    }
+
+    m_dropHighlightPath = folderPath;
+
+    // 先把所有行的拖放高亮清掉（-1 表示"全部行"）
+    ListView_SetItemState(m_hWnd, -1, 0, LVIS_DROPHILITED);
+
+    if (folderPath.empty() || m_result == nullptr)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < m_result->entries.size(); ++i)
+    {
+        if (_wcsicmp(m_result->entries[i].fullPath.c_str(), folderPath.c_str()) == 0)
+        {
+            // 只设 DROPHILITED，不动选中状态（选中状态是用户自己的东西）
+            ListView_SetItemState(m_hWnd, static_cast<int>(i), LVIS_DROPHILITED, LVIS_DROPHILITED);
+            break;
+        }
+    }
 }
 
 // ============================================================================
@@ -858,6 +947,9 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         info->item.mask |= LVIF_TEXT;
         info->item.pszText = const_cast<wchar_t*>(m_result->entries[static_cast<size_t>(index)].name.c_str());
 
+        // 记住"现在正在改名"：目录监视的自动刷新要绕开这一小段时间
+        m_editingLabel = true;
+
         return FALSE;      // 返回假 = 允许编辑
     }
 
@@ -867,6 +959,8 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
     case LVN_ENDLABELEDIT:
     {
         NMLVDISPINFOW* info = reinterpret_cast<NMLVDISPINFOW*>(lParam);
+
+        m_editingLabel = false;   // 改名结束了（不管有没有改成功）
 
         if (info->item.pszText == nullptr)
         {

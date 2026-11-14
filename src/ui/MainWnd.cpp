@@ -35,6 +35,14 @@ static const UINT WM_APP_ENUM_DONE = WM_APP + 1;
 // 自定义消息：后台文件操作完成（复制 / 删除 / 移动）
 static const UINT WM_APP_OPERATION_DONE = WM_APP + 2;
 
+// 自定义消息：当前目录的内容变了（别的程序删了/搬走了/新建了文件）
+static const UINT WM_APP_FOLDER_CHANGED = WM_APP + 3;
+
+// 目录变化后的延迟刷新：短时间内的连续变化合并成一次刷新
+// （批量复制一万个文件会连发几千条通知，不合并的话界面会刷成幻灯片）
+static const UINT_PTR kFolderChangeTimerId  = 1;
+static const UINT     kFolderChangeDelayMs  = 250;
+
 // 起始路径
 static const wchar_t* kInitialPath = L"C:\\";
 
@@ -615,10 +623,50 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------
+    // 当前目录的内容变了（资源管理器里删了/搬走了文件，或者别的程序写了新文件）
+    //
+    // 这里不立刻刷新，而是排一个 250ms 的定时器：
+    // 大批文件同时变化时通知会连成串，等它们安静下来再刷一次，只刷一遍。
+    // --------------------------------------------------------------
+    case WM_APP_FOLDER_CHANGED:
+        ::SetTimer(m_hWnd, kFolderChangeTimerId, kFolderChangeDelayMs, nullptr);
+        return 0;
+
+    // --------------------------------------------------------------
+    // 定时器：目录变化防抖之后真正刷新
+    // --------------------------------------------------------------
+    case WM_TIMER:
+        if (wParam == kFolderChangeTimerId)
+        {
+            ::KillTimer(m_hWnd, kFolderChangeTimerId);
+
+            // 有文件操作正在进行：先不刷（操作结束那一刻会自己刷一次）
+            if (m_operationRunning->load())
+            {
+                Logger::Info(L"目录有变化，但文件操作正在进行，等操作结束后再刷");
+                return 0;
+            }
+
+            // 正在原地改名：不能刷，否则编辑框会被冲掉
+            if (m_fileListView.IsEditingLabel())
+            {
+                Logger::Info(L"目录有变化，但正在改名，跳过本次自动刷新");
+                return 0;
+            }
+
+            Logger::Info(L"检测到当前目录有变化，自动刷新（走差异更新，不整表重绘）");
+            RefreshCurrentFolder();
+            return 0;
+        }
+        break;
+
+    // --------------------------------------------------------------
     // 销毁
     // --------------------------------------------------------------
     case WM_DESTROY:
         UnregisterDropTargets();
+        m_watcher.Stop();          // 停掉目录监视，否则线程会一直等在那里
+        ::KillTimer(m_hWnd, kFolderChangeTimerId);
         m_enumToken.Cancel();
         if (m_enumThread.joinable())
         {
@@ -1171,7 +1219,27 @@ void MainWindow::RegisterDropTargets()
             return std::wstring();
         }
 
+        // 先看是不是压在某一行文件夹上：是就把那个文件夹当落点，
+        // 这样"拖到列表里的某个文件夹图标上"就会放进那个文件夹（和资源管理器一致）
+        std::wstring folderPath = m_fileListView.HitTestFolderPath(ptClient);
+        if (!folderPath.empty())
+        {
+            return folderPath;
+        }
+
+        // 压在文件行上或者压空白处：放进当前目录
         return m_history.Current();
+    };
+
+    // 拖动过程中把"鼠标正压着的那个文件夹"高亮出来（系统自带的拖放高亮效果）
+    listCallbacks.DragOverFeedback = [this](POINT ptClient, bool acceptable)
+    {
+        std::wstring folderPath;
+        if (acceptable)
+        {
+            folderPath = m_fileListView.HitTestFolderPath(ptClient);
+        }
+        m_fileListView.SetDropHighlight(folderPath);
     };
 
     listCallbacks.PerformDrop = [this](const std::vector<std::wstring>& sources,
@@ -1451,6 +1519,10 @@ void MainWindow::OnEnumerationDone()
         Logger::Error(L"枚举失败，路径=" + result->path);
         return;
     }
+
+    // 枚举成功：开始盯着这个目录，别的程序改动它时自动刷新
+    // （已经在盯同一个目录的话内部会直接返回，不会反复拆建线程）
+    m_watcher.Start(result->path, m_hWnd, WM_APP_FOLDER_CHANGED);
 
     size_t logCount = (result->entries.size() < kMaxLogItems) ? result->entries.size() : kMaxLogItems;
     for (size_t i = 0; i < logCount; ++i)

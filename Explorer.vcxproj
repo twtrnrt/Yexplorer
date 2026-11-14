@@ -136,6 +136,7 @@
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\core\Format.cpp" />
+    <ClCompile Include="src\core\FolderWatcher.cpp" />
     <ClCompile Include="src\core\Logger.cpp" />
     <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\shell\ShellIcon.cpp" />
@@ -152,6 +153,7 @@
   <ItemGroup>
     <ClInclude Include="src\core\AsyncTask.h" />
     <ClInclude Include="src\core\Format.h" />
+    <ClInclude Include="src\core\FolderWatcher.h" />
     <ClInclude Include="src\core\Logger.h" />
     <ClInclude Include="src\core\NavigationHistory.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />

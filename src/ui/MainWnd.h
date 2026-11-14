@@ -32,6 +32,7 @@
 #include <functional>
 
 #include "core/AsyncTask.h"
+#include "core/FolderWatcher.h"
 #include "core/NavigationHistory.h"
 #include "shell/ShellFolder.h"
 #include "shell/ShellIcon.h"
@@ -188,6 +189,9 @@ private:
     core::CancellationToken                      m_enumToken;
     std::mutex                                   m_resultMutex;
     std::shared_ptr<shell::EnumerateResult>      m_result;
+
+    // ---- 当前目录的变化监视（别的程序改了文件时自动刷新，不用按 F5）----
+    core::FolderWatcher                          m_watcher;
 
     // ---- 后台文件操作状态（复制大文件时界面不卡住）----
     std::thread                                  m_operationThread;

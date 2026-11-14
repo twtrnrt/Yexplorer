@@ -692,6 +692,7 @@ public:
         m_sourcePreferredEffect = ExtractPreferredEffect(data);
 
         UpdateEffect(keyState, pt, effect);
+        NotifyFeedback(pt);
 
         Logger::Info(L"拖入进入：源 " + std::to_wstring(m_sourcePaths.size()) +
                      L" 项，落点目录=" + ResolveDirectory(pt) +
@@ -702,12 +703,14 @@ public:
     HRESULT STDMETHODCALLTYPE DragOver(DWORD keyState, POINTL pt, DWORD* effect) override
     {
         UpdateEffect(keyState, pt, effect);
+        NotifyFeedback(pt);
         return S_OK;
     }
 
     HRESULT STDMETHODCALLTYPE DragLeave() override
     {
         m_sourcePaths.clear();
+        NotifyFeedback(POINTL{ -1, -1 }, false);   // 鼠标离开了：让宿主把高亮清掉
         return S_OK;
     }
 
@@ -744,11 +747,33 @@ public:
             m_callbacks.PerformDrop(sources, targetDirectory, chosen, createShortcut);
         }
 
+        NotifyFeedback(POINTL{ -1, -1 }, false);   // 放完了：清掉文件夹高亮
         m_sourcePaths.clear();
         return S_OK;
     }
 
 private:
+    // 把拖动过程中的"当前落点"告诉宿主（文件列表用它高亮鼠标正压着的那个文件夹）
+    //   pt              ：屏幕坐标（DragLeave 时无效，宿主只看 acceptable）
+    //   acceptable      ：这个位置能不能放
+    void NotifyFeedback(POINTL pt, bool acceptable = true)
+    {
+        if (!m_callbacks.DragOverFeedback)
+        {
+            return;
+        }
+
+        POINT clientPoint = { pt.x, pt.y };
+
+        if (acceptable)
+        {
+            ::ScreenToClient(m_hwnd, &clientPoint);
+            acceptable = !ResolveDirectory(pt).empty();
+        }
+
+        m_callbacks.DragOverFeedback(clientPoint, acceptable);
+    }
+
     // 从数据对象里取出文件路径列表
     std::vector<std::wstring> ExtractPaths(IDataObject* data)
     {

@@ -67,6 +67,14 @@ struct DropTargetCallbacks
                        const std::wstring&              targetDirectory,
                        DWORD                            effect,
                        bool                             createShortcut)> PerformDrop;
+
+    // 拖动过程中的反馈（可选）
+    //   ptClient   ：鼠标的客户区坐标
+    //   acceptable ：这个位置能不能放
+    //
+    // 文件列表用它把"鼠标正压在哪个文件夹上"高亮出来（和资源管理器一样），
+    // 鼠标离开列表时也会回调一次（acceptable = false），用来清掉高亮。
+    std::function<void(POINT ptClient, bool acceptable)> DragOverFeedback;
 };
 
 // 注册成放置目标；成功返回 true
