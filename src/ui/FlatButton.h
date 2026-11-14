@@ -67,4 +67,6 @@ private:
     bool m_pressed       = false;   // 左键按下中
     bool m_enabled       = true;    // 是否可用
     bool m_trackingLeave = false;   // 是否已注册"鼠标离开"通知
+
+    HFONT m_hArrowFont   = nullptr; // 箭头图标字体（Segoe Fluent Icons / MDL2）
 };

@@ -32,6 +32,7 @@
 #include "core/NavigationHistory.h"
 #include "shell/ShellFolder.h"
 #include "shell/ShellIcon.h"
+#include "ui/AddressBar.h"
 #include "ui/FileListView.h"
 #include "ui/FlatButton.h"
 #include "ui/NavigationPane.h"
@@ -61,19 +62,11 @@ private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
-    // 地址栏子类化过程：捕获回车键触发跳转
-    static LRESULT CALLBACK AddressEditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
-                                                    LPARAM lParam, UINT_PTR idSubclass,
-                                                    DWORD_PTR refData);
-
     // 创建工具栏按钮、地址栏、状态栏、字体
     void CreateChildControls();
 
     // 用户主动导航（会记入历史）
     void NavigateToPath(const std::wstring& path);
-
-    // 地址栏回车
-    void NavigateFromAddressBar();
 
     // 后退 / 前进 / 向上
     void GoBack();
@@ -109,8 +102,8 @@ private:
     FlatButton   m_backButton;         // 后退（自绘扁平按钮）
     FlatButton   m_forwardButton;      // 前进
     FlatButton   m_upButton;           // 向上
+    AddressBar   m_addressBar;         // 地址栏（分段可点击，比如 C: > Windows）
 
-    HWND         m_hAddressEdit   = nullptr;
     HWND         m_hStatusBar     = nullptr;
     HFONT        m_hUiFont        = nullptr;   // 普通控件字体
 

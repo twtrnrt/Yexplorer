@@ -38,18 +38,6 @@ static const size_t kMaxLogItems = 100;
 // 内部辅助函数
 // ============================================================================
 
-// 去掉首尾空白
-static std::wstring Trim(const std::wstring& text)
-{
-    size_t begin = text.find_first_not_of(L" \t\r\n");
-    if (begin == std::wstring::npos)
-    {
-        return L"";
-    }
-    size_t end = text.find_last_not_of(L" \t\r\n");
-    return text.substr(begin, end - begin + 1);
-}
-
 // 排序：文件夹在前，同类按名称升序
 static bool CompareEntries(const shell::ShellEntry& left, const shell::ShellEntry& right)
 {
@@ -208,24 +196,24 @@ void MainWindow::CreateChildControls()
     m_forwardButton.Create(m_hWnd, kControlIdForward, FlatButton::ArrowKind::Forward, m_hInstance);
     m_upButton.Create(m_hWnd, kControlIdUp, FlatButton::ArrowKind::Up, m_hInstance);
 
-    // ---------------- 4. 地址栏 ----------------
-    // 用 STATICEDGE（单像素细边）而不是 CLIENTEDGE（两像素立体边），更接近现代扁平观感
-    m_hAddressEdit = ::CreateWindowExW(
-        WS_EX_STATICEDGE,
-        L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
-        0, 0, 0, 0, m_hWnd,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdAddress)),
-        m_hInstance, nullptr);
-
-    if (m_hUiFont != nullptr)
+    // ---------------- 4. 地址栏（分段可点击） ----------------
+    if (m_addressBar.Create(m_hWnd, kControlIdAddress, m_hInstance))
     {
-        ::SendMessageW(m_hAddressEdit, WM_SETFONT, reinterpret_cast<WPARAM>(m_hUiFont), TRUE);
-    }
+        if (m_hUiFont != nullptr)
+        {
+            m_addressBar.SetFont(m_hUiFont);
+        }
 
-    // 子类化地址栏，捕获回车
-    ::SetWindowSubclass(m_hAddressEdit, &MainWindow::AddressEditSubclassProc, 1,
-                        reinterpret_cast<DWORD_PTR>(this));
+        // 点了某一段（比如 "C:" 或 "Windows"）就跳到那个目录
+        m_addressBar.SetNavigateCallback([this](const std::wstring& path)
+        {
+            NavigateToPath(path);
+        });
+    }
+    else
+    {
+        Logger::Warn(L"地址栏控件创建失败");
+    }
 
     // ---------------- 5. 状态栏 ----------------
     m_hStatusBar = ::CreateWindowExW(
@@ -271,35 +259,6 @@ LRESULT CALLBACK MainWindow::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         return self->HandleMessage(msg, wParam, lParam);
     }
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-LRESULT CALLBACK MainWindow::AddressEditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
-                                                      LPARAM lParam, UINT_PTR idSubclass,
-                                                      DWORD_PTR refData)
-{
-    MainWindow* self = reinterpret_cast<MainWindow*>(refData);
-
-    if (msg == WM_KEYDOWN && wParam == VK_RETURN)
-    {
-        if (self != nullptr)
-        {
-            self->NavigateFromAddressBar();
-        }
-        return 0;
-    }
-
-    // 屏蔽回车字符消息，避免系统"叮"一声
-    if (msg == WM_CHAR && wParam == L'\r')
-    {
-        return 0;
-    }
-
-    if (msg == WM_NCDESTROY)
-    {
-        ::RemoveWindowSubclass(hWnd, &MainWindow::AddressEditSubclassProc, idSubclass);
-    }
-
-    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
@@ -429,28 +388,6 @@ void MainWindow::NavigateToPath(const std::wstring& path)
     StartEnumeration(path);
 }
 
-void MainWindow::NavigateFromAddressBar()
-{
-    wchar_t buffer[2048] = {};
-    ::GetWindowTextW(m_hAddressEdit, buffer, ARRAYSIZE(buffer));
-
-    std::wstring path = Trim(std::wstring(buffer));
-    if (path.empty())
-    {
-        // 空路径：恢复显示当前路径
-        ::SetWindowTextW(m_hAddressEdit, m_history.Current().c_str());
-        return;
-    }
-
-    // 用户只输入了 "C:" 这种盘符，补一个反斜杠
-    if (path.size() == 2 && path[1] == L':')
-    {
-        path += L'\\';
-    }
-
-    NavigateToPath(path);
-}
-
 void MainWindow::GoBack()
 {
     if (!m_history.CanGoBack())
@@ -503,7 +440,7 @@ void MainWindow::StartEnumeration(const std::wstring& path)
     m_fileListView.SetResult(nullptr);
 
     // 地址栏、标题、状态栏立即反映新路径
-    ::SetWindowTextW(m_hAddressEdit, path.c_str());
+    m_addressBar.SetPath(path);
     ::SetWindowTextW(m_hWnd, (std::wstring(kWindowTitleBase) + L" - " + path + L"（加载中…）").c_str());
     UpdateStatusBar();
     UpdateNavigationState();
@@ -674,7 +611,7 @@ void MainWindow::LayoutChildren()
     {
         addressWidth = Scale(150);
     }
-    ::MoveWindow(m_hAddressEdit, cursorX, addressY, addressWidth, addressHeight, TRUE);
+    m_addressBar.Resize(cursorX, addressY, addressWidth, addressHeight);
 
     // ---- 左侧导航栏 + 文件列表 ----
     int bodyHeight = clientHeight - navHeight - statusHeight;

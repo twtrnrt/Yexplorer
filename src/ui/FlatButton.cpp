@@ -19,13 +19,25 @@ const COLORREF kPressedColor = RGB(219, 219, 219);
 // 圆角半径
 const int kCornerRadius = 6;
 
+// 图标字体里的箭头字符（和 Windows 自带的资源管理器用的是同一套字形）
+const wchar_t* kGlyphBack    = L"\xE72B";   // ←
+const wchar_t* kGlyphForward = L"\xE72A";   // →
+const wchar_t* kGlyphUp      = L"\xE74A";   // ↑
+
 } // namespace
 
 // ============================================================================
 // 构造 / 析构
 // ============================================================================
 
-FlatButton::~FlatButton() = default;
+FlatButton::~FlatButton()
+{
+    if (m_hArrowFont != nullptr)
+    {
+        ::DeleteObject(m_hArrowFont);
+        m_hArrowFont = nullptr;
+    }
+}
 
 // ============================================================================
 // 窗口类注册
@@ -87,7 +99,52 @@ bool FlatButton::Create(HWND parent, UINT id, ArrowKind kind, HINSTANCE hInstanc
         hInstance,
         this);
 
-    return (m_hWnd != nullptr);
+    if (m_hWnd == nullptr)
+    {
+        return false;
+    }
+
+    // 箭头字体：Win11 先用 Segoe Fluent Icons，没有就退回 Segoe MDL2 Assets
+    {
+        int dpi        = ::GetDpiForWindow(m_hWnd);
+        if (dpi <= 0)
+        {
+            dpi = 96;
+        }
+        int fontHeight = -::MulDiv(16, dpi, 96);
+
+        m_hArrowFont = ::CreateFontW(
+            fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+            L"Segoe Fluent Icons");
+
+        // 验证是否真的用上了这套字体（字体不存在时系统会悄悄换成别的）
+        if (m_hArrowFont != nullptr)
+        {
+            HDC dc = ::GetDC(m_hWnd);
+            HGDIOBJ oldFont = ::SelectObject(dc, m_hArrowFont);
+
+            wchar_t actualFace[LF_FACESIZE] = {};
+            ::GetTextFaceW(dc, LF_FACESIZE, actualFace);
+
+            ::SelectObject(dc, oldFont);
+            ::ReleaseDC(m_hWnd, dc);
+
+            if (::wcscmp(actualFace, L"Segoe Fluent Icons") != 0)
+            {
+                ::DeleteObject(m_hArrowFont);
+
+                m_hArrowFont = ::CreateFontW(
+                    fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                    L"Segoe MDL2 Assets");
+            }
+        }
+    }
+
+    return true;
 }
 
 void FlatButton::Resize(int x, int y, int width, int height)
@@ -308,74 +365,26 @@ void FlatButton::Draw(HDC hdc)
 
 void FlatButton::DrawArrow(HDC hdc, const RECT& clientRect)
 {
-    int centerX = (clientRect.left + clientRect.right) / 2;
-    int centerY = (clientRect.top  + clientRect.bottom) / 2;
-
-    // 箭头尺寸（按钮 34x32 时这个比例最接近资源管理器）
-    int armLength = 6;    // 箭头两条斜边的长度
-    int tailHalf  = 8;    // 主干半长
+    // 箭头用图标字体画（和系统资源管理器是同一套字形，观感一致）
+    const wchar_t* glyph = kGlyphBack;
+    switch (m_kind)
+    {
+    case ArrowKind::Back:    glyph = kGlyphBack;    break;
+    case ArrowKind::Forward: glyph = kGlyphForward; break;
+    case ArrowKind::Up:      glyph = kGlyphUp;      break;
+    }
 
     COLORREF arrowColor = m_enabled
                           ? ::GetSysColor(COLOR_WINDOWTEXT)
                           : ::GetSysColor(COLOR_GRAYTEXT);
 
-    HPEN arrowPen = ::CreatePen(PS_SOLID, 1, arrowColor);
-    HGDIOBJ oldPen = ::SelectObject(hdc, arrowPen);
+    ::SetBkMode(hdc, TRANSPARENT);
+    ::SetTextColor(hdc, arrowColor);
 
-    switch (m_kind)
-    {
-    // ---------------- ← 后退 ----------------
-    case ArrowKind::Back:
-    {
-        int leftTipX = centerX - tailHalf;
+    HGDIOBJ oldFont = ::SelectObject(hdc, m_hArrowFont);
 
-        // 主干：从箭头尖到右端
-        ::MoveToEx(hdc, leftTipX, centerY, nullptr);
-        ::LineTo(hdc, centerX + tailHalf, centerY);
+    RECT textRect = clientRect;
+    ::DrawTextW(hdc, glyph, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // 上斜线
-        ::MoveToEx(hdc, leftTipX, centerY, nullptr);
-        ::LineTo(hdc, leftTipX + armLength, centerY - armLength);
-
-        // 下斜线
-        ::MoveToEx(hdc, leftTipX, centerY, nullptr);
-        ::LineTo(hdc, leftTipX + armLength, centerY + armLength);
-        break;
-    }
-
-    // ---------------- → 前进 ----------------
-    case ArrowKind::Forward:
-    {
-        int rightTipX = centerX + tailHalf;
-
-        ::MoveToEx(hdc, rightTipX, centerY, nullptr);
-        ::LineTo(hdc, centerX - tailHalf, centerY);
-
-        ::MoveToEx(hdc, rightTipX, centerY, nullptr);
-        ::LineTo(hdc, rightTipX - armLength, centerY - armLength);
-
-        ::MoveToEx(hdc, rightTipX, centerY, nullptr);
-        ::LineTo(hdc, rightTipX - armLength, centerY + armLength);
-        break;
-    }
-
-    // ---------------- ↑ 向上 ----------------
-    case ArrowKind::Up:
-    {
-        int topTipY = centerY - tailHalf;
-
-        ::MoveToEx(hdc, centerX, topTipY, nullptr);
-        ::LineTo(hdc, centerX, centerY + tailHalf);
-
-        ::MoveToEx(hdc, centerX, topTipY, nullptr);
-        ::LineTo(hdc, centerX - armLength, topTipY + armLength);
-
-        ::MoveToEx(hdc, centerX, topTipY, nullptr);
-        ::LineTo(hdc, centerX + armLength, topTipY + armLength);
-        break;
-    }
-    }
-
-    ::SelectObject(hdc, oldPen);
-    ::DeleteObject(arrowPen);
+    ::SelectObject(hdc, oldFont);
 }
