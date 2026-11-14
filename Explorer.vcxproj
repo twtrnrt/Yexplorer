@@ -135,15 +135,19 @@
   <!-- ==================== 源文件列表 ==================== -->
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\core\Format.cpp" />
     <ClCompile Include="src\core\Logger.cpp" />
     <ClCompile Include="src\shell\ShellFolder.cpp" />
+    <ClCompile Include="src\ui\FileListView.cpp" />
     <ClCompile Include="src\ui\MainWnd.cpp" />
   </ItemGroup>
 
   <ItemGroup>
     <ClInclude Include="src\core\AsyncTask.h" />
+    <ClInclude Include="src\core\Format.h" />
     <ClInclude Include="src\core\Logger.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />
+    <ClInclude Include="src\ui\FileListView.h" />
     <ClInclude Include="src\ui\MainWnd.h" />
   </ItemGroup>
 
