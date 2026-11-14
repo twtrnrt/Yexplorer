@@ -200,12 +200,25 @@ void MainWindow::CreateChildControls()
     if (!m_fileListView.Create(m_hWnd, m_hInstance))
     {
         Logger::Error(L"文件列表控件创建失败");
-        return;
     }
     m_fileListView.SetActivateCallback([this](size_t index)
     {
         OnItemActivated(index);
     });
+
+    // ---------------- 2b. 左侧导航栏 ----------------
+    if (!m_navigationPane.Create(m_hWnd, m_hInstance, &m_iconCache))
+    {
+        Logger::Warn(L"左侧导航栏创建失败，界面仍可用");
+    }
+    else
+    {
+        // 点导航栏里的「桌面」「下载」「C:」直接跳过去
+        m_navigationPane.SetNavigateCallback([this](const std::wstring& path)
+        {
+            NavigateToPath(path);
+        });
+    }
 
     // ---------------- 3. 三个导航按钮 ----------------
     DWORD buttonStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON;
@@ -334,17 +347,18 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------
     case WM_CREATE:
     {
-        CreateChildControls();
-
-        // 图标缓存：一次初始化，全局复用
+        // 图标缓存必须先初始化：左侧导航栏建树时就要用它取图标
         if (m_iconCache.Initialize())
         {
-            m_fileListView.SetIconCache(&m_iconCache);
+            Logger::Info(L"系统图标列表初始化成功");
         }
         else
         {
-            Logger::Warn(L"系统图标列表初始化失败，列表将不显示图标");
+            Logger::Warn(L"系统图标列表初始化失败，界面将不显示图标");
         }
+
+        CreateChildControls();
+        m_fileListView.SetIconCache(&m_iconCache);
 
         LayoutChildren();
 
@@ -394,9 +408,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_NOTIFY:
     {
         NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
-        if (header != nullptr && header->hwndFrom == m_fileListView.Handle())
+        if (header == nullptr)
+        {
+            break;
+        }
+        if (header->hwndFrom == m_fileListView.Handle())
         {
             return m_fileListView.HandleNotify(lParam);
+        }
+        if (header->hwndFrom == m_navigationPane.Handle())
+        {
+            return m_navigationPane.HandleNotify(lParam);
         }
         break;
     }
@@ -690,13 +712,33 @@ void MainWindow::LayoutChildren()
     }
     ::MoveWindow(m_hAddressEdit, cursorX, addressY, addressWidth, addressHeight, TRUE);
 
-    // ---- 文件列表 ----
-    int listHeight = clientHeight - navHeight - statusHeight;
-    if (listHeight < 0)
+    // ---- 左侧导航栏 + 文件列表 ----
+    int bodyHeight = clientHeight - navHeight - statusHeight;
+    if (bodyHeight < 0)
     {
-        listHeight = 0;
+        bodyHeight = 0;
     }
-    m_fileListView.Resize(0, navHeight, clientWidth, listHeight);
+
+    int paneWidth = Scale(240);
+
+    // 窗口太窄时收起左栏，保证列表还有足够宽度可看
+    bool showPane = (m_navigationPane.Handle() != nullptr)
+                    && (clientWidth - paneWidth) >= Scale(360);
+
+    if (showPane)
+    {
+        ::ShowWindow(m_navigationPane.Handle(), SW_SHOW);
+        m_navigationPane.Resize(0, navHeight, paneWidth, bodyHeight);
+        m_fileListView.Resize(paneWidth, navHeight, clientWidth - paneWidth, bodyHeight);
+    }
+    else
+    {
+        if (m_navigationPane.Handle() != nullptr)
+        {
+            ::ShowWindow(m_navigationPane.Handle(), SW_HIDE);
+        }
+        m_fileListView.Resize(0, navHeight, clientWidth, bodyHeight);
+    }
 }
 
 void MainWindow::UpdateNavigationState()

@@ -143,4 +143,26 @@ int IconCache::GetIconIndex(const std::wstring& name, bool isFolder)
     return iconIndex;
 }
 
+int IconCache::GetIconIndexByPath(const std::wstring& path)
+{
+    if (!m_initialized || path.empty())
+    {
+        return 0;
+    }
+
+    SHFILEINFOW fileInfo = {};
+    DWORD_PTR result = ::SHGetFileInfoW(
+        path.c_str(),
+        FILE_ATTRIBUTE_DIRECTORY,
+        &fileInfo,
+        sizeof(fileInfo),
+        SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+
+    if (result == 0)
+    {
+        return m_folderIconIndex;
+    }
+    return fileInfo.iIcon;
+}
+
 } // namespace shell

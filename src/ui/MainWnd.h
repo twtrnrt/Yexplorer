@@ -33,6 +33,7 @@
 #include "shell/ShellFolder.h"
 #include "shell/ShellIcon.h"
 #include "ui/FileListView.h"
+#include "ui/NavigationPane.h"
 
 // 子控件 ID
 static const int kControlIdBack    = 1001;
@@ -103,6 +104,7 @@ private:
 
     // ---- 子控件 ----
     FileListView m_fileListView;
+    NavigationPane m_navigationPane;   // 左侧导航栏（快速访问 / 各硬盘）
     HWND         m_hBackButton    = nullptr;
     HWND         m_hForwardButton = nullptr;
     HWND         m_hUpButton      = nullptr;

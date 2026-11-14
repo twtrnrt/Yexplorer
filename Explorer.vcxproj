@@ -141,6 +141,7 @@
     <ClCompile Include="src\shell\ShellIcon.cpp" />
     <ClCompile Include="src\ui\FileListView.cpp" />
     <ClCompile Include="src\ui\MainWnd.cpp" />
+    <ClCompile Include="src\ui\NavigationPane.cpp" />
   </ItemGroup>
 
   <ItemGroup>
@@ -152,6 +153,7 @@
     <ClInclude Include="src\shell\ShellIcon.h" />
     <ClInclude Include="src\ui\FileListView.h" />
     <ClInclude Include="src\ui\MainWnd.h" />
+    <ClInclude Include="src\ui\NavigationPane.h" />
   </ItemGroup>
 
   <!-- ==================== 资源文件 ==================== -->
