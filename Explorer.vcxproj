@@ -139,6 +139,7 @@
     <ClCompile Include="src\core\Logger.cpp" />
     <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\shell\ShellIcon.cpp" />
+    <ClCompile Include="src\shell\ShellClipboard.cpp" />
     <ClCompile Include="src\shell\ShellOperations.cpp" />
     <ClCompile Include="src\ui\AddressBar.cpp" />
     <ClCompile Include="src\ui\FileListView.cpp" />
@@ -154,6 +155,7 @@
     <ClInclude Include="src\core\NavigationHistory.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />
     <ClInclude Include="src\shell\ShellIcon.h" />
+    <ClInclude Include="src\shell\ShellClipboard.h" />
     <ClInclude Include="src\shell\ShellOperations.h" />
     <ClInclude Include="src\ui\AddressBar.h" />
     <ClInclude Include="src\ui\FileListView.h" />

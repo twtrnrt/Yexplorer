@@ -11,6 +11,7 @@
 #include "MainWnd.h"
 #include "core/Format.h"
 #include "core/Logger.h"
+#include "shell/ShellClipboard.h"
 #include "shell/ShellOperations.h"
 
 #include <shellapi.h>   // ShellExecuteW
@@ -536,6 +537,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 m_clipboardPaths.clear();
                 m_clipboardIsCut = false;
+                shellclip::Clear(m_hWnd);   // 和资源管理器一样：剪切粘贴完成后剪贴板就空了
             }
 
             Logger::Info(L"文件操作完成");
@@ -726,7 +728,14 @@ void MainWindow::DoCopy()
     m_clipboardPaths = selected;
     m_clipboardIsCut = false;
 
-    Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 项到剪贴板");
+    // 写进系统剪贴板：这样在资源管理器、桌面里也能直接粘贴
+    if (!shellclip::WriteFiles(selected, false, m_hWnd))
+    {
+        Logger::Warn(L"写入系统剪贴板失败（可能被别的程序占用）");
+        return;
+    }
+
+    Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 项（已写入系统剪贴板）");
 }
 
 void MainWindow::DoCut()
@@ -740,26 +749,36 @@ void MainWindow::DoCut()
     m_clipboardPaths = selected;
     m_clipboardIsCut = true;
 
-    Logger::Info(L"已剪切 " + std::to_wstring(selected.size()) + L" 项到剪贴板");
+    // 剪切要多写一个"首选效果 = 移动"，接收方才知道粘完要删源
+    if (!shellclip::WriteFiles(selected, true, m_hWnd))
+    {
+        Logger::Warn(L"写入系统剪贴板失败（可能被别的程序占用）");
+        return;
+    }
+
+    Logger::Info(L"已剪切 " + std::to_wstring(selected.size()) + L" 项（已写入系统剪贴板）");
 }
 
 void MainWindow::DoPaste()
 {
-    if (m_clipboardPaths.empty())
-    {
-        return;
-    }
-
     std::wstring targetDirectory = m_history.Current();
     if (targetDirectory.empty())
     {
         return;
     }
 
-    // 把路径复制一份交给后台线程：线程只读自己的副本，不和界面共享可变状态
-    std::vector<std::wstring> paths = m_clipboardPaths;
-    bool                      isCut = m_clipboardIsCut;
-    HWND                      owner = m_hWnd;
+    // 每次都从系统剪贴板读，而不是用程序自己记的：
+    // 这样从资源管理器、桌面复制过来的东西也能粘进来
+    std::vector<std::wstring> paths;
+    bool                      isCut = false;
+
+    if (!shellclip::ReadFiles(paths, isCut, m_hWnd))
+    {
+        Logger::Warn(L"剪贴板里没有可粘贴的文件");
+        return;
+    }
+
+    HWND owner = m_hWnd;
 
     // 剪切的话，等操作真的成功了再清空剪贴板（失败还能重试）
     m_clearClipboardWhenDone = isCut;
@@ -767,7 +786,8 @@ void MainWindow::DoPaste()
     m_lastOperation  = isCut ? FileOperationKind::Move : FileOperationKind::Copy;
     m_operationPaths = paths;
 
-    Logger::Info(L"开始粘贴 " + std::to_wstring(paths.size()) + L" 项到 " + targetDirectory);
+    Logger::Info(L"开始粘贴 " + std::to_wstring(paths.size()) + L" 项到 " + targetDirectory +
+                 (isCut ? L"（移动）" : L"（复制）"));
 
     RunFileOperationAsync([paths, targetDirectory, owner, isCut]() -> HRESULT
     {
@@ -864,7 +884,7 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 {
     std::vector<std::wstring> selected     = m_fileListView.GetSelectedPaths();
     bool                      hasSelection = !selected.empty();
-    bool                      hasClipboard = !m_clipboardPaths.empty();
+    bool                      hasClipboard = shellclip::HasFiles();   // 系统剪贴板里有没有文件
 
     HMENU menu = ::CreatePopupMenu();
     if (menu == nullptr)
