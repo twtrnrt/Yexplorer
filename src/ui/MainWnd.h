@@ -60,6 +60,9 @@ static const int kCommandGoUp      = 3108;   // Backspace
 static const int kCommandOpen       = 3201;  // 打开
 static const int kCommandProperties = 3202;  // 属性
 
+// 重命名快捷键
+static const int kCommandRename     = 3109;  // F2
+
 class MainWindow
 {
 public:
@@ -112,6 +115,19 @@ private:
 
     // ---- 打开选中项 ----
     void OpenSelection();
+
+    // ---- 排序（点表头）----
+    void OnColumnClick(int column);
+    void SortEntries();          // 按当前排序状态排一遍数据
+
+    // ---- 重命名 ----
+    void DoRename(size_t index, const std::wstring& newName);
+
+    // 取当前结果（加锁拿一份引用，避免和枚举线程抢）
+    std::shared_ptr<shell::EnumerateResult> CurrentResult();
+
+    // 更新状态栏和标题里的项目数（局部增删后要刷新这两个地方）
+    void UpdateTitle();
 
     // 后台枚举完成
     void OnEnumerationDone();
@@ -167,6 +183,15 @@ private:
     // ---- 后台文件操作状态（复制大文件时界面不卡住）----
     std::thread                                  m_operationThread;
     std::shared_ptr<std::atomic<bool>>           m_operationRunning;
+
+    // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
+    enum class FileOperationKind { None, Copy, Move, Delete };
+    FileOperationKind                            m_lastOperation = FileOperationKind::None;
+    std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
+
+    // ---- 排序状态 ----
+    int                                          m_sortColumn    = 0;      // 0 名称 1 日期 2 类型 3 大小
+    bool                                         m_sortAscending = true;
     bool                                         m_resultReady = false;
     double                                       m_elapsedMs   = 0.0;
     std::wstring                                 m_enumPath;

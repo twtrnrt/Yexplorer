@@ -431,4 +431,43 @@ HRESULT CreateNewFolder(const std::wstring& directory, std::wstring& newFolderPa
     return E_FAIL;
 }
 
+// ============================================================================
+// 重命名
+// ============================================================================
+HRESULT RenameItem(const std::wstring& oldPath, const std::wstring& newName, HWND owner)
+{
+    if (oldPath.empty() || newName.empty())
+    {
+        return E_INVALIDARG;
+    }
+
+    // 文件名里不能有这些字符，自己先挡掉，免得系统再弹一个看不懂的报错
+    if (newName.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos)
+    {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    }
+
+    wil::com_ptr<IShellItem> item;
+    HRESULT hr = ::SHCreateItemFromParsingName(oldPath.c_str(), nullptr, IID_PPV_ARGS(&item));
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    wil::com_ptr<IFileOperation> operation;
+    hr = CreateFileOperation(operation, FOF_ALLOWUNDO, owner);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    hr = operation->RenameItem(item.get(), newName.c_str(), nullptr);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    return operation->PerformOperations();
+}
+
 } // namespace shellops

@@ -45,4 +45,9 @@ HRESULT DeleteItems(const std::vector<std::wstring>& paths, HWND owner);
 // 成功时 newFolderPath 返回新建出来的完整路径
 HRESULT CreateNewFolder(const std::wstring& directory, std::wstring& newFolderPath);
 
+// 重命名一项（F2）
+// oldPath：现在的完整路径；newName：新名字（只给名字，不带路径）
+// 名字里含非法字符会直接返回失败，不弹系统框
+HRESULT RenameItem(const std::wstring& oldPath, const std::wstring& newName, HWND owner);
+
 } // namespace shellops

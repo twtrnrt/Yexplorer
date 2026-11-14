@@ -42,14 +42,65 @@ static const size_t kMaxLogItems = 100;
 // 内部辅助函数
 // ============================================================================
 
-// 排序：文件夹在前，同类按名称升序
-static bool CompareEntries(const shell::ShellEntry& left, const shell::ShellEntry& right)
+// FILETIME 转成 64 位整数，方便比大小
+static uint64_t FileTimeValue(const FILETIME& time)
+{
+    return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | static_cast<uint64_t>(time.dwLowDateTime);
+}
+
+// 排序规则
+//   文件夹永远排前面（和资源管理器一致，不受点哪一列影响）
+//   column：0 名称 / 1 修改日期 / 2 类型 / 3 大小
+//   ascending：true 从小到大
+static bool CompareEntries(const shell::ShellEntry& left,
+                           const shell::ShellEntry& right,
+                           int  column,
+                           bool ascending)
 {
     if (left.isFolder != right.isFolder)
     {
         return left.isFolder;
     }
-    return _wcsicmp(left.name.c_str(), right.name.c_str()) < 0;
+
+    int result = 0;
+
+    switch (column)
+    {
+    case 1:   // 修改日期
+    {
+        uint64_t a = FileTimeValue(left.modified);
+        uint64_t b = FileTimeValue(right.modified);
+        if (a != b)
+        {
+            result = (a < b) ? -1 : 1;
+        }
+        break;
+    }
+
+    case 2:   // 类型
+        result = _wcsicmp(format::TypeText(left.name, left.isFolder).c_str(),
+                          format::TypeText(right.name, right.isFolder).c_str());
+        break;
+
+    case 3:   // 大小
+        if (left.size != right.size)
+        {
+            result = (left.size < right.size) ? -1 : 1;
+        }
+        break;
+
+    default:  // 名称
+        result = _wcsicmp(left.name.c_str(), right.name.c_str());
+        break;
+    }
+
+    // 比出来一样大时再按名字排，保证每次排出来顺序都稳定
+    if (result == 0)
+    {
+        result = _wcsicmp(left.name.c_str(), right.name.c_str());
+    }
+
+    return ascending ? (result < 0) : (result > 0);
 }
 
 // ============================================================================
@@ -59,6 +110,11 @@ static bool CompareEntries(const shell::ShellEntry& left, const shell::ShellEntr
 MainWindow::MainWindow()
     : m_operationRunning(std::make_shared<std::atomic<bool>>(false))
 {
+    // 把排序规则交给列表控件：新建文件夹后要按这个规则插到正确位置
+    m_fileListView.SetComparator([this](const shell::ShellEntry& left, const shell::ShellEntry& right)
+    {
+        return CompareEntries(left, right, m_sortColumn, m_sortAscending);
+    });
 }
 
 MainWindow::~MainWindow()
@@ -219,6 +275,14 @@ void MainWindow::CreateChildControls()
     {
         ShowContextMenu(screenPoint);
     });
+    m_fileListView.SetColumnClickCallback([this](int column)
+    {
+        OnColumnClick(column);
+    });
+    m_fileListView.SetRenameCallback([this](size_t index, const std::wstring& newName)
+    {
+        DoRename(index, newName);
+    });
 
     // ---------------- 2b. 左侧导航栏 ----------------
     if (!m_navigationPane.Create(m_hWnd, m_hInstance, &m_iconCache))
@@ -285,6 +349,7 @@ void MainWindow::CreateChildControls()
         { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'N', kCommandNewFolder },
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'A',       kCommandSelectAll },
         { static_cast<BYTE>(FVIRTKEY),            VK_BACK,   kCommandGoUp },
+        { static_cast<BYTE>(FVIRTKEY),            VK_F2,     kCommandRename },
     };
 
     m_hAccelerator = ::CreateAcceleratorTableW(accelerators, ARRAYSIZE(accelerators));
@@ -400,6 +465,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandProperties:
             ShowPropertiesForSelection();
             return 0;
+        case kCommandRename:
+            m_fileListView.BeginRenameSelected();
+            return 0;
         default:
             break;
         }
@@ -480,9 +548,29 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         m_clearClipboardWhenDone = false;
 
-        // 刷新「当前看着的目录」，不是操作的目标目录——
-        // 用户可能在复制期间已经翻到别的地方了
-        RefreshCurrentFolder();
+        // ------------------------------------------------------------
+        // 完成后怎么更新界面：
+        //   删除 → 只把删掉的那几行摘掉（不用重扫，列表不闪）
+        //   复制/移动 → 数量不定、名字可能变成"xxx - 副本"，重新扫一遍
+        //              （重扫也会保留滚动位置和选中项）
+        // ------------------------------------------------------------
+        if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Delete)
+        {
+            for (const auto& path : m_operationPaths)
+            {
+                m_fileListView.RemoveItemByPath(path);
+            }
+            Logger::Info(L"删除后局部移除 " + std::to_wstring(m_operationPaths.size()) + L" 行（未重扫目录）");
+            UpdateTitle();
+            UpdateStatusBar();
+        }
+        else
+        {
+            RefreshCurrentFolder();
+        }
+
+        m_lastOperation = FileOperationKind::None;
+        m_operationPaths.clear();
         return 0;
     }
 
@@ -676,6 +764,9 @@ void MainWindow::DoPaste()
     // 剪切的话，等操作真的成功了再清空剪贴板（失败还能重试）
     m_clearClipboardWhenDone = isCut;
 
+    m_lastOperation  = isCut ? FileOperationKind::Move : FileOperationKind::Copy;
+    m_operationPaths = paths;
+
     Logger::Info(L"开始粘贴 " + std::to_wstring(paths.size()) + L" 项到 " + targetDirectory);
 
     RunFileOperationAsync([paths, targetDirectory, owner, isCut]() -> HRESULT
@@ -695,6 +786,10 @@ void MainWindow::DoDelete()
     }
 
     HWND owner = m_hWnd;
+
+    // 记下删的是哪些，成功之后直接从列表里摘掉这几行，不用重扫目录
+    m_lastOperation  = FileOperationKind::Delete;
+    m_operationPaths = selected;
 
     Logger::Info(L"开始删除 " + std::to_wstring(selected.size()) + L" 项");
 
@@ -784,6 +879,7 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, (hasClipboard ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandPaste, L"粘贴(&P)");
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandDelete, L"删除(&D)");
+    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandRename, L"重命名(&M)");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandNewFolder, L"新建文件夹(&N)");
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh,   L"刷新(&R)");
@@ -840,6 +936,138 @@ void MainWindow::OpenSelection()
     OnItemActivated(static_cast<size_t>(selectedIndex));
 }
 
+// ============================================================================
+// 排序
+// ============================================================================
+
+std::shared_ptr<shell::EnumerateResult> MainWindow::CurrentResult()
+{
+    std::lock_guard<std::mutex> lock(m_resultMutex);
+    return m_result;
+}
+
+void MainWindow::UpdateTitle()
+{
+    std::wstring path = m_history.Current();
+
+    ::SetWindowTextW(m_hWnd,
+                     (std::wstring(kWindowTitleBase) + L" - " + path +
+                      L"（" + std::to_wstring(m_fileListView.ItemCount()) + L" 项）").c_str());
+}
+
+void MainWindow::SortEntries()
+{
+    std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+    if (result == nullptr)
+    {
+        return;
+    }
+
+    std::sort(result->entries.begin(), result->entries.end(),
+              [this](const shell::ShellEntry& left, const shell::ShellEntry& right)
+              {
+                  return CompareEntries(left, right, m_sortColumn, m_sortAscending);
+              });
+}
+
+void MainWindow::OnColumnClick(int column)
+{
+    // 点同一列就换个方向，点别的列从升序开始（资源管理器就是这么做的）
+    if (column == m_sortColumn)
+    {
+        m_sortAscending = !m_sortAscending;
+    }
+    else
+    {
+        m_sortColumn    = column;
+        m_sortAscending = true;
+    }
+
+    SortEntries();
+
+    std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+    m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
+    m_fileListView.SetResult(result);
+
+    // 记一笔，方便验证点了表头到底有没有生效
+    if (result != nullptr)
+    {
+        const wchar_t* columnNames[] = { L"名称", L"修改日期", L"类型", L"大小" };
+        std::wstring columnName = (column >= 0 && column <= 3) ? columnNames[column] : L"未知";
+
+        std::wstring sample;
+        for (size_t i = 0; i < result->entries.size() && i < 5; ++i)
+        {
+            sample += result->entries[i].name + L" | ";
+        }
+
+        Logger::Info(L"按「" + columnName + L"」排序（" +
+                     std::wstring(m_sortAscending ? L"升序" : L"降序") +
+                     L"），前 5 项：" + sample);
+    }
+}
+
+// ============================================================================
+// 重命名
+// ============================================================================
+
+void MainWindow::DoRename(size_t index, const std::wstring& newName)
+{
+    std::wstring oldPath = m_fileListView.ItemPath(index);
+    std::wstring oldName = m_fileListView.ItemName(index);
+
+    if (oldPath.empty() || newName.empty())
+    {
+        return;
+    }
+
+    // 名字压根没变，什么都不用做
+    if (_wcsicmp(oldName.c_str(), newName.c_str()) == 0)
+    {
+        return;
+    }
+
+    HRESULT hr = shellops::RenameItem(oldPath, newName, m_hWnd);
+
+    if (FAILED(hr))
+    {
+        Logger::Error(L"重命名失败：" + oldName + L" → " + newName +
+                      L"，" + Logger::FormatHresult(hr));
+        // 失败了列表里还显示着编辑器里的新名字，重扫一遍回到真实状态
+        RefreshCurrentFolder();
+        return;
+    }
+
+    Logger::Info(L"重命名成功：" + oldName + L" → " + newName);
+
+    // 局部更新：只改这一行的名字和路径，再按新的名字重新排一下，不重扫目录
+    std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+
+    if (result != nullptr)
+    {
+        size_t slash = oldPath.find_last_of(L"\\/");
+        std::wstring parent = (slash == std::wstring::npos)
+                              ? std::wstring()
+                              : oldPath.substr(0, slash + 1);
+
+        for (auto& entry : result->entries)
+        {
+            if (_wcsicmp(entry.fullPath.c_str(), oldPath.c_str()) == 0)
+            {
+                entry.name     = newName;
+                entry.fullPath = parent + newName;
+                break;
+            }
+        }
+
+        SortEntries();
+        m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
+        m_fileListView.SetResult(result);
+        UpdateTitle();
+        UpdateStatusBar();
+    }
+}
+
 void MainWindow::DoNewFolder()
 {
     std::wstring current = m_history.Current();
@@ -854,7 +1082,28 @@ void MainWindow::DoNewFolder()
     if (SUCCEEDED(hr))
     {
         Logger::Info(L"新建文件夹成功：" + created);
-        RefreshCurrentFolder();
+
+        // 不重扫整个目录：直接往列表里插一条，界面立刻更新
+        // 目录名是最后一段
+        std::wstring name = created;
+        size_t slash = name.find_last_of(L"\\/");
+        if (slash != std::wstring::npos)
+        {
+            name = name.substr(slash + 1);
+        }
+
+        shell::ShellEntry entry;
+        entry.name     = name;
+        entry.fullPath = created;
+        entry.isFolder = true;
+        entry.size     = 0;
+        ::GetSystemTimeAsFileTime(&entry.modified);
+
+        m_fileListView.InsertEntry(entry);
+        UpdateTitle();
+        UpdateStatusBar();
+
+        Logger::Info(L"新建后局部插入 1 行（未重扫目录）：" + created);
     }
     else
     {
@@ -877,7 +1126,13 @@ void MainWindow::OnEnumerationDone()
         elapsedMs = m_elapsedMs;
     }
 
-    std::sort(result->entries.begin(), result->entries.end(), CompareEntries);
+    // 按当前排序状态排一遍（默认名称升序）
+    std::sort(result->entries.begin(), result->entries.end(),
+              [this](const shell::ShellEntry& left, const shell::ShellEntry& right)
+              {
+                  return CompareEntries(left, right, m_sortColumn, m_sortAscending);
+              });
+    m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
     m_fileListView.SetResult(result);
 
     ::SetWindowTextW(m_hWnd,
