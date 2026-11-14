@@ -47,6 +47,11 @@ public:
 
     HWND Handle() const { return m_hWnd; }
 
+    // 某个客户区坐标落在哪个节点上：返回该节点对应的路径；
+    // 空白处、分组标题（快速访问/此电脑）、或者不是文件夹的节点，返回空串
+    // （拖放时用来判断"放到了哪个目录"）
+    std::wstring HitTestPath(POINT ptClient) const;
+
     LRESULT HandleNotify(LPARAM lParam);
 
 private:

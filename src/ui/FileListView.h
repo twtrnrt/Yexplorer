@@ -41,6 +41,9 @@ public:
     using ColumnClickCallback = std::function<void(int column)>;
     using RenameCallback      = std::function<void(size_t index, const std::wstring& newName)>;
 
+    // 拖完之后通知：参数是最终效果（DROPEFFECT_MOVE 表示文件被搬走了）
+    using DragCompletedCallback = std::function<void(DWORD effect)>;
+
     // 排序比较器：返回 true 表示 left 应该排在 right 前面
     using Comparator = std::function<bool(const shell::ShellEntry& left, const shell::ShellEntry& right)>;
 
@@ -81,6 +84,9 @@ public:
     void SetContextMenuCallback(ContextMenuCallback callback) { m_onContextMenu = std::move(callback); }
     void SetColumnClickCallback(ColumnClickCallback callback) { m_onColumnClick = std::move(callback); }
     void SetRenameCallback(RenameCallback callback)           { m_onRename      = std::move(callback); }
+
+    // 拖完之后回调：效果是"移动"说明文件已经被搬走，需要主窗口刷新列表
+    void SetDragCompletedCallback(DragCompletedCallback callback) { m_onDragCompleted = std::move(callback); }
 
     // 排序规则（用于新建项时判断插到哪个位置）
     void SetComparator(Comparator comparator) { m_comparator = std::move(comparator); }
@@ -136,6 +142,7 @@ private:
     ContextMenuCallback                           m_onContextMenu;
     ColumnClickCallback                           m_onColumnClick;
     RenameCallback                                m_onRename;
+    DragCompletedCallback                         m_onDragCompleted;
     Comparator                                    m_comparator;
     HFONT                                         m_hFont     = nullptr;
 

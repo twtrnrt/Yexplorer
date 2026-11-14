@@ -50,4 +50,8 @@ HRESULT CreateNewFolder(const std::wstring& directory, std::wstring& newFolderPa
 // 名字里含非法字符会直接返回失败，不弹系统框
 HRESULT RenameItem(const std::wstring& oldPath, const std::wstring& newName, HWND owner);
 
+// 给某个文件/文件夹建一个快捷方式（拖动时按住 Alt 用这个）
+// targetPath：快捷方式指向的目标；linkPath：快捷方式文件本身的完整路径（以 .lnk 结尾）
+HRESULT CreateShortcut(const std::wstring& targetPath, const std::wstring& linkPath);
+
 } // namespace shellops

@@ -287,6 +287,55 @@ bool NavigationPane::GetKnownFolderPath(const GUID& folderId, std::wstring& outP
 // 通知处理
 // ============================================================================
 
+std::wstring NavigationPane::HitTestPath(POINT ptClient) const
+{
+    if (m_hWnd == nullptr)
+    {
+        return std::wstring();
+    }
+
+    // 看这个坐标落在哪个节点上（空白处返回 nullptr）
+    TVHITTESTINFO hitTest = {};
+    hitTest.pt = ptClient;
+    HTREEITEM hitItem = TreeView_HitTest(m_hWnd, &hitTest);
+
+    if (hitItem == nullptr)
+    {
+        return std::wstring();
+    }
+
+    // 只要落在这一行上就算（整行都可以放，和资源管理器左栏一样），
+    // 但右侧的展开按钮 "+" 不算
+    if ((hitTest.flags & TVHT_ONITEMBUTTON) != 0 &&
+        (hitTest.flags & (TVHT_ONITEMLABEL | TVHT_ONITEMICON | TVHT_ONITEMRIGHT)) == 0)
+    {
+        return std::wstring();
+    }
+
+    TVITEMW item = {};
+    item.mask  = TVIF_PARAM;
+    item.hItem = hitItem;
+
+    if (!TreeView_GetItem(m_hWnd, &item))
+    {
+        return std::wstring();
+    }
+
+    size_t nodeIndex = static_cast<size_t>(item.lParam);
+    if (nodeIndex >= m_nodes.size())
+    {
+        return std::wstring();
+    }
+
+    // 分组标题（快速访问 / 此电脑）不是真实目录，不接受放置
+    if (m_nodes[nodeIndex].isGroup)
+    {
+        return std::wstring();
+    }
+
+    return m_nodes[nodeIndex].path;
+}
+
 LRESULT NavigationPane::HandleNotify(LPARAM lParam)
 {
     if (lParam == 0)

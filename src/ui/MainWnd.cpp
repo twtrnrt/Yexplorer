@@ -12,6 +12,7 @@
 #include "core/Format.h"
 #include "core/Logger.h"
 #include "shell/ShellClipboard.h"
+#include "shell/ShellDragDrop.h"
 #include "shell/ShellOperations.h"
 
 #include <shellapi.h>   // ShellExecuteW
@@ -413,6 +414,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         CreateChildControls();
         m_fileListView.SetIconCache(&m_iconCache);
 
+        // 从本程序把文件拖到别处并且是"移动"时，源目录内容已经变了，要刷新列表
+        m_fileListView.SetDragCompletedCallback([this](DWORD)
+        {
+            RefreshCurrentFolder();
+        });
+
+        // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
+        RegisterDropTargets();
+
         LayoutChildren();
 
         m_history.Reset(kInitialPath);
@@ -608,6 +618,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // 销毁
     // --------------------------------------------------------------
     case WM_DESTROY:
+        UnregisterDropTargets();
         m_enumToken.Cancel();
         if (m_enumThread.joinable())
         {
@@ -1129,6 +1140,184 @@ void MainWindow::DoRename(size_t index, const std::wstring& newName)
         m_fileListView.SetResult(result);
         UpdateTitle();
         UpdateStatusBar();
+    }
+}
+
+// ============================================================================
+// 拖放：注册 / 注销接收目标
+//
+// 两个窗口各自注册：
+//   · 文件列表 —— 拖进来的东西落在「当前目录」
+//   · 左栏树   —— 拖到哪个硬盘/文件夹节点上，就落在那个目录
+// ============================================================================
+
+void MainWindow::RegisterDropTargets()
+{
+    // ---- 文件列表 ----
+    shell::DropTargetCallbacks listCallbacks;
+
+    listCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
+    {
+        RECT clientRect = {};
+        if (!::GetClientRect(m_fileListView.Handle(), &clientRect))
+        {
+            return std::wstring();
+        }
+
+        // 落在列表客户区外就不接受
+        if (ptClient.x < clientRect.left || ptClient.x >= clientRect.right ||
+            ptClient.y < clientRect.top || ptClient.y >= clientRect.bottom)
+        {
+            return std::wstring();
+        }
+
+        return m_history.Current();
+    };
+
+    listCallbacks.PerformDrop = [this](const std::vector<std::wstring>& sources,
+                                       const std::wstring& targetDirectory,
+                                       DWORD effect, bool createShortcut)
+    {
+        PerformDropFromOutside(sources, targetDirectory, effect, createShortcut);
+    };
+
+    shell::RegisterWindowDropTarget(m_fileListView.Handle(), listCallbacks);
+
+    // ---- 左栏 ----
+    shell::DropTargetCallbacks treeCallbacks;
+
+    treeCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
+    {
+        return m_navigationPane.HitTestPath(ptClient);
+    };
+
+    treeCallbacks.PerformDrop = [this](const std::vector<std::wstring>& sources,
+                                       const std::wstring& targetDirectory,
+                                       DWORD effect, bool createShortcut)
+    {
+        PerformDropFromOutside(sources, targetDirectory, effect, createShortcut);
+    };
+
+    shell::RegisterWindowDropTarget(m_navigationPane.Handle(), treeCallbacks);
+}
+
+void MainWindow::UnregisterDropTargets()
+{
+    shell::UnregisterWindowDropTarget(m_fileListView.Handle());
+    shell::UnregisterWindowDropTarget(m_navigationPane.Handle());
+}
+
+// ============================================================================
+// 拖放：真正把东西放进去
+//
+// 三种情况：
+//   · 按住 Alt 拖     → 在目标目录里建快捷方式（.lnk）
+//   · 同盘拖 / 按 Shift → 移动
+//   · 跨盘拖 / 按 Ctrl  → 复制
+// 具体用哪个效果，放置目标那边已经算好了，这里照着执行。
+// ============================================================================
+
+void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources,
+                                        const std::wstring&              targetDirectory,
+                                        DWORD                            effect,
+                                        bool                             createShortcut)
+{
+    if (sources.empty() || targetDirectory.empty())
+    {
+        return;
+    }
+
+    // 把「源就在目标目录里」的项剔掉：自己往自己里放没有意义，还会弹一堆错
+    std::vector<std::wstring> usableSources;
+    usableSources.reserve(sources.size());
+
+    for (const auto& source : sources)
+    {
+        if (::_wcsicmp(NavigationHistory::ParentPath(source).c_str(),
+                       targetDirectory.c_str()) == 0)
+        {
+            continue;
+        }
+        usableSources.push_back(source);
+    }
+
+    if (usableSources.empty())
+    {
+        Logger::Warn(L"拖放的源和目标是同一个目录，忽略");
+        return;
+    }
+
+    HWND owner = m_hWnd;
+
+    Logger::Info(L"接收拖放：" + std::to_wstring(usableSources.size()) + L" 项 → " +
+                 targetDirectory + (createShortcut ? L"（建快捷方式）" : L"") +
+                 L"，效果=" + std::to_wstring(effect));
+
+    // ------------------------------------------------------------
+    // 建快捷方式（Alt 拖动）
+    // ------------------------------------------------------------
+    if (createShortcut)
+    {
+        m_lastOperation  = FileOperationKind::Copy;   // 完成后按"复制"的路径刷新
+        m_operationPaths.clear();
+
+        RunFileOperationAsync([usableSources, targetDirectory]() -> HRESULT
+        {
+            HRESULT lastResult = S_OK;
+
+            for (const auto& source : usableSources)
+            {
+                // 取文件名（去掉目录部分）
+                size_t slashPos = source.find_last_of(L"\\/");
+                std::wstring fileName =
+                    (slashPos == std::wstring::npos) ? source : source.substr(slashPos + 1);
+
+                std::wstring linkPath = targetDirectory + L"\\" + fileName + L".lnk";
+
+                // 重名就往后加 (2)(3)…，不覆盖已有的快捷方式
+                int suffix = 2;
+                while (::GetFileAttributesW(linkPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+                {
+                    linkPath = targetDirectory + L"\\" + fileName +
+                               L" (" + std::to_wstring(suffix) + L").lnk";
+                    ++suffix;
+                }
+
+                HRESULT hr = shellops::CreateShortcut(source, linkPath);
+                if (FAILED(hr))
+                {
+                    lastResult = hr;
+                    Logger::Warn(L"建快捷方式失败：" + linkPath +
+                                 L"，" + Logger::FormatHresult(static_cast<long>(hr)));
+                }
+            }
+
+            return lastResult;
+        });
+
+        m_selectNewAfterEnum = true;
+        return;
+    }
+
+    // ------------------------------------------------------------
+    // 移动 / 复制
+    // ------------------------------------------------------------
+    bool isMove = (effect == DROPEFFECT_MOVE);
+
+    m_lastOperation  = isMove ? FileOperationKind::Move : FileOperationKind::Copy;
+    m_operationPaths = usableSources;
+
+    RunFileOperationAsync([usableSources, targetDirectory, owner, isMove]() -> HRESULT
+    {
+        return isMove
+               ? shellops::MoveItems(usableSources, targetDirectory, owner)
+               : shellops::CopyItems(usableSources, targetDirectory, owner);
+    });
+
+    // 目标目录正好是当前显示的目录，完成刷新后要选中新出现的项
+    if (::_wcsicmp(targetDirectory.c_str(), m_history.Current().c_str()) == 0)
+    {
+        m_selectNewAfterEnum = true;
     }
 }
 

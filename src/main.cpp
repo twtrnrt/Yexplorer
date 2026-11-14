@@ -99,12 +99,14 @@ int WINAPI wWinMain(HINSTANCE hInstance,
     EnableCommonControls();
     EnableDpiAwareness();
 
-    // ---------- 步骤 3：初始化 COM ----------
-    // STA：Shell 接口、后续的 OLE 拖放都要求单线程套间
-    HRESULT hr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    // ---------- 步骤 3：初始化 COM / OLE ----------
+    // 用 OleInitialize 而不是 CoInitializeEx：
+    //   OLE 拖放（RegisterDragDrop / DoDragDrop）要求线程做过 OLE 初始化，
+    //   OleInitialize 内部会顺带做 STA 的 CoInitializeEx，一举两得。
+    HRESULT hr = ::OleInitialize(nullptr);
     if (FAILED(hr))
     {
-        Logger::Error(L"COM 初始化失败，HRESULT=" + Logger::FormatHresult(hr));
+        Logger::Error(L"OLE 初始化失败，HRESULT=" + Logger::FormatHresult(hr));
         ::MessageBoxW(nullptr,
                       L"COM 初始化失败，程序无法启动。",
                       L"文件管理器",
@@ -135,7 +137,7 @@ int WINAPI wWinMain(HINSTANCE hInstance,
     }   // 主窗口对象在此析构，析构时会 join 后台线程
 
     // ---------- 步骤 5：清理 ----------
-    ::CoUninitialize();
+    ::OleUninitialize();
     Logger::Info(L"程序退出，退出码=" + std::to_wstring(exitCode));
     Logger::Shutdown();
 

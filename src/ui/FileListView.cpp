@@ -10,6 +10,8 @@
 
 #include "FileListView.h"
 
+#include "shell/ShellDragDrop.h"
+
 #include <algorithm>
 
 // ============================================================================
@@ -736,6 +738,31 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
         default:
             break;
+        }
+        return 0;
+    }
+
+    // --------------------------------------------------------------
+    // 开始拖动：把选中的这一批交给系统拖动循环
+    // （DoDragDrop 是阻塞的：这个分支返回时拖动已经结束）
+    // --------------------------------------------------------------
+    case LVN_BEGINDRAG:
+    {
+        NMLISTVIEW* dragInfo = reinterpret_cast<NMLISTVIEW*>(lParam);
+        std::vector<std::wstring> paths = GetSelectedPaths();
+
+        if (!paths.empty())
+        {
+            // 对外只声明复制和移动（和资源管理器自己一样）；
+            // 在本程序内部按 Alt 建快捷方式，由我们自己的放置目标处理，不依赖这个声明
+            DWORD effect = shell::DoDragFiles(paths, m_hWnd, dragInfo->ptAction,
+                                              DROPEFFECT_COPY | DROPEFFECT_MOVE);
+
+            // 移动走了：源目录里的东西已经没了，需要主窗口更新列表
+            if (effect == DROPEFFECT_MOVE && m_onDragCompleted)
+            {
+                m_onDragCompleted(effect);
+            }
         }
         return 0;
     }

@@ -109,6 +109,15 @@ private:
     // ---- 后台执行文件操作（避免复制大文件时界面卡住）----
     void RunFileOperationAsync(std::function<HRESULT()> operation);
 
+    // ---- 拖放：接收别的程序拖进来的文件 ----
+    void RegisterDropTargets();      // 列表 + 左栏都注册
+    void UnregisterDropTargets();
+
+    void PerformDropFromOutside(const std::vector<std::wstring>& sources,
+                                const std::wstring&              targetDirectory,
+                                DWORD                            effect,
+                                bool                             createShortcut);
+
     // ---- 右键菜单 ----
     void ShowContextMenu(POINT screenPoint);
     void ShowPropertiesForSelection();

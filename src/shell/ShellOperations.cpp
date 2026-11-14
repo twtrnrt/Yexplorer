@@ -470,4 +470,53 @@ HRESULT RenameItem(const std::wstring& oldPath, const std::wstring& newName, HWN
     return operation->PerformOperations();
 }
 
+HRESULT CreateShortcut(const std::wstring& targetPath, const std::wstring& linkPath)
+{
+    if (targetPath.empty() || linkPath.empty())
+    {
+        return E_INVALIDARG;
+    }
+
+    wil::com_ptr<IShellLinkW> shellLink;
+    HRESULT hr = ::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&shellLink));
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    // 指向的目标
+    hr = shellLink->SetPath(targetPath.c_str());
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    // 工作目录设成目标所在的目录（双击运行时相对路径才正常）
+    std::wstring parentDirectory = ParentDirectoryOf(targetPath);
+    if (!parentDirectory.empty())
+    {
+        shellLink->SetWorkingDirectory(parentDirectory.c_str());
+    }
+
+    // 图标：直接用目标自己的图标
+    shellLink->SetIconLocation(targetPath.c_str(), 0);
+
+    // 让资源管理器把"这是个文件夹快捷方式"显示正确
+    if (::GetFileAttributesW(targetPath.c_str()) & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        shellLink->SetDescription(L"文件夹快捷方式");
+    }
+
+    wil::com_ptr<IPersistFile> persistFile;
+    hr = shellLink->QueryInterface(IID_PPV_ARGS(&persistFile));
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    // TRUE = 记住，立即写盘
+    return persistFile->Save(linkPath.c_str(), TRUE);
+}
+
 } // namespace shellops
