@@ -29,6 +29,9 @@ static const wchar_t* kWindowTitleBase = L"文件管理器";
 // 自定义消息：后台枚举完成
 static const UINT WM_APP_ENUM_DONE = WM_APP + 1;
 
+// 自定义消息：后台文件操作完成（复制 / 删除 / 移动）
+static const UINT WM_APP_OPERATION_DONE = WM_APP + 2;
+
 // 起始路径
 static const wchar_t* kInitialPath = L"C:\\";
 
@@ -53,7 +56,10 @@ static bool CompareEntries(const shell::ShellEntry& left, const shell::ShellEntr
 // 构造 / 析构
 // ============================================================================
 
-MainWindow::MainWindow() = default;
+MainWindow::MainWindow()
+    : m_operationRunning(std::make_shared<std::atomic<bool>>(false))
+{
+}
 
 MainWindow::~MainWindow()
 {
@@ -61,6 +67,12 @@ MainWindow::~MainWindow()
     if (m_enumThread.joinable())
     {
         m_enumThread.join();
+    }
+
+    // 等后台文件操作收尾（大文件正在复制时会等它结束，或者用户在进度框点了取消）
+    if (m_operationThread.joinable())
+    {
+        m_operationThread.join();
     }
 
     if (m_hAccelerator != nullptr)
@@ -202,6 +214,10 @@ void MainWindow::CreateChildControls()
     m_fileListView.SetActivateCallback([this](size_t index)
     {
         OnItemActivated(index);
+    });
+    m_fileListView.SetContextMenuCallback([this](POINT screenPoint)
+    {
+        ShowContextMenu(screenPoint);
     });
 
     // ---------------- 2b. 左侧导航栏 ----------------
@@ -378,6 +394,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandGoUp:
             GoUp();
             return 0;
+        case kCommandOpen:
+            OpenSelection();
+            return 0;
+        case kCommandProperties:
+            ShowPropertiesForSelection();
+            return 0;
         default:
             break;
         }
@@ -431,6 +453,38 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_APP_ENUM_DONE:
         OnEnumerationDone();
         return 0;
+
+    // --------------------------------------------------------------
+    // 后台文件操作完成（复制 / 移动 / 删除）
+    // --------------------------------------------------------------
+    case WM_APP_OPERATION_DONE:
+    {
+        HRESULT hr = static_cast<HRESULT>(static_cast<LONG_PTR>(wParam));
+
+        if (SUCCEEDED(hr))
+        {
+            // 剪切成功：剪贴板清空，避免再粘一次；其他情况剪贴板保持不变
+            if (m_clearClipboardWhenDone)
+            {
+                m_clipboardPaths.clear();
+                m_clipboardIsCut = false;
+            }
+
+            Logger::Info(L"文件操作完成");
+        }
+        else
+        {
+            // 失败（含用户在进度框点取消）：保留剪贴板，用户可以直接重试
+            Logger::Error(L"文件操作失败：" + Logger::FormatHresult(hr));
+        }
+
+        m_clearClipboardWhenDone = false;
+
+        // 刷新「当前看着的目录」，不是操作的目标目录——
+        // 用户可能在复制期间已经翻到别的地方了
+        RefreshCurrentFolder();
+        return 0;
+    }
 
     // --------------------------------------------------------------
     // 销毁
@@ -506,6 +560,12 @@ void MainWindow::StartEnumeration(const std::wstring& path)
     if (m_enumThread.joinable())
     {
         m_enumThread.join();
+    }
+
+    // 等后台文件操作收尾（大文件正在复制时会等它结束，或者用户在进度框点了取消）
+    if (m_operationThread.joinable())
+    {
+        m_operationThread.join();
     }
     m_enumToken.Reset();
 
@@ -608,26 +668,22 @@ void MainWindow::DoPaste()
         return;
     }
 
-    HRESULT hr = m_clipboardIsCut
-                 ? shellops::MoveItems(m_clipboardPaths, targetDirectory, m_hWnd)
-                 : shellops::CopyItems(m_clipboardPaths, targetDirectory, m_hWnd);
+    // 把路径复制一份交给后台线程：线程只读自己的副本，不和界面共享可变状态
+    std::vector<std::wstring> paths = m_clipboardPaths;
+    bool                      isCut = m_clipboardIsCut;
+    HWND                      owner = m_hWnd;
 
-    if (SUCCEEDED(hr))
-    {
-        // 剪切成功之后剪贴板就空了，避免再粘贴一次
-        if (m_clipboardIsCut)
-        {
-            m_clipboardPaths.clear();
-            m_clipboardIsCut = false;
-        }
+    // 剪切的话，等操作真的成功了再清空剪贴板（失败还能重试）
+    m_clearClipboardWhenDone = isCut;
 
-        Logger::Info(L"粘贴完成，目标目录：" + targetDirectory);
-        RefreshCurrentFolder();
-    }
-    else
+    Logger::Info(L"开始粘贴 " + std::to_wstring(paths.size()) + L" 项到 " + targetDirectory);
+
+    RunFileOperationAsync([paths, targetDirectory, owner, isCut]() -> HRESULT
     {
-        Logger::Error(L"粘贴失败：" + Logger::FormatHresult(hr));
-    }
+        return isCut
+               ? shellops::MoveItems(paths, targetDirectory, owner)
+               : shellops::CopyItems(paths, targetDirectory, owner);
+    });
 }
 
 void MainWindow::DoDelete()
@@ -638,17 +694,150 @@ void MainWindow::DoDelete()
         return;
     }
 
-    HRESULT hr = shellops::DeleteItems(selected, m_hWnd);
+    HWND owner = m_hWnd;
 
-    if (SUCCEEDED(hr))
+    Logger::Info(L"开始删除 " + std::to_wstring(selected.size()) + L" 项");
+
+    RunFileOperationAsync([selected, owner]() -> HRESULT
     {
-        Logger::Info(L"已删除 " + std::to_wstring(selected.size()) + L" 项（进回收站，可撤销）");
-        RefreshCurrentFolder();
-    }
-    else
+        return shellops::DeleteItems(selected, owner);
+    });
+}
+
+// ============================================================================
+// 后台执行文件操作
+//
+// 为什么要放后台：
+//   复制 1G 文件要几秒钟，如果直接在界面线程里等，整个窗口就卡住不能点。
+//   交给一条单独线程去等，界面线程照常处理消息，用户能继续浏览别的目录。
+//   操作结束（成功或用户点取消）后，线程往主窗口发一条消息，主窗口刷新列表。
+// ============================================================================
+
+void MainWindow::RunFileOperationAsync(std::function<HRESULT()> operation)
+{
+    // 同一时间只允许一个文件操作：两个操作同时弹进度框会互相打架
+    if (m_operationRunning->load())
     {
-        Logger::Error(L"删除失败：" + Logger::FormatHresult(hr));
+        Logger::Warn(L"上一个文件操作还没结束，本次请求忽略");
+        return;
     }
+
+    // 上一次的线程已经结束了，这里只是把它回收掉
+    if (m_operationThread.joinable())
+    {
+        m_operationThread.join();
+    }
+
+    m_operationRunning->store(true);
+
+    HWND                               notifyWindow = m_hWnd;
+    std::shared_ptr<std::atomic<bool>> running      = m_operationRunning;
+
+    m_operationThread = std::thread([operation, notifyWindow, running]()
+    {
+        // 后台线程要自己初始化 COM（每个线程独立，不能借用主线程的）
+        HRESULT initHr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        HRESULT result = E_FAIL;
+
+        if (SUCCEEDED(initHr) || initHr == RPC_E_CHANGED_MODE)
+        {
+            result = operation();
+        }
+        else
+        {
+            Logger::Error(L"后台线程 COM 初始化失败：" + Logger::FormatHresult(initHr));
+        }
+
+        if (SUCCEEDED(initHr))
+        {
+            ::CoUninitialize();
+        }
+
+        running->store(false);
+
+        // 把结果带回界面线程；窗口若已关闭，这条消息会被系统丢弃，不会出问题
+        ::PostMessageW(notifyWindow, WM_APP_OPERATION_DONE, static_cast<WPARAM>(result), 0);
+    });
+}
+
+// ============================================================================
+// 右键菜单
+// ============================================================================
+
+void MainWindow::ShowContextMenu(POINT screenPoint)
+{
+    std::vector<std::wstring> selected     = m_fileListView.GetSelectedPaths();
+    bool                      hasSelection = !selected.empty();
+    bool                      hasClipboard = !m_clipboardPaths.empty();
+
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr)
+    {
+        return;
+    }
+
+    // 没选中东西时，"打开/复制/剪切/删除"变灰；剪贴板空时"粘贴"变灰
+    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandOpen, L"打开(&O)");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCopy, L"复制(&C)");
+    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, (hasClipboard ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandPaste, L"粘贴(&P)");
+    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandDelete, L"删除(&D)");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandNewFolder, L"新建文件夹(&N)");
+    ::AppendMenuW(menu, MF_STRING, kCommandRefresh,   L"刷新(&R)");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+
+    // TPM_RETURNCMD：菜单自己跑完并返回点了哪一项，省去额外的一层消息往返
+    int command = ::TrackPopupMenu(menu,
+                                   TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                   screenPoint.x, screenPoint.y,
+                                   0, m_hWnd, nullptr);
+
+    ::DestroyMenu(menu);
+
+    if (command != 0)
+    {
+        ::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(static_cast<WORD>(command), 0), 0);
+    }
+}
+
+void MainWindow::ShowPropertiesForSelection()
+{
+    std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+    // 选中多个时只显示第一个的属性（系统的属性窗口一次只能显示一个对象）
+    std::wstring target = selected.empty() ? m_history.Current() : selected.front();
+    if (target.empty())
+    {
+        return;
+    }
+
+    SHELLEXECUTEINFOW info = {};
+    info.cbSize = sizeof(info);
+    info.fMask  = SEE_MASK_INVOKEIDLIST;   // 走 shell 的"属性"动词，弹系统原生属性窗口
+    info.lpVerb = L"properties";
+    info.lpFile = target.c_str();
+    info.nShow  = SW_SHOW;
+    info.hwnd   = m_hWnd;
+
+    if (!::ShellExecuteExW(&info))
+    {
+        Logger::Warn(L"打开属性窗口失败：" + target);
+    }
+}
+
+void MainWindow::OpenSelection()
+{
+    int selectedIndex = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+    if (selectedIndex < 0)
+    {
+        return;
+    }
+
+    OnItemActivated(static_cast<size_t>(selectedIndex));
 }
 
 void MainWindow::DoNewFolder()

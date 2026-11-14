@@ -50,6 +50,10 @@ public:
 
     void SetActivateCallback(ActivateCallback callback) { m_onActivate = std::move(callback); }
 
+    // 右键：把屏幕坐标交给主窗口去弹菜单
+    using ContextMenuCallback = std::function<void(POINT screenPoint)>;
+    void SetContextMenuCallback(ContextMenuCallback callback) { m_onContextMenu = std::move(callback); }
+
     HWND Handle() const { return m_hWnd; }
 
     // 取当前所有选中项的完整路径（复制/剪切/删除要用）
@@ -72,6 +76,7 @@ private:
     HWND                                          m_hWnd      = nullptr;
     std::shared_ptr<const shell::EnumerateResult> m_result;
     ActivateCallback                              m_onActivate;
+    ContextMenuCallback                           m_onContextMenu;
     HFONT                                         m_hFont     = nullptr;
 
     // 图标缓存不归本控件所有（由主窗口持有并保证生命周期），这里只借指针

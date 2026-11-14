@@ -337,6 +337,21 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         return 0;
     }
 
+    // --------------------------------------------------------------
+    // 右键：交给主窗口弹菜单
+    // --------------------------------------------------------------
+    case NM_RCLICK:
+    {
+        POINT screenPoint = {};
+        ::GetCursorPos(&screenPoint);
+
+        if (m_onContextMenu)
+        {
+            m_onContextMenu(screenPoint);
+        }
+        return 1;   // 返回非 0 表示已处理，不再弹默认菜单
+    }
+
     default:
         break;
     }

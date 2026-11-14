@@ -28,6 +28,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <functional>
 
 #include "core/AsyncTask.h"
 #include "core/NavigationHistory.h"
@@ -53,6 +55,10 @@ static const int kCommandRefresh   = 3105;   // F5
 static const int kCommandNewFolder = 3106;   // Ctrl+Shift+N
 static const int kCommandSelectAll = 3107;   // Ctrl+A
 static const int kCommandGoUp      = 3108;   // Backspace
+
+// 右键菜单里的命令
+static const int kCommandOpen       = 3201;  // 打开
+static const int kCommandProperties = 3202;  // 属性
 
 class MainWindow
 {
@@ -97,6 +103,16 @@ private:
     void DoDelete();        // Delete：删到回收站
     void DoNewFolder();     // Ctrl+Shift+N：新建文件夹
 
+    // ---- 后台执行文件操作（避免复制大文件时界面卡住）----
+    void RunFileOperationAsync(std::function<HRESULT()> operation);
+
+    // ---- 右键菜单 ----
+    void ShowContextMenu(POINT screenPoint);
+    void ShowPropertiesForSelection();
+
+    // ---- 打开选中项 ----
+    void OpenSelection();
+
     // 后台枚举完成
     void OnEnumerationDone();
 
@@ -135,6 +151,9 @@ private:
     std::vector<std::wstring> m_clipboardPaths;
     bool                      m_clipboardIsCut = false;
 
+    // 粘贴是"剪切"时，操作成功后要清空剪贴板；成功前不动，失败还能重试
+    bool                      m_clearClipboardWhenDone = false;
+
     // ---- 数据 ----
     shell::IconCache   m_iconCache;
     NavigationHistory  m_history;
@@ -144,6 +163,10 @@ private:
     core::CancellationToken                      m_enumToken;
     std::mutex                                   m_resultMutex;
     std::shared_ptr<shell::EnumerateResult>      m_result;
+
+    // ---- 后台文件操作状态（复制大文件时界面不卡住）----
+    std::thread                                  m_operationThread;
+    std::shared_ptr<std::atomic<bool>>           m_operationRunning;
     bool                                         m_resultReady = false;
     double                                       m_elapsedMs   = 0.0;
     std::wstring                                 m_enumPath;
