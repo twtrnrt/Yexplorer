@@ -287,27 +287,61 @@ bool NavigationPane::GetKnownFolderPath(const GUID& folderId, std::wstring& outP
 // 通知处理
 // ============================================================================
 
-std::wstring NavigationPane::HitTestPath(POINT ptClient) const
+// 拖放用：这个坐标落在哪个「可以放东西」的节点上
+//
+// 判定规则（和资源管理器左栏一致）：
+//   · 整行都算命中（控件开了 TVS_FULLROWSELECT，压在右边空白处也认）
+//   · 只有「纯展开箭头」不算（那是展开用的，不是放置区）
+//   · 分组标题（快速访问 / 此电脑）只是分类，不是真实目录，也不能放
+HTREEITEM NavigationPane::HitTestDroppableItem(POINT ptClient) const
 {
     if (m_hWnd == nullptr)
     {
-        return std::wstring();
+        return nullptr;
     }
 
-    // 看这个坐标落在哪个节点上（空白处返回 nullptr）
     TVHITTESTINFO hitTest = {};
     hitTest.pt = ptClient;
     HTREEITEM hitItem = TreeView_HitTest(m_hWnd, &hitTest);
 
     if (hitItem == nullptr)
     {
-        return std::wstring();
+        return nullptr;   // 落在空白处
     }
 
-    // 只要落在这一行上就算（整行都可以放，和资源管理器左栏一样），
-    // 但右侧的展开按钮 "+" 不算
     if ((hitTest.flags & TVHT_ONITEMBUTTON) != 0 &&
         (hitTest.flags & (TVHT_ONITEMLABEL | TVHT_ONITEMICON | TVHT_ONITEMRIGHT)) == 0)
+    {
+        return nullptr;   // 只压在展开箭头上
+    }
+
+    TVITEMW item = {};
+    item.mask  = TVIF_PARAM;
+    item.hItem = hitItem;
+
+    if (!TreeView_GetItem(m_hWnd, &item))
+    {
+        return nullptr;
+    }
+
+    size_t nodeIndex = static_cast<size_t>(item.lParam);
+    if (nodeIndex >= m_nodes.size())
+    {
+        return nullptr;
+    }
+
+    if (m_nodes[nodeIndex].isGroup)
+    {
+        return nullptr;   // 分组标题不接受放置
+    }
+
+    return hitItem;
+}
+
+std::wstring NavigationPane::HitTestPath(POINT ptClient) const
+{
+    HTREEITEM hitItem = HitTestDroppableItem(ptClient);
+    if (hitItem == nullptr)
     {
         return std::wstring();
     }
@@ -327,13 +361,52 @@ std::wstring NavigationPane::HitTestPath(POINT ptClient) const
         return std::wstring();
     }
 
-    // 分组标题（快速访问 / 此电脑）不是真实目录，不接受放置
-    if (m_nodes[nodeIndex].isGroup)
+    return m_nodes[nodeIndex].path;
+}
+
+// 拖放高亮：把鼠标正压着的那一行点亮（用系统自带的 TVIS_DROPHILITED）
+//
+// 为什么用系统的状态而不是自己画：
+//   自己画要接管 TVN_CUSTOMDRAW / WM_PAINT，还得处理滚动、展开、失焦，
+//   系统这个状态本来就是给拖放用的，画出来和资源管理器一模一样，一步到位。
+void NavigationPane::SetDropHighlight(HTREEITEM item)
+{
+    if (m_hWnd == nullptr)
     {
-        return std::wstring();
+        return;
     }
 
-    return m_nodes[nodeIndex].path;
+    // 拖动时 DragOver 会一直调过来，节点没变就立刻返回（不清也不设，省事省时间）
+    if (m_dropHighlightItem == item)
+    {
+        return;
+    }
+
+    // 先清掉上一个
+    if (m_dropHighlightItem != nullptr)
+    {
+        TVITEMW clearItem = {};
+        clearItem.mask      = TVIF_STATE;
+        clearItem.hItem     = m_dropHighlightItem;
+        clearItem.state     = 0;
+        clearItem.stateMask = TVIS_DROPHILITED;
+
+        ::SendMessageW(m_hWnd, TVM_SETITEM, 0, reinterpret_cast<LPARAM>(&clearItem));
+    }
+
+    m_dropHighlightItem = item;
+
+    // 再点亮新的
+    if (item != nullptr)
+    {
+        TVITEMW setItem = {};
+        setItem.mask      = TVIF_STATE;
+        setItem.hItem     = item;
+        setItem.state     = TVIS_DROPHILITED;
+        setItem.stateMask = TVIS_DROPHILITED;
+
+        ::SendMessageW(m_hWnd, TVM_SETITEM, 0, reinterpret_cast<LPARAM>(&setItem));
+    }
 }
 
 LRESULT NavigationPane::HandleNotify(LPARAM lParam)

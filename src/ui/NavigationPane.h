@@ -52,6 +52,15 @@ public:
     // （拖放时用来判断"放到了哪个目录"）
     std::wstring HitTestPath(POINT ptClient) const;
 
+    // 拖放：这个坐标落在哪个「可以放东西」的节点上。
+    // 返回 nullptr 表示这里不能放（空白处、分组标题、或者压在展开箭头上）。
+    // 和 HitTestPath 的判断规则一致，只是返回的是节点本身，方便给它画高亮。
+    HTREEITEM HitTestDroppableItem(POINT ptClient) const;
+
+    // 把某个节点画成"拖放高亮"（系统自带的 TVIS_DROPHILITED，和资源管理器左栏一样）。
+    // 传 nullptr 表示清除。节点没变时直接返回——拖动过程中这个函数会被高频调用。
+    void SetDropHighlight(HTREEITEM item);
+
     LRESULT HandleNotify(LPARAM lParam);
 
 private:
@@ -86,4 +95,7 @@ private:
         bool         isGroup = false;
     };
     std::vector<NodeData> m_nodes;
+
+    // 当前被"拖放高亮"的节点（鼠标正压着的那一行），nullptr 表示没有
+    HTREEITEM         m_dropHighlightItem = nullptr;
 };

@@ -1266,6 +1266,13 @@ void MainWindow::RegisterDropTargets()
         PerformDropFromOutside(sources, targetDirectory, effect, createShortcut);
     };
 
+    // 拖动过程中把"鼠标正压着的那个左栏节点"点亮（系统自带的拖放高亮）
+    treeCallbacks.DragOverFeedback = [this](POINT ptClient, bool acceptable)
+    {
+        HTREEITEM item = acceptable ? m_navigationPane.HitTestDroppableItem(ptClient) : nullptr;
+        m_navigationPane.SetDropHighlight(item);
+    };
+
     shell::RegisterWindowDropTarget(m_navigationPane.Handle(), treeCallbacks);
 }
 
