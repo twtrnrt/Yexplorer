@@ -2,66 +2,78 @@
 // 文件管理器（自研 Explorer 替代品）
 // 文件：src/ui/MainWnd.h
 //
-// 主窗口类：负责注册窗口类、创建主窗口、处理窗口消息、驱动消息循环。
+// 主窗口类。
 //
-// 设计说明：
-//   1. 采用 C++ 类的形式封装，但不做消息映射宏（不引入 WTL 等框架），
-//      所有消息在一处 switch 里处理，逻辑直白、便于排查。
-//   2. 窗口过程是静态函数，通过 GWLP_USERDATA 把 this 指针挂到窗口上，
-//      再转发给成员函数——这是 Win32 + C++ 的常规做法。
+// 当前阶段（阶段 1）职责：
+//   1. 创建主窗口、跑消息循环
+//   2. 启动后台线程枚举一个目录（先固定为 C:\）
+//   3. 枚举完成后把结果画在客户区，同时写进日志
+//
+// 线程模型（重要）：
+//   - UI 线程：只做消息处理与绘制，绝不做磁盘操作
+//   - 后台线程：调用 shell::EnumerateFolder 做枚举，只回传纯数据
+//   - 线程完成 → PostMessage(WM_APP_ENUM_DONE) → UI 线程重绘
+//   - 结果用互斥量保护，避免边读边写
 // ============================================================================
 
 #pragma once
 
 #include <windows.h>
 
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "core/AsyncTask.h"
+#include "shell/ShellFolder.h"
+
 // 主窗口类
 class MainWindow
 {
 public:
-    MainWindow() = default;
-    ~MainWindow() = default;
+    MainWindow();
+    ~MainWindow();   // 析构时必须确保后台线程已结束，否则会访问已销毁对象
 
-    // 禁止拷贝：窗口对象持有 HWND，拷贝没有意义且容易造成句柄重复管理
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
-    // ------------------------------------------------------------------
-    // 创建主窗口
-    // 参数：hInstance —— 当前进程实例句柄（wWinMain 的第一个参数）
-    // 返回：成功 true，失败 false
-    // ------------------------------------------------------------------
     bool Create(HINSTANCE hInstance);
-
-    // ------------------------------------------------------------------
-    // 显示主窗口
-    // 参数：nCmdShow —— 显示方式（SW_SHOW / SW_SHOWMAXIMIZED 等）
-    // ------------------------------------------------------------------
     void Show(int nCmdShow);
+    int  RunMessageLoop();
 
-    // ------------------------------------------------------------------
-    // 进入消息循环
-    // 返回：进程退出码（WM_QUIT 携带的 wParam）
-    // ------------------------------------------------------------------
-    int RunMessageLoop();
-
-    // 获取主窗口句柄（子控件创建时需要用父窗口句柄）
     HWND Handle() const { return m_hWnd; }
 
 private:
-    // ------------------------------------------------------------------
-    // 静态窗口过程：
-    // 窗口创建时（WM_NCCREATE）从 CREATESTRUCT 里取出 this，挂到 GWLP_USERDATA，
-    // 之后所有消息都转发给 HandleMessage。
-    // ------------------------------------------------------------------
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-    // ------------------------------------------------------------------
-    // 成员消息处理：真正处理窗口消息的地方
-    // ------------------------------------------------------------------
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
+    // ------------------------------------------------------------------
+    // 启动后台枚举
+    // 会先把上一个还没跑完的任务取消并等待结束，避免任务堆积。
+    // ------------------------------------------------------------------
+    void StartEnumeration(const std::wstring& path);
+
+    // ------------------------------------------------------------------
+    // 后台枚举完成后的处理：写日志 + 请求重绘
+    // ------------------------------------------------------------------
+    void OnEnumerationDone();
+
+    // ------------------------------------------------------------------
+    // 把枚举结果画到客户区（临时展示，阶段 2 会换成真正的文件列表控件）
+    // ------------------------------------------------------------------
+    void PaintResult(HDC hdc, const RECT& clientRect);
+
 private:
-    HWND      m_hWnd      = nullptr;  // 主窗口句柄
-    HINSTANCE m_hInstance = nullptr;  // 进程实例句柄
+    HWND      m_hWnd      = nullptr;
+    HINSTANCE m_hInstance = nullptr;
+
+    // ---- 后台枚举相关状态 ----
+    std::thread              m_enumThread;      // 后台枚举线程
+    core::CancellationToken  m_enumToken;       // 取消令牌
+    std::mutex               m_resultMutex;     // 保护 m_result
+    shell::EnumerateResult   m_result;          // 枚举结果（受 m_resultMutex 保护）
+    bool                     m_resultReady = false;
+    bool                     m_enumRunning = false;
+    double                   m_elapsedMs   = 0.0;  // 枚举耗时（毫秒）
+    std::wstring             m_enumPath;           // 当前枚举的路径
 };

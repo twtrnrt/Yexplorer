@@ -82,6 +82,8 @@
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <PreprocessorDefinitions>_UNICODE;UNICODE;WIN32;_WINDOWS;_WIN32_WINNT=0x0A00;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- 启用 C++ 同步异常处理：WIL 的 THROW_IF_FAILED 依赖异常机制 -->
+      <ExceptionHandling>Sync</ExceptionHandling>
       <ConformanceMode>true</ConformanceMode>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
@@ -105,6 +107,8 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <PreprocessorDefinitions>_UNICODE;UNICODE;WIN32;_WINDOWS;_WIN32_WINNT=0x0A00;WIN32_LEAN_AND_MEAN;NOMINMAX;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- 启用 C++ 同步异常处理：WIL 的 THROW_IF_FAILED 依赖异常机制 -->
+      <ExceptionHandling>Sync</ExceptionHandling>
       <ConformanceMode>true</ConformanceMode>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
@@ -131,10 +135,15 @@
   <!-- ==================== 源文件列表 ==================== -->
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\core\Logger.cpp" />
+    <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\ui\MainWnd.cpp" />
   </ItemGroup>
 
   <ItemGroup>
+    <ClInclude Include="src\core\AsyncTask.h" />
+    <ClInclude Include="src\core\Logger.h" />
+    <ClInclude Include="src\shell\ShellFolder.h" />
     <ClInclude Include="src\ui\MainWnd.h" />
   </ItemGroup>
 
@@ -146,10 +155,10 @@
     <None Include="README.md" />
   </ItemGroup>
 
-  <!-- ==================== 第三方头文件目录（后续加入库时在这里挂） ==================== -->
+  <!-- ==================== 头文件搜索路径 ==================== -->
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)third;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)third;$(ProjectDir)third\spdlog\include;$(ProjectDir)third\wil\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
 
