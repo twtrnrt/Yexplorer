@@ -4,21 +4,19 @@
 //
 // 文件列表控件实现。
 //
-// 列宽策略（按用户习惯）：
-//   名称列 —— 自适应，吃掉剩余宽度，保底 260
-//   大小、类型、修改日期 —— 固定宽度
-// ============================================================================
+// 列顺序对齐资源管理器：名称 / 修改日期 / 类型 / 大小
+// 列宽策略：名称列自适应吃剩余宽度（保底 260），其余固定
+ // ============================================================================
 
 #include "FileListView.h"
 
 // ============================================================================
-// 列定义常量
+// 列定义
 // ============================================================================
 
-static const int kColumnCount      = 4;
-static const int kSizeColumnWidth  = 110;   // 大小
-static const int kTypeColumnWidth  = 120;   // 类型
 static const int kTimeColumnWidth  = 160;   // 修改日期
+static const int kTypeColumnWidth  = 120;   // 类型
+static const int kSizeColumnWidth  = 110;   // 大小
 static const int kNameColumnMin    = 260;   // 名称列保底宽度
 
 // ============================================================================
@@ -27,7 +25,6 @@ static const int kNameColumnMin    = 260;   // 名称列保底宽度
 
 FileListView::~FileListView()
 {
-    // 字体由我们自己创建，需要自己删除，否则泄漏 GDI 对象
     if (m_hFont != nullptr)
     {
         ::DeleteObject(m_hFont);
@@ -41,14 +38,11 @@ FileListView::~FileListView()
 
 bool FileListView::Create(HWND parent, HINSTANCE hInstance)
 {
-    // ------------------------------------------------------------------
-    // 关键：LVS_OWNERDATA 必须在创建时通过样式指定，创建后无法再改。
-    //       同时必须是报告模式（LVS_REPORT）。
-    // ------------------------------------------------------------------
+    // LVS_OWNERDATA 必须在创建时指定，创建后无法改；且必须是报告模式
     DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP
-                | LVS_REPORT      // 报告模式（带列头的列表）
-                | LVS_OWNERDATA   // 虚拟模式：数据由我们按需提供
-                | LVS_SHOWSELALWAYS;  // 失去焦点时也保持选中高亮
+                | LVS_REPORT
+                | LVS_OWNERDATA
+                | LVS_SHOWSELALWAYS;
 
     m_hWnd = ::CreateWindowExW(
         0,
@@ -66,10 +60,6 @@ bool FileListView::Create(HWND parent, HINSTANCE hInstance)
         return false;
     }
 
-    // 扩展样式：
-    //   FULLROWSELECT —— 整行选中（资源管理器的行为）
-    //   DOUBLEBUFFER  —— 双缓冲，滚动不闪
-    //   LABELTIP      —— 列内容过长时显示提示
     ListView_SetExtendedListViewStyle(
         m_hWnd,
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
@@ -80,13 +70,25 @@ bool FileListView::Create(HWND parent, HINSTANCE hInstance)
     return true;
 }
 
+void FileListView::SetIconCache(shell::IconCache* iconCache)
+{
+    m_iconCache = iconCache;
+
+    if (m_hWnd == nullptr || iconCache == nullptr || iconCache->ImageList() == nullptr)
+    {
+        return;
+    }
+
+    // 把小图标图像列表挂到列表控件上
+    ListView_SetImageList(m_hWnd, iconCache->ImageList(), LVSIL_SMALL);
+}
+
 // ============================================================================
 // 外观
 // ============================================================================
 
 void FileListView::ApplyFont()
 {
-    // 用系统界面字体（和资源管理器保持一致的观感）
     NONCLIENTMETRICSW metrics = {};
     metrics.cbSize = sizeof(metrics);
 
@@ -97,7 +99,6 @@ void FileListView::ApplyFont()
 
     if (m_hFont == nullptr)
     {
-        // 兜底：用系统默认 GUI 字体
         m_hFont = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
     }
 
@@ -112,18 +113,18 @@ void FileListView::ApplyColumns()
     LVCOLUMNW column = {};
     column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM | LVCF_FMT;
 
-    // 第 0 列：名称（左对齐，宽度稍后由 LayoutColumns 计算）
+    // 第 0 列：名称（左对齐，宽度由 LayoutColumns 计算）
     column.iSubItem = 0;
     column.fmt      = LVCFMT_LEFT;
     column.pszText  = const_cast<wchar_t*>(L"名称");
     column.cx       = 300;
     ListView_InsertColumn(m_hWnd, 0, &column);
 
-    // 第 1 列：大小（右对齐，与资源管理器一致）
+    // 第 1 列：修改日期
     column.iSubItem = 1;
-    column.fmt      = LVCFMT_RIGHT;
-    column.pszText  = const_cast<wchar_t*>(L"大小");
-    column.cx       = kSizeColumnWidth;
+    column.fmt      = LVCFMT_LEFT;
+    column.pszText  = const_cast<wchar_t*>(L"修改日期");
+    column.cx       = kTimeColumnWidth;
     ListView_InsertColumn(m_hWnd, 1, &column);
 
     // 第 2 列：类型
@@ -133,11 +134,11 @@ void FileListView::ApplyColumns()
     column.cx       = kTypeColumnWidth;
     ListView_InsertColumn(m_hWnd, 2, &column);
 
-    // 第 3 列：修改日期
+    // 第 3 列：大小（右对齐，和资源管理器一致）
     column.iSubItem = 3;
-    column.fmt      = LVCFMT_LEFT;
-    column.pszText  = const_cast<wchar_t*>(L"修改日期");
-    column.cx       = kTimeColumnWidth;
+    column.fmt      = LVCFMT_RIGHT;
+    column.pszText  = const_cast<wchar_t*>(L"大小");
+    column.cx       = kSizeColumnWidth;
     ListView_InsertColumn(m_hWnd, 3, &column);
 }
 
@@ -151,8 +152,7 @@ void FileListView::LayoutColumns()
     RECT clientRect = {};
     ::GetClientRect(m_hWnd, &clientRect);
 
-    // 名称列 = 总宽 - 三列固定宽 - 竖向滚动条宽
-    int fixedWidth    = kSizeColumnWidth + kTypeColumnWidth + kTimeColumnWidth;
+    int fixedWidth     = kTimeColumnWidth + kTypeColumnWidth + kSizeColumnWidth;
     int scrollBarWidth = ::GetSystemMetrics(SM_CXVSCROLL);
     int nameWidth      = (clientRect.right - clientRect.left) - fixedWidth - scrollBarWidth;
 
@@ -190,14 +190,12 @@ void FileListView::SetResult(std::shared_ptr<const shell::EnumerateResult> resul
         return;
     }
 
-    // 虚拟模式：只告诉控件「一共多少行」，具体内容靠 LVN_GETDISPINFO 回调
     int itemCount = (m_result != nullptr) ? static_cast<int>(m_result->entries.size()) : 0;
 
     ListView_SetItemCountEx(m_hWnd, itemCount, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
-    ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(-1), 0);  // 清空选中
+    ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(-1), 0);
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
 
-    // 数据变化后列宽可能也要跟着调整（名称列自适应）
     LayoutColumns();
 }
 
@@ -217,16 +215,12 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
     switch (header->code)
     {
     // --------------------------------------------------------------
-    // 虚拟模式核心回调：控件要哪一行哪一列的文字，我们在这里给
+    // 虚拟模式核心回调：控件要哪一行哪一列的内容，在这里提供
     // --------------------------------------------------------------
     case LVN_GETDISPINFO:
     {
         NMLVDISPINFOW* displayInfo = reinterpret_cast<NMLVDISPINFOW*>(lParam);
 
-        if ((displayInfo->item.mask & LVIF_TEXT) == 0)
-        {
-            return 0;
-        }
         if (m_result == nullptr)
         {
             return 0;
@@ -240,15 +234,34 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
         const shell::ShellEntry& entry = m_result->entries[index];
 
+        // ---- 图标（只对整行生效，与具体列无关）----
+        if ((displayInfo->item.mask & LVIF_IMAGE) != 0)
+        {
+            if (m_iconCache != nullptr)
+            {
+                displayInfo->item.iImage = m_iconCache->GetIconIndex(entry.name, entry.isFolder);
+            }
+            else
+            {
+                displayInfo->item.iImage = 0;
+            }
+        }
+
+        // ---- 文本 ----
+        if ((displayInfo->item.mask & LVIF_TEXT) == 0)
+        {
+            return 0;
+        }
+
         switch (displayInfo->item.iSubItem)
         {
-        case 0:   // 名称（直接指向数据里的字符串，不复制）
+        case 0:   // 名称
             displayInfo->item.pszText = const_cast<wchar_t*>(entry.name.c_str());
             break;
 
-        case 1:   // 大小
-            m_cacheSize = format::SizeText(entry.size, entry.isFolder);
-            displayInfo->item.pszText = const_cast<wchar_t*>(m_cacheSize.c_str());
+        case 1:   // 修改日期
+            m_cacheTime = format::FileTimeText(entry.modified);
+            displayInfo->item.pszText = const_cast<wchar_t*>(m_cacheTime.c_str());
             break;
 
         case 2:   // 类型
@@ -256,9 +269,9 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             displayInfo->item.pszText = const_cast<wchar_t*>(m_cacheType.c_str());
             break;
 
-        case 3:   // 修改日期
-            m_cacheTime = format::FileTimeText(entry.modified);
-            displayInfo->item.pszText = const_cast<wchar_t*>(m_cacheTime.c_str());
+        case 3:   // 大小
+            m_cacheSize = format::SizeText(entry.size, entry.isFolder);
+            displayInfo->item.pszText = const_cast<wchar_t*>(m_cacheSize.c_str());
             break;
 
         default:
@@ -268,7 +281,7 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
     }
 
     // --------------------------------------------------------------
-    // 双击：交给主窗口决定是否进入该目录
+    // 双击：交给主窗口处理（文件夹进目录，文件用默认程序打开）
     // --------------------------------------------------------------
     case NM_DBLCLK:
     {

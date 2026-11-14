@@ -1,0 +1,73 @@
+// ============================================================================
+// 文件管理器（自研 Explorer 替代品）
+// 文件：src/shell/ShellIcon.h
+//
+// 系统图标缓存。
+//
+// 【为什么这样做才快】
+//   资源管理器显示图标并不慢，慢的是缩略图。图标走的是系统图标缓存。
+//   这里做两件事保证速度：
+//     1. 直接用系统图像列表（SHGetImageList），不自己构造图标
+//     2. 文件图标按「扩展名」缓存，同一个扩展名只查一次；
+//        查询时用 SHGFI_USEFILEATTRIBUTES，不实际访问文件，
+//        只按扩展名从系统图标表里取，耗时在微秒级
+//
+//   结果：一万个文件也不会因为取图标而卡。代价是「同一扩展名的文件共用一个图标」，
+//   和资源管理器默认行为一致（资源管理器也是按扩展名给图标）。
+// ============================================================================
+
+#pragma once
+
+#include <windows.h>
+#include <commctrl.h>       // HIMAGELIST 定义
+#include <shellapi.h>       // SHGetFileInfoW / SHFILEINFOW / SHGFI_* 标志
+#include <commoncontrols.h> // IImageList / SHGetImageList
+#include <wil/com.h>
+
+#include <string>
+#include <unordered_map>
+
+namespace shell
+{
+
+// 图标缓存
+class IconCache
+{
+public:
+    IconCache();
+    ~IconCache();
+
+    IconCache(const IconCache&) = delete;
+    IconCache& operator=(const IconCache&) = delete;
+
+    // ------------------------------------------------------------------
+    // 初始化：拿系统小图标图像列表
+    // 返回 false 表示初始化失败（此时界面仍可用，只是没有图标）
+    // ------------------------------------------------------------------
+    bool Initialize();
+
+    // 系统小图标图像列表句柄（可直接塞给 ListView_SetImageList）
+    HIMAGELIST ImageList() const { return m_hImageList; }
+
+    // ------------------------------------------------------------------
+    // 取某个条目的图标索引
+    //   name     —— 文件/文件夹名称（不是完整路径，只用来取扩展名）
+    //   isFolder —— 是否文件夹
+    // ------------------------------------------------------------------
+    int GetIconIndex(const std::wstring& name, bool isFolder);
+
+private:
+    // 从名称里提取扩展名（小写，含点号，如 ".dll"；没有扩展名返回空串）
+    static std::wstring ExtractExtension(const std::wstring& name);
+
+private:
+    wil::com_ptr<IImageList> m_systemImageList;   // 系统图像列表（持有引用保证存活）
+    HIMAGELIST               m_hImageList = nullptr;
+
+    std::unordered_map<std::wstring, int> m_extensionIconCache;  // 扩展名 → 图标索引
+
+    int  m_folderIconIndex  = 0;   // 文件夹统一图标
+    bool m_initialized      = false;
+};
+
+} // namespace shell
