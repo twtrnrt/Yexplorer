@@ -27,6 +27,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/AsyncTask.h"
 #include "core/NavigationHistory.h"
@@ -42,6 +43,16 @@ static const int kControlIdBack    = 1001;
 static const int kControlIdForward = 1002;
 static const int kControlIdUp      = 1003;
 static const int kControlIdAddress = 1004;
+
+// 快捷键命令 ID（和控件 ID 分开编号，避免撞号）
+static const int kCommandCopy      = 3101;   // Ctrl+C
+static const int kCommandCut       = 3102;   // Ctrl+X
+static const int kCommandPaste     = 3103;   // Ctrl+V
+static const int kCommandDelete    = 3104;   // Delete
+static const int kCommandRefresh   = 3105;   // F5
+static const int kCommandNewFolder = 3106;   // Ctrl+Shift+N
+static const int kCommandSelectAll = 3107;   // Ctrl+A
+static const int kCommandGoUp      = 3108;   // Backspace
 
 class MainWindow
 {
@@ -76,6 +87,16 @@ private:
     // 启动后台枚举（只负责枚举与界面刷新，不改历史）
     void StartEnumeration(const std::wstring& path);
 
+    // 重新枚举当前目录（复制/删除/新建之后调用）
+    void RefreshCurrentFolder();
+
+    // ---- 文件操作（阶段 4）----
+    void DoCopy();          // Ctrl+C：记住选中的路径
+    void DoCut();           // Ctrl+X：记住选中的路径，粘贴时移动
+    void DoPaste();         // Ctrl+V：复制/移动到家目录
+    void DoDelete();        // Delete：删到回收站
+    void DoNewFolder();     // Ctrl+Shift+N：新建文件夹
+
     // 后台枚举完成
     void OnEnumerationDone();
 
@@ -106,6 +127,13 @@ private:
 
     HWND         m_hStatusBar     = nullptr;
     HFONT        m_hUiFont        = nullptr;   // 普通控件字体
+    HACCEL       m_hAccelerator   = nullptr;   // 键盘快捷键表
+
+    // ---- 内部剪贴板（复制/剪切用）----
+    // 说明：这里不写系统剪贴板，只在程序内部记住路径。
+    // 好处是实现简单可靠；代价是不能和资源管理器互相复制粘贴（二期可扩展）
+    std::vector<std::wstring> m_clipboardPaths;
+    bool                      m_clipboardIsCut = false;
 
     // ---- 数据 ----
     shell::IconCache   m_iconCache;

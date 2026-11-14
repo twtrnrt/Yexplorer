@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 class FileListView
 {
@@ -50,6 +51,15 @@ public:
     void SetActivateCallback(ActivateCallback callback) { m_onActivate = std::move(callback); }
 
     HWND Handle() const { return m_hWnd; }
+
+    // 取当前所有选中项的完整路径（复制/剪切/删除要用）
+    std::vector<std::wstring> GetSelectedPaths() const;
+
+    // 当前列表里一共有多少项
+    size_t ItemCount() const;
+
+    // 全选（Ctrl+A）
+    void SelectAll();
 
     LRESULT HandleNotify(LPARAM lParam);
 

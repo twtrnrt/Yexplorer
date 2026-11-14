@@ -200,6 +200,50 @@ void FileListView::SetResult(std::shared_ptr<const shell::EnumerateResult> resul
 }
 
 // ============================================================================
+// 选中项相关
+// ============================================================================
+
+std::vector<std::wstring> FileListView::GetSelectedPaths() const
+{
+    std::vector<std::wstring> paths;
+
+    if (m_hWnd == nullptr || m_result == nullptr)
+    {
+        return paths;
+    }
+
+    int itemCount = static_cast<int>(m_result->entries.size());
+
+    for (int index = 0; index < itemCount; ++index)
+    {
+        if ((ListView_GetItemState(m_hWnd, index, LVIS_SELECTED) & LVIS_SELECTED) != 0)
+        {
+            paths.push_back(m_result->entries[index].fullPath);
+        }
+    }
+
+    return paths;
+}
+
+size_t FileListView::ItemCount() const
+{
+    if (m_result == nullptr)
+    {
+        return 0;
+    }
+    return m_result->entries.size();
+}
+
+void FileListView::SelectAll()
+{
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+    ListView_SetItemState(m_hWnd, -1, LVIS_SELECTED, LVIS_SELECTED);
+}
+
+// ============================================================================
 // 通知处理
 // ============================================================================
 

@@ -11,6 +11,7 @@
 #include "MainWnd.h"
 #include "core/Format.h"
 #include "core/Logger.h"
+#include "shell/ShellOperations.h"
 
 #include <shellapi.h>   // ShellExecuteW
 #include <algorithm>
@@ -60,6 +61,12 @@ MainWindow::~MainWindow()
     if (m_enumThread.joinable())
     {
         m_enumThread.join();
+    }
+
+    if (m_hAccelerator != nullptr)
+    {
+        ::DestroyAcceleratorTable(m_hAccelerator);
+        m_hAccelerator = nullptr;
     }
 
     if (m_hUiFont != nullptr)
@@ -125,6 +132,26 @@ int MainWindow::RunMessageLoop()
     MSG msg = {};
     while (::GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
+        // 地址栏正在手工打字时，Ctrl+C / Ctrl+V 应该作用于输入框，
+        // 不能被我下面的快捷键表抢走
+        bool editingInAddressBar = false;
+        HWND focus = ::GetFocus();
+        if (focus != nullptr)
+        {
+            wchar_t className[64] = {};
+            ::GetClassNameW(focus, className, 64);
+            if (::wcscmp(className, L"Edit") == 0)
+            {
+                editingInAddressBar = true;
+            }
+        }
+
+        if (!editingInAddressBar && m_hAccelerator != nullptr &&
+            ::TranslateAcceleratorW(m_hWnd, m_hAccelerator, &msg))
+        {
+            continue;
+        }
+
         ::TranslateMessage(&msg);
         ::DispatchMessageW(&msg);
     }
@@ -229,6 +256,26 @@ void MainWindow::CreateChildControls()
     {
         ::SendMessageW(m_hStatusBar, WM_SETFONT, reinterpret_cast<WPARAM>(m_hUiFont), TRUE);
     }
+
+    // ---------------- 6. 键盘快捷键 ----------------
+    // 用系统的加速键表，好处是不用去拦截每个控件的按键消息
+    ACCEL accelerators[] =
+    {
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'C',       kCommandCopy },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'X',       kCommandCut },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'V',       kCommandPaste },
+        { static_cast<BYTE>(FVIRTKEY),            VK_DELETE, kCommandDelete },
+        { static_cast<BYTE>(FVIRTKEY),            VK_F5,     kCommandRefresh },
+        { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'N', kCommandNewFolder },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'A',       kCommandSelectAll },
+        { static_cast<BYTE>(FVIRTKEY),            VK_BACK,   kCommandGoUp },
+    };
+
+    m_hAccelerator = ::CreateAcceleratorTableW(accelerators, ARRAYSIZE(accelerators));
+    if (m_hAccelerator == nullptr)
+    {
+        Logger::Warn(L"快捷键表创建失败，键盘操作不可用");
+    }
 }
 
 // ============================================================================
@@ -302,7 +349,39 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------
     case WM_COMMAND:
     {
-        int controlId   = LOWORD(wParam);
+        int controlId = LOWORD(wParam);
+
+        // ---- 快捷键命令（由加速键表发来，通知码为 0/1）----
+        switch (controlId)
+        {
+        case kCommandCopy:
+            DoCopy();
+            return 0;
+        case kCommandCut:
+            DoCut();
+            return 0;
+        case kCommandPaste:
+            DoPaste();
+            return 0;
+        case kCommandDelete:
+            DoDelete();
+            return 0;
+        case kCommandRefresh:
+            RefreshCurrentFolder();
+            return 0;
+        case kCommandNewFolder:
+            DoNewFolder();
+            return 0;
+        case kCommandSelectAll:
+            m_fileListView.SelectAll();
+            return 0;
+        case kCommandGoUp:
+            GoUp();
+            return 0;
+        default:
+            break;
+        }
+
         int notification = HIWORD(wParam);
 
         if (notification == BN_CLICKED)
@@ -468,6 +547,130 @@ void MainWindow::StartEnumeration(const std::wstring& path)
             ::PostMessageW(hwnd, WM_APP_ENUM_DONE, 0, 0);
         }
     });
+}
+
+// ============================================================================
+// 刷新当前目录
+// ============================================================================
+
+void MainWindow::RefreshCurrentFolder()
+{
+    std::wstring current = m_history.Current();
+    if (current.empty())
+    {
+        return;
+    }
+    StartEnumeration(current);
+}
+
+// ============================================================================
+// 文件操作（阶段 4）
+// ============================================================================
+
+void MainWindow::DoCopy()
+{
+    std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+    if (selected.empty())
+    {
+        return;
+    }
+
+    m_clipboardPaths = selected;
+    m_clipboardIsCut = false;
+
+    Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 项到剪贴板");
+}
+
+void MainWindow::DoCut()
+{
+    std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+    if (selected.empty())
+    {
+        return;
+    }
+
+    m_clipboardPaths = selected;
+    m_clipboardIsCut = true;
+
+    Logger::Info(L"已剪切 " + std::to_wstring(selected.size()) + L" 项到剪贴板");
+}
+
+void MainWindow::DoPaste()
+{
+    if (m_clipboardPaths.empty())
+    {
+        return;
+    }
+
+    std::wstring targetDirectory = m_history.Current();
+    if (targetDirectory.empty())
+    {
+        return;
+    }
+
+    HRESULT hr = m_clipboardIsCut
+                 ? shellops::MoveItems(m_clipboardPaths, targetDirectory, m_hWnd)
+                 : shellops::CopyItems(m_clipboardPaths, targetDirectory, m_hWnd);
+
+    if (SUCCEEDED(hr))
+    {
+        // 剪切成功之后剪贴板就空了，避免再粘贴一次
+        if (m_clipboardIsCut)
+        {
+            m_clipboardPaths.clear();
+            m_clipboardIsCut = false;
+        }
+
+        Logger::Info(L"粘贴完成，目标目录：" + targetDirectory);
+        RefreshCurrentFolder();
+    }
+    else
+    {
+        Logger::Error(L"粘贴失败：" + Logger::FormatHresult(hr));
+    }
+}
+
+void MainWindow::DoDelete()
+{
+    std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+    if (selected.empty())
+    {
+        return;
+    }
+
+    HRESULT hr = shellops::DeleteItems(selected, m_hWnd);
+
+    if (SUCCEEDED(hr))
+    {
+        Logger::Info(L"已删除 " + std::to_wstring(selected.size()) + L" 项（进回收站，可撤销）");
+        RefreshCurrentFolder();
+    }
+    else
+    {
+        Logger::Error(L"删除失败：" + Logger::FormatHresult(hr));
+    }
+}
+
+void MainWindow::DoNewFolder()
+{
+    std::wstring current = m_history.Current();
+    if (current.empty())
+    {
+        return;
+    }
+
+    std::wstring created;
+    HRESULT hr = shellops::CreateNewFolder(current, created);
+
+    if (SUCCEEDED(hr))
+    {
+        Logger::Info(L"新建文件夹成功：" + created);
+        RefreshCurrentFolder();
+    }
+    else
+    {
+        Logger::Error(L"新建文件夹失败：" + Logger::FormatHresult(hr));
+    }
 }
 
 void MainWindow::OnEnumerationDone()
