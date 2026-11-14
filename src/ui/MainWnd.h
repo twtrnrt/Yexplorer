@@ -33,6 +33,7 @@
 #include "shell/ShellFolder.h"
 #include "shell/ShellIcon.h"
 #include "ui/FileListView.h"
+#include "ui/FlatButton.h"
 #include "ui/NavigationPane.h"
 
 // 子控件 ID
@@ -105,13 +106,13 @@ private:
     // ---- 子控件 ----
     FileListView m_fileListView;
     NavigationPane m_navigationPane;   // 左侧导航栏（快速访问 / 各硬盘）
-    HWND         m_hBackButton    = nullptr;
-    HWND         m_hForwardButton = nullptr;
-    HWND         m_hUpButton      = nullptr;
+    FlatButton   m_backButton;         // 后退（自绘扁平按钮）
+    FlatButton   m_forwardButton;      // 前进
+    FlatButton   m_upButton;           // 向上
+
     HWND         m_hAddressEdit   = nullptr;
     HWND         m_hStatusBar     = nullptr;
     HFONT        m_hUiFont        = nullptr;   // 普通控件字体
-    HFONT        m_hIconFont      = nullptr;   // 箭头图标字体（Segoe MDL2 Assets）
 
     // ---- 数据 ----
     shell::IconCache   m_iconCache;

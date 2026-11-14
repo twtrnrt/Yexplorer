@@ -49,6 +49,9 @@ public:
     // 系统小图标图像列表句柄（可直接塞给 ListView_SetImageList）
     HIMAGELIST ImageList() const { return m_hImageList; }
 
+    // 统一的文件夹图标索引（导航栏「快速访问」这类分组标题用）
+    int FolderIconIndex() const { return m_folderIconIndex; }
+
     // ------------------------------------------------------------------
     // 取某个条目的图标索引
     //   name     —— 文件/文件夹名称（不是完整路径，只用来取扩展名）

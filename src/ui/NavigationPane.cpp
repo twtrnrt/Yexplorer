@@ -118,10 +118,11 @@ void NavigationPane::BuildTree()
     TreeView_DeleteAllItems(m_hWnd);
     m_nodes.clear();
 
-    int iconFolder    = (m_iconCache != nullptr)
-                        ? m_iconCache->GetIconIndexByPath(L"C:\\") : 0;
-    int iconComputer  = (m_iconCache != nullptr)
-                        ? m_iconCache->GetIconIndexByPath(kMyComputerClsid) : iconFolder;
+    // 「快速访问」分组标题用一个普通文件夹图标
+    // 注意不要用 "C:\" 取图标——那会被识别成驱动器，拿到硬盘图标
+    int iconFolder   = (m_iconCache != nullptr) ? m_iconCache->FolderIconIndex() : 0;
+    int iconComputer = (m_iconCache != nullptr)
+                       ? m_iconCache->GetIconIndexByPath(kMyComputerClsid) : iconFolder;
 
     // ---------------- 快速访问 ----------------
     HTREEITEM quickAccessItem = nullptr;

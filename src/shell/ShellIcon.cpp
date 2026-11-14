@@ -44,13 +44,19 @@ int QueryIconIndexByExtension(const std::wstring& extension)
 }
 
 // ----------------------------------------------------------------------------
-// 取文件夹图标：用系统目录 "C:\" 作为样本，只查一次
+// 取文件夹图标
+//
+// 【注意这里踩过坑】
+//   一开始用 "C:\\" 当样本，结果系统把它识别成「驱动器」，返回的是硬盘图标，
+//   导致列表里所有文件夹都显示成硬盘。
+//   正确做法是传一个普通名字（如 "folder"）：配合 SHGFI_USEFILEATTRIBUTES，
+//   系统不会去访问它，只按「这是一个目录」来给图标 —— 得到的就是标准黄色文件夹。
 // ----------------------------------------------------------------------------
 int QueryFolderIconIndex()
 {
     SHFILEINFOW fileInfo = {};
     DWORD_PTR result = ::SHGetFileInfoW(
-        L"C:\\",
+        L"folder",
         FILE_ATTRIBUTE_DIRECTORY,
         &fileInfo,
         sizeof(fileInfo),

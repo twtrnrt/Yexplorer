@@ -34,11 +34,6 @@ static const wchar_t* kInitialPath = L"C:\\";
 // 日志里最多记多少条
 static const size_t kMaxLogItems = 100;
 
-// Segoe MDL2 Assets 字体里的箭头图标字符（Windows 10/11 自带这套图标字体）
-static const wchar_t* kGlyphBack    = L"\xE72B";   // 后退
-static const wchar_t* kGlyphForward = L"\xE72A";   // 前进
-static const wchar_t* kGlyphUp      = L"\xE74A";   // 向上
-
 // ============================================================================
 // 内部辅助函数
 // ============================================================================
@@ -83,11 +78,6 @@ MainWindow::~MainWindow()
     {
         ::DeleteObject(m_hUiFont);
         m_hUiFont = nullptr;
-    }
-    if (m_hIconFont != nullptr)
-    {
-        ::DeleteObject(m_hIconFont);
-        m_hIconFont = nullptr;
     }
 }
 
@@ -189,13 +179,6 @@ void MainWindow::CreateChildControls()
         m_hUiFont = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
     }
 
-    // 箭头图标字体（Windows 10/11 自带的图标字体，用来画后退/前进/向上）
-    m_hIconFont = ::CreateFontW(
-        -Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-        L"Segoe MDL2 Assets");
-
     // ---------------- 2. 文件列表 ----------------
     if (!m_fileListView.Create(m_hWnd, m_hInstance))
     {
@@ -220,34 +203,15 @@ void MainWindow::CreateChildControls()
         });
     }
 
-    // ---------------- 3. 三个导航按钮 ----------------
-    DWORD buttonStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON;
-
-    m_hBackButton = ::CreateWindowExW(0, L"BUTTON", kGlyphBack, buttonStyle,
-                                      0, 0, 0, 0, m_hWnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdBack)),
-                                      m_hInstance, nullptr);
-
-    m_hForwardButton = ::CreateWindowExW(0, L"BUTTON", kGlyphForward, buttonStyle,
-                                         0, 0, 0, 0, m_hWnd,
-                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdForward)),
-                                         m_hInstance, nullptr);
-
-    m_hUpButton = ::CreateWindowExW(0, L"BUTTON", kGlyphUp, buttonStyle,
-                                    0, 0, 0, 0, m_hWnd,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdUp)),
-                                    m_hInstance, nullptr);
-
-    if (m_hIconFont != nullptr)
-    {
-        ::SendMessageW(m_hBackButton,    WM_SETFONT, reinterpret_cast<WPARAM>(m_hIconFont), TRUE);
-        ::SendMessageW(m_hForwardButton, WM_SETFONT, reinterpret_cast<WPARAM>(m_hIconFont), TRUE);
-        ::SendMessageW(m_hUpButton,      WM_SETFONT, reinterpret_cast<WPARAM>(m_hIconFont), TRUE);
-    }
+    // ---------------- 3. 三个导航按钮（自绘扁平按钮，无边框） ----------------
+    m_backButton.Create(m_hWnd, kControlIdBack, FlatButton::ArrowKind::Back, m_hInstance);
+    m_forwardButton.Create(m_hWnd, kControlIdForward, FlatButton::ArrowKind::Forward, m_hInstance);
+    m_upButton.Create(m_hWnd, kControlIdUp, FlatButton::ArrowKind::Up, m_hInstance);
 
     // ---------------- 4. 地址栏 ----------------
+    // 用 STATICEDGE（单像素细边）而不是 CLIENTEDGE（两像素立体边），更接近现代扁平观感
     m_hAddressEdit = ::CreateWindowExW(
-        WS_EX_CLIENTEDGE,
+        WS_EX_STATICEDGE,
         L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
         0, 0, 0, 0, m_hWnd,
@@ -678,8 +642,8 @@ void MainWindow::LayoutChildren()
     int clientHeight = clientRect.bottom - clientRect.top;
 
     int margin     = Scale(8);
-    int buttonWidth  = Scale(38);
-    int buttonHeight = Scale(30);
+    int buttonWidth  = Scale(34);
+    int buttonHeight = Scale(32);
     int gap        = Scale(4);
     int navHeight  = Scale(46);
     int addressHeight = Scale(26);
@@ -694,13 +658,13 @@ void MainWindow::LayoutChildren()
     int buttonY = (navHeight - buttonHeight) / 2;
     int cursorX = margin;
 
-    ::MoveWindow(m_hBackButton, cursorX, buttonY, buttonWidth, buttonHeight, TRUE);
+    m_backButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
-    ::MoveWindow(m_hForwardButton, cursorX, buttonY, buttonWidth, buttonHeight, TRUE);
+    m_forwardButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
-    ::MoveWindow(m_hUpButton, cursorX, buttonY, buttonWidth, buttonHeight, TRUE);
+    m_upButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + Scale(10);
 
     // ---- 地址栏 ----
@@ -743,17 +707,17 @@ void MainWindow::LayoutChildren()
 
 void MainWindow::UpdateNavigationState()
 {
-    if (m_hBackButton == nullptr)
+    if (m_backButton.Handle() == nullptr)
     {
         return;
     }
 
-    ::EnableWindow(m_hBackButton,    m_history.CanGoBack()    ? TRUE : FALSE);
-    ::EnableWindow(m_hForwardButton, m_history.CanGoForward() ? TRUE : FALSE);
+    ::EnableWindow(m_backButton.Handle(),    m_history.CanGoBack()    ? TRUE : FALSE);
+    ::EnableWindow(m_forwardButton.Handle(), m_history.CanGoForward() ? TRUE : FALSE);
 
     std::wstring current = m_history.Current();
     std::wstring parent  = NavigationHistory::ParentPath(current);
-    ::EnableWindow(m_hUpButton, (parent != current) ? TRUE : FALSE);
+    ::EnableWindow(m_upButton.Handle(), (parent != current) ? TRUE : FALSE);
 }
 
 void MainWindow::UpdateStatusBar()
