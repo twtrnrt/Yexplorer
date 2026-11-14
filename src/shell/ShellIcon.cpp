@@ -171,4 +171,136 @@ int IconCache::GetIconIndexByPath(const std::wstring& path)
     return fileInfo.iIcon;
 }
 
+// ============================================================================
+// 半透明图标（被剪切的条目用）
+// ============================================================================
+
+HICON IconCache::CreateDimmedIcon(HICON source, int size)
+{
+    if (source == nullptr || size <= 0)
+    {
+        return nullptr;
+    }
+
+    // 32 位带 alpha 的位图，图标才能保住透明边缘
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth       = size;
+    bitmapInfo.bmiHeader.biHeight      = -size;   // 负数 = 从上往下，省得上下颠倒
+    bitmapInfo.bmiHeader.biPlanes      = 1;
+    bitmapInfo.bmiHeader.biBitCount    = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void*    pixels   = nullptr;
+    HDC      screenDc = ::GetDC(nullptr);
+    HBITMAP  bitmap   = ::CreateDIBSection(screenDc, &bitmapInfo, DIB_RGB_COLORS, &pixels, nullptr, 0);
+
+    if (bitmap == nullptr || pixels == nullptr)
+    {
+        if (bitmap != nullptr)
+        {
+            ::DeleteObject(bitmap);
+        }
+        ::ReleaseDC(nullptr, screenDc);
+        return nullptr;
+    }
+
+    HDC     memoryDc = ::CreateCompatibleDC(screenDc);
+    HBITMAP oldBitmap = static_cast<HBITMAP>(::SelectObject(memoryDc, bitmap));
+
+    // 先把原图标画进去（含 alpha 通道）
+    ::DrawIconEx(memoryDc, 0, 0, source, size, size, 0, nullptr, DI_NORMAL);
+
+    ::SelectObject(memoryDc, oldBitmap);
+    ::DeleteDC(memoryDc);
+    ::ReleaseDC(nullptr, screenDc);
+
+    // 把每个像素的 alpha 减半，就得到"淡了一半"的效果
+    uint32_t* pixelData = static_cast<uint32_t*>(pixels);
+    int       total     = size * size;
+
+    bool hasAlpha = false;
+    for (int i = 0; i < total; ++i)
+    {
+        uint32_t alpha = (pixelData[i] >> 24) & 0xFF;
+        if (alpha != 0)
+        {
+            hasAlpha = true;
+            pixelData[i] = (pixelData[i] & 0x00FFFFFF) |
+                           (static_cast<uint32_t>(alpha / 2) << 24);
+        }
+    }
+
+    // 图标根本没有 alpha 通道（老式图标），淡化没有意义，直接放弃
+    if (!hasAlpha)
+    {
+        ::DeleteObject(bitmap);
+        return nullptr;
+    }
+
+    // 位图转回 HICON
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon    = TRUE;
+    iconInfo.hbmColor = bitmap;
+    iconInfo.hbmMask  = ::CreateBitmap(size, size, 1, 1, nullptr);
+
+    HICON result = ::CreateIconIndirect(&iconInfo);
+
+    if (iconInfo.hbmMask != nullptr)
+    {
+        ::DeleteObject(iconInfo.hbmMask);
+    }
+    ::DeleteObject(bitmap);
+
+    return result;
+}
+
+int IconCache::GetDimmedIconIndex(int originalIndex)
+{
+    if (!m_initialized || m_systemImageList == nullptr || originalIndex < 0)
+    {
+        return originalIndex;
+    }
+
+    auto cached = m_dimmedIconCache.find(originalIndex);
+    if (cached != m_dimmedIconCache.end())
+    {
+        return cached->second;
+    }
+
+    int sizeX = 16;
+    int sizeY = 16;
+    ::ImageList_GetIconSize(m_hImageList, &sizeX, &sizeY);
+
+    HICON original = nullptr;
+    if (FAILED(m_systemImageList->GetIcon(originalIndex, ILD_TRANSPARENT, &original)) ||
+        original == nullptr)
+    {
+        return originalIndex;
+    }
+
+    HICON dimmed = CreateDimmedIcon(original, sizeX);
+    ::DestroyIcon(original);
+
+    if (dimmed == nullptr)
+    {
+        return originalIndex;
+    }
+
+    // 追加进同一个图像列表，列表控件的图标索引就能直接用了
+    // ImageList_ReplaceIcon 传 -1 表示"不替换，直接加一个"，
+    // 返回新图标的索引；失败返回 -1。
+    // （IImageList::Add 只收位图不收图标，所以这里用 comctl32 的 C 接口）
+    int newIndex = ::ImageList_ReplaceIcon(m_hImageList, -1, dimmed);
+    ::DestroyIcon(dimmed);
+
+    if (newIndex < 0)
+    {
+        return originalIndex;
+    }
+
+    m_dimmedIconCache[originalIndex] = newIndex;
+    return newIndex;
+}
+
 } // namespace shell

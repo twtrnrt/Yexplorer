@@ -187,6 +187,9 @@ private:
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
     enum class FileOperationKind { None, Copy, Move, Delete };
     FileOperationKind                            m_lastOperation = FileOperationKind::None;
+
+    // 复制/移动完成后的那次刷新，是否要把"新出现的项"选中（和资源管理器一致）
+    bool                                         m_selectNewAfterEnum = false;
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
 
     // ---- 排序状态 ----

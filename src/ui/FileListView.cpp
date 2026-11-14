@@ -10,6 +10,8 @@
 
 #include "FileListView.h"
 
+#include <algorithm>
+
 // ============================================================================
 // 列定义
 // ============================================================================
@@ -191,10 +193,7 @@ void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
         return;
     }
 
-    // ------------------------------------------------------------
     // 刷新前先记住"用户看到的状态"：选中了哪些、滚动到哪一行
-    // 同一个目录刷新时，这些要原样还给用户，否则会感觉列表"重置"了一下
-    // ------------------------------------------------------------
     std::vector<std::wstring> selectedNames;
     std::wstring              topName;
 
@@ -223,28 +222,137 @@ void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
     // LVSICF_NOSCROLL：行数变少时不强制把滚动条拉回顶部
     ListView_SetItemCountEx(m_hWnd, itemCount, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 
-    // 恢复选中（按名字找，因为增减之后行号会变）
-    if (!selectedNames.empty() && m_result != nullptr)
+    RestoreSelectionAndScroll(selectedNames, topName);
+
+    // erase = FALSE：不擦背景再重画，避免整片闪白
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+
+    LayoutColumns();
+}
+
+// ============================================================================
+// 最小范围更新
+//
+// 场景：在同一个目录里复制/移动完，需要知道目录现在长什么样，
+//       但不想让整个列表重画一遍。
+// 做法：新旧列表从头开始逐行比对，找到第一个不一样的位置，
+//       从这里往后才重画；前面一模一样的行原样不动。
+// ============================================================================
+
+void FileListView::MergeResult(std::shared_ptr<shell::EnumerateResult> result)
+{
+    if (m_hWnd == nullptr)
     {
-        for (const auto& name : selectedNames)
+        m_result = std::move(result);
+        return;
+    }
+
+    // 换了目录就退化成整表更新
+    if (m_result == nullptr || result == nullptr ||
+        _wcsicmp(m_result->path.c_str(), result->path.c_str()) != 0)
+    {
+        SetResult(std::move(result));
+        return;
+    }
+
+    // 记住用户状态
+    std::vector<std::wstring> selectedNames;
+    std::wstring              topName;
+
+    int topIndex = ListView_GetTopIndex(m_hWnd);
+    if (topIndex >= 0 && topIndex < static_cast<int>(m_result->entries.size()))
+    {
+        topName = m_result->entries[static_cast<size_t>(topIndex)].name;
+    }
+
+    for (size_t i = 0; i < m_result->entries.size(); ++i)
+    {
+        if ((ListView_GetItemState(m_hWnd, static_cast<int>(i), LVIS_SELECTED) & LVIS_SELECTED) != 0)
         {
-            for (size_t i = 0; i < m_result->entries.size(); ++i)
+            selectedNames.push_back(m_result->entries[i].name);
+        }
+    }
+
+    // 从头开始逐行比对，找第一个不一样的位置
+    const std::vector<shell::ShellEntry>& oldEntries = m_result->entries;
+    const std::vector<shell::ShellEntry>& newEntries = result->entries;
+
+    size_t common  = 0;
+    size_t smaller = (oldEntries.size() < newEntries.size()) ? oldEntries.size() : newEntries.size();
+
+    while (common < smaller &&
+           _wcsicmp(oldEntries[common].fullPath.c_str(), newEntries[common].fullPath.c_str()) == 0)
+    {
+        ++common;
+    }
+
+    // 一行都没变：连重绘都不需要
+    if (common == oldEntries.size() && common == newEntries.size())
+    {
+        return;
+    }
+
+    m_result = std::move(result);
+
+    int newCount = static_cast<int>(m_result->entries.size());
+    ListView_SetItemCountEx(m_hWnd, newCount, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+
+    RestoreSelectionAndScroll(selectedNames, topName);
+
+    // 只重画从第一个变化处往下的行：上面的内容没变，不碰
+    if (common < static_cast<size_t>(newCount))
+    {
+        ListView_RedrawItems(m_hWnd, static_cast<int>(common), newCount - 1);
+        ::UpdateWindow(m_hWnd);
+    }
+    else if (newCount > 0)
+    {
+        // 是"删掉了尾巴"，重画最后几行让空白区补上
+        int from = (std::max)(0, newCount - 1);
+        ListView_RedrawItems(m_hWnd, from, newCount - 1);
+        ::UpdateWindow(m_hWnd);
+    }
+}
+
+// ============================================================================
+// 还原选中 / 滚动位置
+// ============================================================================
+
+void FileListView::RestoreSelectionAndScroll(const std::vector<std::wstring>& selectedNames,
+                                             const std::wstring&              topName)
+{
+    if (m_result == nullptr)
+    {
+        return;
+    }
+
+    // 先把控件里原有的选中全清掉：
+    // 刷新后索引会整体挪位，如果不清，选中的"行号"会粘在新内容上（选错东西）
+    LVITEMW clearItem = {};
+    clearItem.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    clearItem.state     = 0;
+    ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(-1),
+                   reinterpret_cast<LPARAM>(&clearItem));
+
+    // 恢复选中（按名字找，因为增减之后行号会变）
+    for (const auto& name : selectedNames)
+    {
+        for (size_t i = 0; i < m_result->entries.size(); ++i)
+        {
+            if (m_result->entries[i].name == name)
             {
-                if (m_result->entries[i].name == name)
-                {
-                    LVITEMW item = {};
-                    item.stateMask = LVIS_SELECTED;
-                    item.state     = LVIS_SELECTED;
-                    ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(i),
-                                   reinterpret_cast<LPARAM>(&item));
-                    break;
-                }
+                LVITEMW item = {};
+                item.stateMask = LVIS_SELECTED;
+                item.state     = LVIS_SELECTED;
+                ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(i),
+                               reinterpret_cast<LPARAM>(&item));
+                break;
             }
         }
     }
 
     // 恢复滚动位置（尽量让原来顶部那一行还在顶部附近）
-    if (!topName.empty() && m_result != nullptr)
+    if (!topName.empty())
     {
         for (size_t i = 0; i < m_result->entries.size(); ++i)
         {
@@ -255,11 +363,90 @@ void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
             }
         }
     }
+}
 
-    // erase = FALSE：不擦背景再重画，避免整片闪白
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+// ============================================================================
+// 被剪切的项：显示成半透明（和资源管理器一致）
+// ============================================================================
 
-    LayoutColumns();
+void FileListView::SetCutPaths(const std::vector<std::wstring>& paths)
+{
+    m_cutPaths = paths;
+
+    if (m_hWnd != nullptr)
+    {
+        // 整体重画一次：淡化效果可能出现在任意行，没法只画局部
+        ::InvalidateRect(m_hWnd, nullptr, FALSE);
+    }
+}
+
+std::wstring FileListView::CurrentPath() const
+{
+    return (m_result != nullptr) ? m_result->path : std::wstring();
+}
+
+std::vector<std::wstring> FileListView::AllPaths() const
+{
+    std::vector<std::wstring> paths;
+
+    if (m_result != nullptr)
+    {
+        paths.reserve(m_result->entries.size());
+        for (const auto& entry : m_result->entries)
+        {
+            paths.push_back(entry.fullPath);
+        }
+    }
+
+    return paths;
+}
+
+void FileListView::SelectPaths(const std::vector<std::wstring>& paths)
+{
+    if (m_hWnd == nullptr || m_result == nullptr)
+    {
+        return;
+    }
+
+    // 先把已有选中全部取消（wParam = -1 表示"所有项"）
+    LVITEMW clearItem = {};
+    clearItem.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    clearItem.state     = 0;
+    ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(-1),
+                   reinterpret_cast<LPARAM>(&clearItem));
+
+    for (const auto& path : paths)
+    {
+        for (size_t i = 0; i < m_result->entries.size(); ++i)
+        {
+            if (_wcsicmp(m_result->entries[i].fullPath.c_str(), path.c_str()) == 0)
+            {
+                LVITEMW item = {};
+                item.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+                item.state     = LVIS_SELECTED | LVIS_FOCUSED;
+                ::SendMessageW(m_hWnd, LVM_SETITEMSTATE, static_cast<WPARAM>(i),
+                               reinterpret_cast<LPARAM>(&item));
+                break;
+            }
+        }
+    }
+}
+
+bool FileListView::IsCutPath(const std::wstring& fullPath) const
+{    if (m_cutPaths.empty() || fullPath.empty())
+    {
+        return false;
+    }
+
+    for (const auto& cutPath : m_cutPaths)
+    {
+        if (_wcsicmp(cutPath.c_str(), fullPath.c_str()) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -504,7 +691,15 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         {
             if (m_iconCache != nullptr)
             {
-                displayInfo->item.iImage = m_iconCache->GetIconIndex(entry.name, entry.isFolder);
+                int iconIndex = m_iconCache->GetIconIndex(entry.name, entry.isFolder);
+
+                // 被剪切（Ctrl+X）的项目：图标换成半透明版本，和资源管理器一样"变淡"
+                if (IsCutPath(entry.fullPath))
+                {
+                    iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex);
+                }
+
+                displayInfo->item.iImage = iconIndex;
             }
             else
             {
@@ -571,6 +766,39 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             m_onContextMenu(screenPoint);
         }
         return 1;   // 返回非 0 表示已处理，不再弹默认菜单
+    }
+
+    // --------------------------------------------------------------
+    // 自绘：把被剪切的行的文字改成浅灰
+    // 图标变淡靠上面的"半透明图标"，文字变灰靠这里
+    // --------------------------------------------------------------
+    case NM_CUSTOMDRAW:
+    {
+        NMLVCUSTOMDRAW* customDraw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+
+        switch (customDraw->nmcd.dwDrawStage)
+        {
+        case CDDS_PREPAINT:
+            return CDRF_NOTIFYITEMDRAW;   // 要求逐行通知
+
+        case CDDS_ITEMPREPAINT:
+        {
+            size_t index = static_cast<size_t>(customDraw->nmcd.dwItemSpec);
+
+            if (m_result != nullptr && index < m_result->entries.size() &&
+                IsCutPath(m_result->entries[index].fullPath))
+            {
+                customDraw->clrText = RGB(150, 150, 150);   // 浅灰
+                return CDRF_NEWFONT;                         // 告诉控件按我改的颜色画
+            }
+
+            return CDRF_DODEFAULT;
+        }
+
+        default:
+            break;
+        }
+        return CDRF_DODEFAULT;
     }
 
     // --------------------------------------------------------------

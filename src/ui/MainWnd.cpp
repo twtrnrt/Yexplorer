@@ -17,6 +17,7 @@
 #include <shellapi.h>   // ShellExecuteW
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 
 // ============================================================================
 // 常量
@@ -550,11 +551,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         m_clearClipboardWhenDone = false;
 
+        // 粘贴完成后取消"被剪切"的淡化显示
+        m_fileListView.SetCutPaths({});
+
         // ------------------------------------------------------------
-        // 完成后怎么更新界面：
-        //   删除 → 只把删掉的那几行摘掉（不用重扫，列表不闪）
-        //   复制/移动 → 数量不定、名字可能变成"xxx - 副本"，重新扫一遍
-        //              （重扫也会保留滚动位置和选中项）
+        // 完成后怎么更新界面（原则：能少动就少动，不整表重画）
+        //   删除 → 只把删掉的那几行摘掉
+        //   移动 → 如果当前目录正好是源目录，把搬走的行摘掉
+        //   其余（复制/移动完成）→ 重新枚举一次，但只重绘变化的部分
         // ------------------------------------------------------------
         if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Delete)
         {
@@ -568,9 +572,33 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else
         {
+            // 移动：源目录里已经搬走的项，从列表上摘掉
+            if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Move)
+            {
+                std::wstring currentDirectory = m_history.Current();
+
+                for (const auto& path : m_operationPaths)
+                {
+                    std::wstring parent = NavigationHistory::ParentPath(path);
+                    if (_wcsicmp(parent.c_str(), currentDirectory.c_str()) == 0)
+                    {
+                        m_fileListView.RemoveItemByPath(path);
+                    }
+                }
+
+                UpdateTitle();
+                UpdateStatusBar();
+            }
+
+            // 复制/移动完成后重新枚举一次：
+            // 请求"把新出现的东西选中"（资源管理器粘贴完也是新文件高亮）
+            if (SUCCEEDED(hr))
+            {
+                m_selectNewAfterEnum = true;
+            }
+
             RefreshCurrentFolder();
         }
-
         m_lastOperation = FileOperationKind::None;
         m_operationPaths.clear();
         return 0;
@@ -666,7 +694,16 @@ void MainWindow::StartEnumeration(const std::wstring& path)
         m_enumPath    = path;
     }
 
-    m_fileListView.SetResult(nullptr);
+    // 只有"换了目录"才把旧列表清掉；
+    // 同一个目录刷新（F5、粘贴完成、增删之后）保留现有内容，
+    // 等新结果到了再做局部更新。否则列表会先空一下再填满，看着就是整表刷新。
+    std::wstring shownPath = m_fileListView.CurrentPath();
+    bool         isSameDir = !shownPath.empty() && _wcsicmp(shownPath.c_str(), path.c_str()) == 0;
+
+    if (!isSameDir)
+    {
+        m_fileListView.SetResult(nullptr);
+    }
 
     // 地址栏、标题、状态栏立即反映新路径
     m_addressBar.SetPath(path);
@@ -728,6 +765,9 @@ void MainWindow::DoCopy()
     m_clipboardPaths = selected;
     m_clipboardIsCut = false;
 
+    // 复制：列表里的行保持正常显示（只有剪切才变淡）
+    m_fileListView.SetCutPaths({});
+
     // 写进系统剪贴板：这样在资源管理器、桌面里也能直接粘贴
     if (!shellclip::WriteFiles(selected, false, m_hWnd))
     {
@@ -748,6 +788,10 @@ void MainWindow::DoCut()
 
     m_clipboardPaths = selected;
     m_clipboardIsCut = true;
+
+    // 剪切：被剪切的这些行显示成半透明灰（和资源管理器一致），
+    // 提示用户"这些已经被拿走了，还没落地"
+    m_fileListView.SetCutPaths(selected);
 
     // 剪切要多写一个"首选效果 = 移动"，接收方才知道粘完要删源
     if (!shellclip::WriteFiles(selected, true, m_hWnd))
@@ -1007,7 +1051,7 @@ void MainWindow::OnColumnClick(int column)
 
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
     m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
-    m_fileListView.SetResult(result);
+    m_fileListView.MergeResult(result);   // 最小范围更新，只重绘变化的部分
 
     // 记一笔，方便验证点了表头到底有没有生效
     if (result != nullptr)
@@ -1153,7 +1197,51 @@ void MainWindow::OnEnumerationDone()
                   return CompareEntries(left, right, m_sortColumn, m_sortAscending);
               });
     m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
-    m_fileListView.SetResult(result);
+
+    // ------------------------------------------------------------
+    // 如果是"粘贴完成后的那次刷新"，把新出现的项选中（和资源管理器一致）
+    // 必须在 MergeResult 之前抓旧路径表，之后就没得比了
+    // ------------------------------------------------------------
+    std::vector<std::wstring>        pathsBefore;
+    std::unordered_set<std::wstring> pathSetBefore;
+    bool                             selectNew = m_selectNewAfterEnum;
+    m_selectNewAfterEnum = false;
+
+    if (selectNew)
+    {
+        pathsBefore = m_fileListView.AllPaths();
+        pathSetBefore.reserve(pathsBefore.size());
+
+        for (const auto& oldPath : pathsBefore)
+        {
+            std::wstring lowered = oldPath;
+            ::_wcslwr_s(lowered.data(), lowered.size() + 1);
+            pathSetBefore.insert(std::move(lowered));
+        }
+    }
+
+    m_fileListView.MergeResult(result);   // 最小范围更新，只重绘变化的部分
+
+    if (selectNew && !pathsBefore.empty())
+    {
+        std::vector<std::wstring> addedPaths;
+
+        for (const auto& entry : result->entries)
+        {
+            std::wstring lowered = entry.fullPath;
+            ::_wcslwr_s(lowered.data(), lowered.size() + 1);
+
+            if (pathSetBefore.find(lowered) == pathSetBefore.end())
+            {
+                addedPaths.push_back(entry.fullPath);
+            }
+        }
+
+        if (!addedPaths.empty())
+        {
+            m_fileListView.SelectPaths(addedPaths);
+        }
+    }
 
     ::SetWindowTextW(m_hWnd,
                      (std::wstring(kWindowTitleBase) + L" - " + result->path +

@@ -61,6 +61,22 @@ public:
     // 同一个目录刷新时会自动保留滚动位置和选中项
     void SetResult(std::shared_ptr<shell::EnumerateResult> result);
 
+    // 最小范围更新：对比新旧结果，只重绘「从第一个变化处往下」的部分。
+    // 同一个目录里复制/移动完再枚举时用这个，前面没变的行不重画，看着不闪。
+    void MergeResult(std::shared_ptr<shell::EnumerateResult> result);
+
+    // 设置「被剪切的项」：这些行显示成半透明灰（和资源管理器一致）
+    void SetCutPaths(const std::vector<std::wstring>& paths);
+
+    // 当前列表显示的是哪个目录（还没数据时返回空串）
+    std::wstring CurrentPath() const;
+
+    // 当前列表里所有项的完整路径（用来对比"刷新后多了哪些"）
+    std::vector<std::wstring> AllPaths() const;
+
+    // 只选中这些路径（先把已有选中全清掉）。粘贴完成后用来高亮新出现的东西
+    void SelectPaths(const std::vector<std::wstring>& paths);
+
     void SetActivateCallback(ActivateCallback callback)       { m_onActivate    = std::move(callback); }
     void SetContextMenuCallback(ContextMenuCallback callback) { m_onContextMenu = std::move(callback); }
     void SetColumnClickCallback(ColumnClickCallback callback) { m_onColumnClick = std::move(callback); }
@@ -106,6 +122,13 @@ private:
     // 在表头上去掉所有排序箭头
     void ClearSortArrows();
 
+    // 某一项是不是"正在被剪切"的（显示成半透明）
+    bool IsCutPath(const std::wstring& fullPath) const;
+
+    // 刷新后把用户之前选中的、滚动的位置还原回去
+    void RestoreSelectionAndScroll(const std::vector<std::wstring>& selectedNames,
+                                   const std::wstring&              topName);
+
 private:
     HWND                                          m_hWnd      = nullptr;
     std::shared_ptr<shell::EnumerateResult>        m_result;
@@ -123,4 +146,7 @@ private:
     std::wstring m_cacheTime;
     std::wstring m_cacheType;
     std::wstring m_cacheSize;
+
+    // 被剪切（Ctrl+X）的完整路径列表：这些行画成灰色/半透明
+    std::vector<std::wstring> m_cutPaths;
 };

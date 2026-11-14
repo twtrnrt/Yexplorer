@@ -68,15 +68,28 @@ public:
     // ------------------------------------------------------------------
     int GetIconIndexByPath(const std::wstring& path);
 
+    // ------------------------------------------------------------------
+    // 取「半透明版」图标索引（被剪切的项目要看起来淡一点，和资源管理器一致）
+    //
+    // 做法：把原图标按 50% 透明度重画一份，追加进同一个图像列表，返回新索引。
+    // 同一个原索引只生成一次，之后走缓存。
+    // 生成失败时返回原始索引（宁可不变淡，也不能显示不出来）
+    // ------------------------------------------------------------------
+    int GetDimmedIconIndex(int originalIndex);
+
 private:
     // 从名称里提取扩展名（小写，含点号，如 ".dll"；没有扩展名返回空串）
     static std::wstring ExtractExtension(const std::wstring& name);
+
+    // 把图标做成 50% 透明的版本；失败返回 nullptr
+    HICON CreateDimmedIcon(HICON source, int size);
 
 private:
     wil::com_ptr<IImageList> m_systemImageList;   // 系统图像列表（持有引用保证存活）
     HIMAGELIST               m_hImageList = nullptr;
 
     std::unordered_map<std::wstring, int> m_extensionIconCache;  // 扩展名 → 图标索引
+    std::unordered_map<int, int>          m_dimmedIconCache;     // 原索引 → 半透明索引
 
     int  m_folderIconIndex  = 0;   // 文件夹统一图标
     bool m_initialized      = false;
