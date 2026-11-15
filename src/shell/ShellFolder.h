@@ -163,6 +163,23 @@ constexpr const wchar_t* kThisPcPath = L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D
 bool KnownFolderDisplayName(const std::wstring& path, std::wstring& displayName);
 
 // ----------------------------------------------------------------------------
+// 找出 path 所属的"最深那个系统已知文件夹"（桌面 / 下载 / 文档 / 图片 / 音乐 / 视频）
+//
+// 地址栏折叠用：
+//   path = C:\Users\kf168\Downloads\2025  →  folderPath = ...\Downloads，displayName = 下载
+//   地址栏就能显示成「下载 > 2025」，而不是 C: > Users > kf168 > Downloads > 2025。
+//
+// 就是它自己也算命中（此时地址栏只有「下载」一段）。
+//
+// folderPath   —— 命中时填入那个文件夹的真实路径
+// displayName  —— 命中时填入系统给它起的名字
+// 返回：命中返回 true。
+// ----------------------------------------------------------------------------
+bool KnownFolderAncestor(const std::wstring& path,
+                         std::wstring& folderPath,
+                         std::wstring& displayName);
+
+// ----------------------------------------------------------------------------
 // 枚举指定路径下的所有条目
 //
 // 参数：

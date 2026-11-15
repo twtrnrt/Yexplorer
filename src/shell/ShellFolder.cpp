@@ -647,6 +647,61 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
 // 判断是不是"常用位置"那几个系统目录，并给出它的名字
 // ============================================================================
 
+// 左侧导航条最上面那一组（视频也带上，别的地方用到同样认）
+static const KNOWNFOLDERID* const kKnownFolderIds[] =
+{
+    &FOLDERID_Desktop,
+    &FOLDERID_Downloads,
+    &FOLDERID_Documents,
+    &FOLDERID_Pictures,
+    &FOLDERID_Music,
+    &FOLDERID_Videos,
+};
+
+// 取一个已知文件夹的"真实路径"和"系统显示名"
+// 返回 false 表示这个文件夹在这台机器上取不到（被重定向到不存在的盘之类）
+static bool GetKnownFolderInfo(const KNOWNFOLDERID& id,
+                               std::wstring& folderPath,
+                               std::wstring& displayName)
+{
+    folderPath.clear();
+    displayName.clear();
+
+    LPWSTR rawPath = nullptr;
+
+    if (FAILED(::SHGetKnownFolderPath(id, 0, nullptr, &rawPath)) || rawPath == nullptr)
+    {
+        return false;
+    }
+
+    folderPath.assign(rawPath);
+    ::CoTaskMemFree(rawPath);
+
+    // 去掉可能的尾斜杠，后面拼接/比较都按"不带尾斜杠"统一
+    while (folderPath.size() > 3 &&
+           (folderPath.back() == L'\\' || folderPath.back() == L'/'))
+    {
+        folderPath.pop_back();
+    }
+
+    // 名字向系统要（SIGDN_NORMALDISPLAY），这样和资源管理器里显示的一致
+    wil::com_ptr<IShellItem> item;
+
+    if (SUCCEEDED(::SHGetKnownFolderItem(id, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(item.put())) &&
+                  item != nullptr))
+    {
+        LPWSTR name = nullptr;
+
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name != nullptr)
+        {
+            displayName.assign(name);
+            ::CoTaskMemFree(name);
+        }
+    }
+
+    return !folderPath.empty() && !displayName.empty();
+}
+
 bool KnownFolderDisplayName(const std::wstring& path, std::wstring& displayName)
 {
     displayName.clear();
@@ -656,53 +711,85 @@ bool KnownFolderDisplayName(const std::wstring& path, std::wstring& displayName)
         return false;
     }
 
-    // 和左侧导航条最上面那组保持一致（视频也带上，将来别的地方用到同样认）
-    static const KNOWNFOLDERID* const ids[] =
+    for (const KNOWNFOLDERID* id : kKnownFolderIds)
     {
-        &FOLDERID_Desktop,
-        &FOLDERID_Downloads,
-        &FOLDERID_Documents,
-        &FOLDERID_Pictures,
-        &FOLDERID_Music,
-        &FOLDERID_Videos,
-    };
+        std::wstring folderPath;
+        std::wstring name;
 
-    for (const KNOWNFOLDERID* id : ids)
-    {
-        LPWSTR folderPath = nullptr;
-
-        if (FAILED(::SHGetKnownFolderPath(*id, 0, nullptr, &folderPath)) || folderPath == nullptr)
+        if (!GetKnownFolderInfo(*id, folderPath, name))
         {
             continue;
         }
 
-        const bool matched = (::_wcsicmp(folderPath, path.c_str()) == 0);
-        ::CoTaskMemFree(folderPath);
+        if (::_wcsicmp(folderPath.c_str(), path.c_str()) == 0)
+        {
+            displayName = name;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool KnownFolderAncestor(const std::wstring& path,
+                         std::wstring& folderPathOut,
+                         std::wstring& displayNameOut)
+{
+    folderPathOut.clear();
+    displayNameOut.clear();
+
+    if (path.empty())
+    {
+        return false;
+    }
+
+    std::wstring bestPath;   // 命中里最长的那一个 = 最深的祖先
+    std::wstring bestName;
+
+    for (const KNOWNFOLDERID* id : kKnownFolderIds)
+    {
+        std::wstring folderPath;
+        std::wstring name;
+
+        if (!GetKnownFolderInfo(*id, folderPath, name))
+        {
+            continue;
+        }
+
+        // 命中条件：就是它自己，或者 path 在它下面（必须整段对齐，避免
+        // "Downloads2" 这种前缀相同的兄弟目录被误认成子目录）
+        bool matched = (::_wcsicmp(folderPath.c_str(), path.c_str()) == 0);
+
+        if (!matched &&
+            folderPath.size() < path.size() &&
+            ::_wcsnicmp(folderPath.c_str(), path.c_str(), folderPath.size()) == 0 &&
+            (path[folderPath.size()] == L'\\' || path[folderPath.size()] == L'/'))
+        {
+            matched = true;
+        }
 
         if (!matched)
         {
             continue;
         }
 
-        // 名字向系统要（SIGDN_NORMALDISPLAY），这样和资源管理器里显示的一致
-        wil::com_ptr<IShellItem> item;
-
-        if (SUCCEEDED(::SHGetKnownFolderItem(*id, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(item.put())) &&
-                      item != nullptr))
+        if (!bestPath.empty() && folderPath.size() <= bestPath.size())
         {
-            LPWSTR name = nullptr;
-
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name != nullptr)
-            {
-                displayName = name;
-                ::CoTaskMemFree(name);
-            }
+            continue;   // 已经有更深的了
         }
 
-        return !displayName.empty();
+        bestPath = folderPath;
+        bestName = name;
     }
 
-    return false;
+    if (bestPath.empty())
+    {
+        return false;
+    }
+
+    folderPathOut  = bestPath;
+    displayNameOut = bestName;
+    return true;
 }
 
 // ============================================================================

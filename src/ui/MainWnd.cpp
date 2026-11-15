@@ -1436,14 +1436,38 @@ void MainWindow::StartEnumeration(const std::wstring& path)
     }
 
     // 地址栏立即反映新路径
-    // 名字优先用"导航来源"里记的：从主文件夹点进「文档」，地址栏就写「文档」，
-    // 而不是 C:\Users\kf168\Documents。
+    //
+    // 三种写法：
+    //   1) 虚拟命名空间（「此电脑」这种，路径是 ::{GUID}）：整条显示系统给的名字；
+    //   2) 在系统文件夹（桌面 / 下载 / 文档 / 图片 / 音乐 / 视频）之下的目录：
+    //      折叠成「下载 > 2025 > …」，第一段点着能回那个系统文件夹；
+    //   3) 其它普通目录：完整的 C: > Users > … > 当前目录，每段都能点。
+    //
+    // 之前是"只要显示名和真实路径不一样就整条只写名字"，导致从列表里
+    // 双击任何一个普通文件夹进去，地址栏都只剩一个名字、没有可点的上级路径。
     std::wstring displayPath = DisplayNameFor(path);
 
-    // 名字和路径不一样时，地址栏整条只显示这个名字（不切 C:\ > Users > … 那样一段段）
-    const bool wholeLabel = (_wcsicmp(displayPath.c_str(), path.c_str()) != 0);
+    const bool isShellNamespace = (path.compare(0, 2, L"::") == 0 ||
+                                   path.compare(0, 6, L"shell:") == 0);
 
-    m_addressBar.SetPathWithLabel(path, displayPath, wholeLabel);
+    if (isShellNamespace)
+    {
+        m_addressBar.SetPathWithLabel(path, displayPath, true);
+    }
+    else
+    {
+        std::wstring prefixPath;
+        std::wstring prefixLabel;
+
+        if (shell::KnownFolderAncestor(path, prefixPath, prefixLabel))
+        {
+            m_addressBar.SetPathWithPrefix(path, prefixPath, prefixLabel);
+        }
+        else
+        {
+            m_addressBar.SetPathWithLabel(path, displayPath, false);
+        }
+    }
 
     // 标题只在"真的换了目录"时改一次，而且这一次先不带项数：
     //   换目录 → 「文件管理器 - C:\」，等结果回来再补成「（14 项）」

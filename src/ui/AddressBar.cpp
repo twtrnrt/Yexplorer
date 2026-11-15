@@ -178,8 +178,26 @@ void AddressBar::SetPathWithLabel(const std::wstring& path,
                                   const std::wstring& label,
                                   bool              wholeLabel)
 {
+    // 清掉上一次可能留下的折叠前缀，避免串味
+    m_prefixPath.clear();
+    m_prefixLabel.clear();
+
     m_label      = label;
     m_wholeLabel = wholeLabel;
+    SetPath(path);
+}
+
+void AddressBar::SetPathWithPrefix(const std::wstring& path,
+                                   const std::wstring& prefixPath,
+                                   const std::wstring& prefixLabel)
+{
+    m_prefixPath  = prefixPath;
+    m_prefixLabel = prefixLabel;
+
+    // 折叠模式自己不整条显示，靠 RebuildSegments 里的前缀分支处理
+    m_wholeLabel = false;
+    m_label.clear();
+
     SetPath(path);
 }
 
@@ -207,6 +225,82 @@ void AddressBar::RebuildSegments()
         segment.fullPath = p;
         m_segments.push_back(segment);
         return;
+    }
+
+    // 折叠前缀模式：当前路径在某个系统文件夹（下载/图片/文档…）之下。
+    // 第一段显示那个文件夹的名字（点它回文件夹本身），后面照常一段段切。
+    //   例：...\Downloads\2025\abc → 「下载 > 2025 > abc」
+    if (!m_prefixPath.empty() && !m_prefixLabel.empty())
+    {
+        std::wstring prefix = m_prefixPath;
+
+        while (prefix.size() > 3 && (prefix.back() == L'\\' || prefix.back() == L'/'))
+        {
+            prefix.pop_back();
+        }
+
+        const bool isSelf = (::_wcsicmp(prefix.c_str(), p.c_str()) == 0);
+
+        const bool underIt = (prefix.size() < p.size() &&
+                              ::_wcsnicmp(prefix.c_str(), p.c_str(), prefix.size()) == 0 &&
+                              (p[prefix.size()] == L'\\' || p[prefix.size()] == L'/'));
+
+        if (isSelf || underIt)
+        {
+            Segment first;
+            first.text     = m_prefixLabel;
+            first.fullPath = prefix;
+            m_segments.push_back(first);
+
+            // 前缀之后剩下来的部分
+            std::wstring rest = isSelf ? std::wstring() : p.substr(prefix.size());
+
+            while (!rest.empty() && (rest.front() == L'\\' || rest.front() == L'/'))
+            {
+                rest.erase(rest.begin());
+            }
+
+            // 按反斜杠再切一次
+            std::vector<std::wstring> parts;
+            {
+                std::wstring current;
+
+                for (wchar_t ch : rest)
+                {
+                    if (ch == L'\\' || ch == L'/')
+                    {
+                        if (!current.empty())
+                        {
+                            parts.push_back(current);
+                            current.clear();
+                        }
+                    }
+                    else
+                    {
+                        current.push_back(ch);
+                    }
+                }
+
+                if (!current.empty())
+                {
+                    parts.push_back(current);
+                }
+            }
+
+            std::wstring accumulate = prefix;
+
+            for (const std::wstring& part : parts)
+            {
+                accumulate += L"\\" + part;
+
+                Segment segment;
+                segment.text     = part;
+                segment.fullPath = accumulate;
+                m_segments.push_back(segment);
+            }
+
+            return;
+        }
     }
 
     // 去掉末尾多余的斜杠，但保留 "C:\" 这种盘符根

@@ -49,6 +49,18 @@ public:
                           const std::wstring& label,
                           bool              wholeLabel = false);
 
+    // 带"折叠前缀"的面包屑：path 位于 prefixPath 之内时，
+    // 第一段显示 prefixLabel（点它回 prefixPath），后面再把 prefixPath
+    // 之后的部分一段段切开。
+    //   例：path = C:\Users\kf168\Downloads\2025
+    //       prefixPath = C:\Users\kf168\Downloads，prefixLabel = 下载
+    //       → 「下载 > 2025」，点「下载」回下载目录
+    // 这种写法只用在系统已知文件夹（下载/图片/文档…）的子目录上；
+    // 普通目录还是走 SetPath，显示完整路径。
+    void SetPathWithPrefix(const std::wstring& path,
+                           const std::wstring& prefixPath,
+                           const std::wstring& prefixLabel);
+
     // 点了某一段时回调，参数是该段对应的完整路径
     void SetNavigateCallback(std::function<void(const std::wstring&)> callback);
 
@@ -97,6 +109,8 @@ private:
     std::wstring m_path;                          // 当前路径
     std::wstring m_label;                         // 虚拟文件夹的显示名（如「此电脑」），普通路径为空
     bool         m_wholeLabel = false;            // 是否整条只显示 m_label（不切成一段段）
+    std::wstring m_prefixPath;                    // 折叠前缀：那个系统文件夹的真实路径（如 ...\Downloads）
+    std::wstring m_prefixLabel;                   // 折叠前缀显示的名字（如「下载」），空表示不折叠
     std::vector<Segment> m_segments;              // 切好的分段
     std::vector<RECT>    m_segmentRects;          // 每段在控件内的矩形（用于命中判断）
     std::vector<bool>    m_segmentVisible;        // 该段是否被省略掉
