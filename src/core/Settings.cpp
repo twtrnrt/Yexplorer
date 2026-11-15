@@ -24,6 +24,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <wctype.h>
 
 namespace core
 {
@@ -33,6 +34,23 @@ namespace
 // 配置放在这个文件夹里：%APPDATA% 下面的 FileExplorer 目录
 const wchar_t* kConfigFolderName = L"FileExplorer";
 const wchar_t* kConfigFileName   = L"settings.json";
+}
+
+std::wstring OpenWithKey(const OpenWithItem& item)
+{
+    if (item.kind == L"uwp")
+    {
+        // 商店应用：AUMID 就是身份证
+        return L"uwp:" + item.appId;
+    }
+
+    // 普通程序：exe 全路径转小写（Windows 路径不区分大小写）
+    std::wstring key = item.path;
+    for (wchar_t& ch : key)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+    return key;
 }
 
 // ============================================================================
@@ -245,6 +263,52 @@ bool Settings::Load()
 
         // ---------------- 上次停留的目录 ----------------
         m_lastFolder = FromUtf8(json.value("lastFolder", std::string()));
+
+        // ---------------- 「打开方式」账本 ----------------
+        // 结构：{ ".txt": { "default": "…", "items": [ {...}, … ] }, … }
+        if (json.contains("openWith") && json["openWith"].is_object())
+        {
+            for (auto it = json["openWith"].begin(); it != json["openWith"].end(); ++it)
+            {
+                OpenWithEntry entry;
+                entry.ext = FromUtf8(it.key());
+
+                if (entry.ext.empty())
+                {
+                    continue;
+                }
+
+                const nlohmann::json& one = it.value();
+
+                entry.defaultKey = FromUtf8(one.value("default", std::string()));
+
+                if (one.contains("items") && one["items"].is_array())
+                {
+                    for (const auto& raw : one["items"])
+                    {
+                        OpenWithItem item;
+                        item.kind    = FromUtf8(raw.value("kind", std::string("exe")));
+                        item.path    = FromUtf8(raw.value("path", std::string()));
+                        item.appId   = FromUtf8(raw.value("appId", std::string()));
+                        item.progId  = FromUtf8(raw.value("progId", std::string()));
+                        item.name    = FromUtf8(raw.value("name", std::string()));
+                        item.args    = FromUtf8(raw.value("args", std::string()));
+                        item.enabled = raw.value("enabled", true);
+                        item.alive   = raw.value("alive", -1);
+
+                        // 既没有 exe 路径又没有 AUMID 的条目是废的，直接丢
+                        if (item.path.empty() && item.appId.empty())
+                        {
+                            continue;
+                        }
+
+                        entry.items.push_back(std::move(item));
+                    }
+                }
+
+                m_openWith.push_back(std::move(entry));
+            }
+        }
     }
     catch (const std::exception& error)
     {
@@ -345,6 +409,61 @@ bool Settings::Save()
         json["lastFolder"] = ToUtf8(m_lastFolder);
     }
 
+    // ---------------- 「打开方式」账本 ----------------
+    if (!m_openWith.empty())
+    {
+        nlohmann::json openWith = nlohmann::json::object();
+
+        for (const OpenWithEntry& entry : m_openWith)
+        {
+            nlohmann::json one;
+
+            if (!entry.defaultKey.empty())
+            {
+                one["default"] = ToUtf8(entry.defaultKey);
+            }
+
+            nlohmann::json items = nlohmann::json::array();
+
+            for (const OpenWithItem& item : entry.items)
+            {
+                nlohmann::json raw;
+                raw["kind"] = ToUtf8(item.kind.empty() ? L"exe" : item.kind);
+
+                if (!item.path.empty())
+                {
+                    raw["path"] = ToUtf8(item.path);
+                }
+
+                if (!item.appId.empty())
+                {
+                    raw["appId"] = ToUtf8(item.appId);
+                }
+
+                if (!item.progId.empty())
+                {
+                    raw["progId"] = ToUtf8(item.progId);
+                }
+
+                raw["name"]    = ToUtf8(item.name);
+                raw["enabled"] = item.enabled;
+                raw["alive"]   = item.alive;
+
+                if (!item.args.empty())
+                {
+                    raw["args"] = ToUtf8(item.args);
+                }
+
+                items.push_back(std::move(raw));
+            }
+
+            one["items"] = std::move(items);
+            openWith[ToUtf8(entry.ext)] = std::move(one);
+        }
+
+        json["openWith"] = std::move(openWith);
+    }
+
     // 先写临时文件再替换：万一写一半失败（断电、磁盘满），原配置还是好的
     std::wstring tempPath = path + L".tmp";
 
@@ -412,6 +531,39 @@ bool Settings::IsPinned(const std::wstring& path) const
     }
 
     return false;
+}
+
+// ============================================================================
+// 「打开方式」账本
+// ============================================================================
+
+const OpenWithEntry* Settings::FindOpenWith(const std::wstring& ext) const
+{
+    for (const OpenWithEntry& entry : m_openWith)
+    {
+        if (::_wcsicmp(entry.ext.c_str(), ext.c_str()) == 0)
+        {
+            return &entry;
+        }
+    }
+
+    return nullptr;
+}
+
+OpenWithEntry& Settings::EnsureOpenWith(const std::wstring& ext)
+{
+    for (OpenWithEntry& entry : m_openWith)
+    {
+        if (::_wcsicmp(entry.ext.c_str(), ext.c_str()) == 0)
+        {
+            return entry;
+        }
+    }
+
+    OpenWithEntry fresh;
+    fresh.ext = ext;
+    m_openWith.push_back(std::move(fresh));
+    return m_openWith.back();
 }
 
 } // namespace core

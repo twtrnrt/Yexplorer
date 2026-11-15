@@ -55,6 +55,57 @@ struct ColumnWidths
     bool valid = false;
 };
 
+// ============================================================================
+// 「打开方式」：我们自己记的一份账本
+//
+// 【为什么要自己记，不走系统关联】
+//   "哪种文件用哪个程序打开"这件事写在注册表里，任何装过的软件都能往里塞自己：
+//   往 FileExts\.xxx\OpenWithList 写一行、往 OpenWithProgids 挂一个 ProgID，
+//   于是系统右键的"打开方式"里全是垃圾，默认程序也会被悄悄改掉。
+//
+//   这里改成：只有你主动打开「打开方式」设置窗口的那一刻，才去系统读一次候选；
+//   读完存进我们自己的配置文件，之后右键菜单和双击一律按这份账本走。
+//   系统那边怎么改都影响不到我们——除非你自己在窗口里改。
+//
+// 【两类程序】
+//   kind = "exe"：普通 Win32 程序，启动方式是 CreateProcess(exe, "文件路径")；
+//   kind = "uwp"：商店应用（照片、商店版记事本），没有 exe 可执行，
+//                 要用 AppUserModelID 通过系统接口激活。
+// ============================================================================
+
+// 「打开方式」里的一条程序
+struct OpenWithItem
+{
+    std::wstring kind;      // "exe" 或 "uwp"
+    std::wstring path;      // kind=exe 时：exe 全路径
+    std::wstring appId;     // kind=uwp 时：AppUserModelID（如 Microsoft.Windows.Photos_8wekyb3d8bbwe!App）
+    // kind=uwp 时：这个商店应用在注册表里登记的类型标识（ProgID，如
+    // AppX4ztfk9wxr86nxmzzq47px0nh0e58b8fw）。
+    // 打开文件时必须用它——系统只认 ProgID 上挂的激活处理器，
+    // 光有 AUMID 是打不开商店应用的（实测 ActivateForFile 一律失败）。
+    std::wstring progId;
+    std::wstring name;      // 给人看的名字（"记事本"、"照片"）
+    std::wstring args;      // 命令行模板，可能含 %1（系统读来的才有）；自己添加的为空
+    bool         enabled = true;   // 是否出现在右键「打开方式」二级菜单里
+
+    // 程序还在不在：-1 还没查过 / 1 还在 / 0 已经不在了（卸载、移动、磁盘没连）
+    // 只会在两个时候更新：打开「打开方式」设置窗口时、真正打开文件时。
+    // 右键菜单弹出时一律不查（查注册表/碰文件系统会拖慢右键），只读这个结果。
+    int          alive = -1;
+};
+
+// 一个扩展名对应的一份账本
+struct OpenWithEntry
+{
+    std::wstring              ext;         // ".txt"、"(无扩展名)"
+    std::vector<OpenWithItem> items;       // 登记过的程序
+    std::wstring              defaultKey;  // 默认程序的身份串（见 OpenWithKey）；空 = 还没设过
+};
+
+// 一条程序的身份串：exe 用小写全路径，商店应用用 "uwp:<AUMID>"。
+// 勾选状态、默认程序都按这个串比对，改路径时不会张冠李戴。
+std::wstring OpenWithKey(const OpenWithItem& item);
+
 // 本软件公用配置。全程序只有一个实例（Settings::Instance()）。
 class Settings
 {
@@ -109,6 +160,15 @@ public:
     const std::wstring& LastFolder() const { return m_lastFolder; }
     void                SetLastFolder(const std::wstring& path) { m_lastFolder = path; }
 
+    // ---------------- 「打开方式」账本 ----------------
+    const std::vector<OpenWithEntry>& OpenWithEntries() const { return m_openWith; }
+
+    // 查某个扩展名的账本；没有返回 nullptr（只读用）
+    const OpenWithEntry* FindOpenWith(const std::wstring& ext) const;
+
+    // 同上，但可以改（没有就新建一条空账本）
+    OpenWithEntry& EnsureOpenWith(const std::wstring& ext);
+
 private:
     Settings() = default;
 
@@ -132,6 +192,9 @@ private:
     int           m_viewMode       = -1;      // -1 = 没记过
     bool          m_viewModeManual = false;
     std::wstring  m_lastFolder;
+
+    // 「打开方式」账本（按扩展名分组）
+    std::vector<OpenWithEntry> m_openWith;
 };
 
 } // namespace core

@@ -784,6 +784,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         int controlId = LOWORD(wParam);
 
+        // ---- 「打开方式」子菜单里点了某个程序：命令 ID = 3400 + 账本下标 ----
+        if (controlId >= kCommandOpenWithBase &&
+            controlId <= kCommandOpenWithBase + 99)
+        {
+            OpenSelectionWithProgram(static_cast<size_t>(controlId - kCommandOpenWithBase));
+            return 0;
+        }
+
         // ---- 快捷键命令（由加速键表发来，通知码为 0/1）----
         switch (controlId)
         {
@@ -814,6 +822,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandOpen:
             OpenSelection();
             return 0;
+        case kCommandOpenWithManage:
+        {
+            // 「添加或管理程序…」：管的是当前选中文件那个扩展名
+            std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+            if (!selected.empty())
+            {
+                ShowOpenWithSettings(shell::ExtensionKeyForPath(selected.front()), false);
+            }
+            return 0;
+        }
         case kCommandProperties:
             ShowPropertiesForSelection();
             return 0;
@@ -1490,6 +1508,43 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 
     // 没选中东西时，"打开/复制/剪切/删除"变灰；剪贴板空时"粘贴"变灰
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandOpen, L"打开(&O)");
+
+    // ---- 打开方式（子菜单）----
+    // 只给"普通文件"才出这项：文件夹、控制面板那类命名空间项都跳过。
+    // 注意：这里绝对不能去读注册表 / 探测程序在不在——右键菜单必须零成本，
+    // 菜单内容全部来自已经加载在内存里的配置。
+    {
+        std::wstring openWithTarget;
+
+        std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+        if (result != nullptr)
+        {
+            const int index = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+            if (index >= 0 && index < static_cast<int>(result->entries.size()))
+            {
+                const shell::ShellEntry& entry = result->entries[index];
+
+                const bool isShellNamespace = (entry.fullPath.compare(0, 2, L"::") == 0) ||
+                                              (entry.fullPath.compare(0, 6, L"shell:") == 0);
+
+                if (!entry.isFolder && !entry.isGroupHeader && !entry.isSpacer &&
+                    !entry.fullPath.empty() && !isShellNamespace)
+                {
+                    openWithTarget = entry.fullPath;
+                }
+            }
+        }
+
+        if (!openWithTarget.empty())
+        {
+            const std::wstring extension = shell::ExtensionKeyForPath(openWithTarget);
+            if (shell::IsExtensionHandled(extension))
+            {
+                FillOpenWithMenu(menu, extension);
+            }
+        }
+    }
+
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCopy, L"复制(&C)");
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCut, L"剪切(&T)");
@@ -1576,6 +1631,312 @@ void MainWindow::OpenSelection()
     }
 
     OnItemActivated(static_cast<size_t>(selectedIndex));
+}
+
+// ============================================================================
+// 「打开方式」（自研账本）
+//
+// 规则回顾（和用户对齐过的）：
+//   · 双击 / 右键「打开」永远用账本里记的默认程序，不受系统关联影响；
+//   · 某个扩展名第一次用时弹一次设置窗口，设好就固定；
+//   · 设置窗口里点「跳过」= 这次按系统默认打开、不记录、下次还会问；
+//   · 默认程序被卸载 → 提示并让用户重选；
+//   · 右键子菜单只读内存里的账本，绝不在弹出时去查注册表。
+// ============================================================================
+
+void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extension)
+{
+    if (parentMenu == nullptr)
+    {
+        return;
+    }
+
+    HMENU subMenu = ::CreatePopupMenu();
+    if (subMenu == nullptr)
+    {
+        return;
+    }
+
+    // ---- 这里零 IO：只读配置里已经加载好的账本 ----
+    const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
+
+    int visibleCount = 0;
+
+    if (entry != nullptr)
+    {
+        for (size_t i = 0; i < entry->items.size(); ++i)
+        {
+            // 命令 ID 只有 3400~3499 这一百个坑，超了就截断
+            if (static_cast<int>(i) > 99)
+            {
+                break;
+            }
+
+            const core::OpenWithItem& item = entry->items[i];
+
+            // 没勾选的（用户在设置窗口里取消过）不进菜单
+            if (!item.enabled)
+            {
+                continue;
+            }
+
+            // 已知已经卸载/找不到的，直接消失（不标灰）。
+            // alive = -1 表示"还没查过"——这种照常显示，
+            // 否则右键菜单就得去探测，那正是用户不允许的。
+            if (item.alive == 0)
+            {
+                continue;
+            }
+
+            std::wstring text = item.name;
+            if (core::OpenWithKey(item) == entry->defaultKey)
+            {
+                text += L"（默认）";
+            }
+
+            ::AppendMenuW(subMenu, MF_STRING,
+                          static_cast<UINT>(kCommandOpenWithBase + static_cast<int>(i)),
+                          text.c_str());
+
+            ++visibleCount;
+        }
+    }
+
+    if (visibleCount > 0)
+    {
+        ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
+    }
+
+    // 一个程序都没有时，这一项就是"直接进窗口去设置"
+    ::AppendMenuW(subMenu, MF_STRING, kCommandOpenWithManage, L"添加或管理程序…");
+
+    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(subMenu), L"打开方式");
+}
+
+void MainWindow::SetOpenWithProgramAlive(const std::wstring& extension,
+                                         const std::wstring& programKey,
+                                         int alive)
+{
+    core::OpenWithEntry& entry = core::Settings::Instance().EnsureOpenWith(extension);
+
+    bool changed = false;
+    for (core::OpenWithItem& item : entry.items)
+    {
+        if (core::OpenWithKey(item) == programKey && item.alive != alive)
+        {
+            item.alive = alive;
+            changed = true;
+        }
+    }
+
+    // 只在真的变了才落盘：打开文件很频繁，每次都写一遍配置没必要
+    if (changed)
+    {
+        core::Settings::Instance().Save();
+    }
+}
+
+void MainWindow::ShowOpenWithSettings(const std::wstring& extension, bool firstTime)
+{
+    ui::OpenWithDialog dialog(m_hWnd, &m_iconCache);
+    dialog.ShowModal(extension, firstTime);
+}
+
+void MainWindow::OpenSelectionWithProgram(size_t programIndex)
+{
+    std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+    if (selected.empty())
+    {
+        return;
+    }
+
+    const std::wstring extension = shell::ExtensionKeyForPath(selected.front());
+
+    const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
+    if (entry == nullptr || programIndex >= entry->items.size())
+    {
+        return;
+    }
+
+    // 拷贝一份：下面写配置可能让 vector 重新分配，指针会失效
+    const core::OpenWithItem program = entry->items[programIndex];
+    const std::wstring programKey = core::OpenWithKey(program);
+
+    // 打开前先确认程序还在（时机 D）
+    bool diskMissing = false;
+    if (!shell::IsAvailable(program, diskMissing))
+    {
+        SetOpenWithProgramAlive(extension, programKey, 0);
+
+        const std::wstring message = diskMissing
+            ? L"这个程序所在的磁盘没有连接（可能是 U 盘或移动硬盘没插）。"
+            : L"这个程序已经找不到了（可能被卸载或移动了）。";
+
+        ::MessageBoxW(m_hWnd, message.c_str(), L"打开方式", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    for (const std::wstring& filePath : selected)
+    {
+        if (filePath.empty())
+        {
+            continue;
+        }
+
+        std::wstring error;
+        if (!shell::Launch(m_hWnd, program, filePath, error))
+        {
+            // 注意：这里不把 alive 标成 0。
+            // 「启动失败」不等于「程序被卸载」——文件被占用、参数不对都可能失败；
+            // 真正"不在"由上面的 IsAvailable 判定，那个结论才写进配置。
+            std::wstring message = error + L"\n\n要重新选择打开程序吗？";
+            if (::MessageBoxW(m_hWnd, message.c_str(), L"打开方式",
+                              MB_OKCANCEL | MB_ICONWARNING) == IDOK)
+            {
+                ShowOpenWithSettings(extension, false);
+            }
+            return;
+        }
+    }
+
+    SetOpenWithProgramAlive(extension, programKey, 1);
+}
+
+bool MainWindow::TryOpenFileWithOurChoice(const std::wstring& filePath,
+                                          const std::wstring& extension)
+{
+    if (filePath.empty() || !shell::IsExtensionHandled(extension))
+    {
+        return false;
+    }
+
+    // ---- 1. 查账本里这个扩展名的默认程序 ----
+    core::OpenWithItem program;          // 拷贝一份，后面配置变动不会影响它
+    bool haveProgram = false;
+
+    const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
+    const bool neverConfigured = (entry == nullptr || entry->defaultKey.empty());
+
+    if (!neverConfigured)
+    {
+        for (const core::OpenWithItem& item : entry->items)
+        {
+            if (core::OpenWithKey(item) == entry->defaultKey)
+            {
+                program     = item;
+                haveProgram = true;
+                break;
+            }
+        }
+    }
+
+    // ---- 2. 没设过（或设的那个已经从账本里被删掉了）→ 让用户设一次 ----
+    if (!haveProgram)
+    {
+        if (!neverConfigured)
+        {
+            // 设过、但那条程序已经从列表里删掉了
+            ::MessageBoxW(m_hWnd,
+                          L"原来的默认程序已经不在列表里了，请重新选一个。",
+                          L"打开方式", MB_OK | MB_ICONWARNING);
+        }
+
+        ui::OpenWithDialog dialog(m_hWnd, &m_iconCache);
+        const bool configured = dialog.ShowModal(extension, neverConfigured);
+
+        // 点「跳过」（或没设默认就关掉）：这次按系统默认打开，不记录，下次还会问
+        if (dialog.Skipped() || !configured)
+        {
+            if (!shell::LaunchWithSystemDefault(m_hWnd, filePath))
+            {
+                ::MessageBoxW(m_hWnd, L"按系统默认打开失败。",
+                              L"打开文件", MB_OK | MB_ICONERROR);
+            }
+            return true;
+        }
+
+        // 设置窗口已经把配置写回去了，重新取一次
+        const core::OpenWithEntry* refreshed =
+            core::Settings::Instance().FindOpenWith(extension);
+
+        if (refreshed == nullptr || refreshed->defaultKey.empty())
+        {
+            return true;
+        }
+
+        for (const core::OpenWithItem& item : refreshed->items)
+        {
+            if (core::OpenWithKey(item) == refreshed->defaultKey)
+            {
+                program     = item;
+                haveProgram = true;
+                break;
+            }
+        }
+
+        if (!haveProgram)
+        {
+            return true;
+        }
+    }
+
+    // ---- 3. 打开前最后确认一次程序还在（时机 D）----
+    bool diskMissing = false;
+    if (!shell::IsAvailable(program, diskMissing))
+    {
+        SetOpenWithProgramAlive(extension, core::OpenWithKey(program), 0);
+
+        const std::wstring message = diskMissing
+            ? L"默认程序所在的磁盘没有连接（可能是 U 盘或移动硬盘没插）。\n\n要重新选择打开程序吗？"
+            : L"默认程序已经找不到了（可能被卸载或移动了）。\n\n要重新选择打开程序吗？";
+
+        if (::MessageBoxW(m_hWnd, message.c_str(), L"打开方式",
+                          MB_OKCANCEL | MB_ICONWARNING) == IDOK)
+        {
+            ShowOpenWithSettings(extension, false);
+
+            // 重选成功后直接用新选的程序打开这一个文件
+            const core::OpenWithEntry* refreshed =
+                core::Settings::Instance().FindOpenWith(extension);
+
+            if (refreshed != nullptr && !refreshed->defaultKey.empty())
+            {
+                for (const core::OpenWithItem& item : refreshed->items)
+                {
+                    if (core::OpenWithKey(item) == refreshed->defaultKey)
+                    {
+                        std::wstring error;
+                        if (!shell::Launch(m_hWnd, item, filePath, error))
+                        {
+                            ::MessageBoxW(m_hWnd, error.c_str(), L"打开方式",
+                                          MB_OK | MB_ICONERROR);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // ---- 4. 打开 ----
+    std::wstring error;
+    if (!shell::Launch(m_hWnd, program, filePath, error))
+    {
+        // 同上：启动失败不当作"程序被卸载"，不写 alive=0
+        std::wstring message = error + L"\n\n要重新选择打开程序吗？";
+        if (::MessageBoxW(m_hWnd, message.c_str(), L"打开方式",
+                          MB_OKCANCEL | MB_ICONWARNING) == IDOK)
+        {
+            ShowOpenWithSettings(extension, false);
+        }
+        return true;
+    }
+
+    SetOpenWithProgramAlive(extension, core::OpenWithKey(program), 1);
+    return true;
 }
 
 // ============================================================================
@@ -2686,6 +3047,30 @@ void MainWindow::OnItemActivated(size_t index)
     {
         // 同上：日志里留下"双击了哪一项"，后面跟的就是它的打开结果
         Logger::Info(L"双击：[" + entry.name + L"] " + entry.fullPath);
+
+        // ----------------------------------------------------------
+        // 先走我们自己记的「打开方式」账本
+        //
+        // 这一步是"不被系统劫持"的核心：只要这个扩展名在我们账户本里设过默认程序，
+        // 双击就永远用账本里那个——系统关联怎么改都影响不到。
+        // 第一次用这个扩展名时会弹一次设置窗口，设好就固定。
+        // ----------------------------------------------------------
+        const bool isShellFileNamespace = (entry.fullPath.compare(0, 2, L"::") == 0) ||
+                                          (entry.fullPath.compare(0, 6, L"shell:") == 0);
+
+        if (!isShellFileNamespace)
+        {
+            const std::wstring extension = shell::ExtensionKeyForPath(entry.fullPath);
+
+            // 特殊类型（exe/lnk/bat…）不接管，照旧直接执行
+            if (shell::IsExtensionHandled(extension))
+            {
+                if (TryOpenFileWithOurChoice(entry.fullPath, extension))
+                {
+                    return;
+                }
+            }
+        }
 
         // 普通文件也走系统默认动词：这样"设备和打印机"里的打印机、
         // 带特殊外壳扩展的文档等非常规项也能打开（ShellExecute 对它们会失败）。

@@ -37,10 +37,12 @@
 #include "core/NavigationHistory.h"
 #include "shell/ShellFolder.h"
 #include "shell/ShellIcon.h"
+#include "shell/ShellOpenWith.h"
 #include "ui/AddressBar.h"
 #include "ui/FileListView.h"
 #include "ui/FlatButton.h"
 #include "ui/NavigationPane.h"
+#include "ui/OpenWithDialog.h"
 
 // 子控件 ID
 static const int kControlIdBack    = 1001;
@@ -64,6 +66,11 @@ static const int kCommandGoUp      = 3108;   // Backspace
 // 右键菜单里的命令
 static const int kCommandOpen       = 3201;  // 打开
 static const int kCommandProperties = 3202;  // 属性
+
+// 「打开方式」子菜单里的命令
+//   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
+static const int kCommandOpenWithManage = 3210;   // 添加或管理程序…
+static const int kCommandOpenWithBase   = 3400;   // 用列表里第 N 个程序打开
 
 // 右键菜单「查看」子菜单（和资源管理器一样，几种视图里挑一个）
 static const int kCommandViewLarge   = 3301;  // 大图标
@@ -160,6 +167,36 @@ private:
 
     // ---- 打开选中项 ----
     void OpenSelection();
+
+    // ----------------------------------------------------------------
+    // 「打开方式」（自研账本，不受系统关联影响）
+    //
+    // 规则（和用户对齐过的）：
+    //   · 双击 / 右键「打开」永远用账本里记的默认程序；
+    //   · 某个扩展名第一次用时弹一次设置窗口，设好就固定；
+    //   · 设置窗口里点「跳过」= 这次按系统默认打开、不记录、下次还会问；
+    //   · 默认程序被卸载 → 提示并让用户重选；
+    //   · 右键「打开方式」子菜单只读内存里的账本，绝不读注册表
+    //     （用户要求：影响右键菜单速度的事情非必要不做）。
+    // -------------------------------------------------------------
+
+    // 右键菜单里的「打开方式」子菜单（零成本：只读已经加载的配置）
+    void FillOpenWithMenu(HMENU parentMenu, const std::wstring& extension);
+
+    // 用账本里第 programIndex 个程序打开所有选中文件
+    void OpenSelectionWithProgram(size_t programIndex);
+
+    // 打开某扩展名的设置窗口（manageOnly=false 时是"第一次询问"）
+    void ShowOpenWithSettings(const std::wstring& extension, bool firstTime);
+
+    // 按账本打开一个文件。返回 true 表示"这件事我们管了"（成功或已给用户提示），
+    // 返回 false 表示"不归我们管"（特殊类型、或者没配置又跳过了），调用方走原来的逻辑。
+    bool TryOpenFileWithOurChoice(const std::wstring& filePath, const std::wstring& extension);
+
+    // 把某条程序的存在状态记进配置（只在值真的变了才写盘，避免频繁落盘）
+    void SetOpenWithProgramAlive(const std::wstring& extension,
+                                 const std::wstring& programKey,
+                                 int alive);
 
 // 左栏里点了一项：是目录就进去，是程序/快捷方式就启动它
 void OpenPinnedOrFolder(const std::wstring& path);
