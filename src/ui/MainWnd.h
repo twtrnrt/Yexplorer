@@ -71,6 +71,7 @@ static const int kCommandGoUp      = 3108;   // Backspace
 static const int kCommandOpen       = 3201;  // 打开
 static const int kCommandProperties = 3202;  // 属性
 static const int kCommandOpenInNewWindow = 3203;  // 在新窗口中打开
+static const int kCommandUndo       = 3204;  // 撤销（Ctrl+Z 同效）
 
 // 「打开方式」子菜单里的命令
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
@@ -203,6 +204,33 @@ private:
     // 查看 / 新建文件夹 + 新建 这两块公共片段
     void FillViewMenu(HMENU parentMenu);
     void FillNewFolderAndNewMenu(HMENU menu);
+
+    // ---- 撤销（只记最近一次操作，和资源管理器一样单步撤销）----
+    //
+    // 文案跟系统一样，显示成「撤销 删除」「撤销 重命名」「撤销 移动」
+    // 「撤销 复制」「撤销 新建」；没有可撤销的操作时整项不出现。
+    enum class UndoKind
+    {
+        None,
+        Create,     // 新建（文件夹 / 新建菜单里建出来的文件）
+        Rename,     // 重命名
+        Move,       // 剪切粘贴（移动）
+        Copy,       // 复制粘贴
+        Delete,     // 删除（进回收站，撤销 = 从回收站还原）
+    };
+
+    struct UndoRecord
+    {
+        UndoKind                  kind = UndoKind::None;
+        std::vector<std::wstring> afterPaths;    // 操作之后这些项在哪（撤销要动它们）
+        std::vector<std::wstring> beforePaths;   // 操作之前在哪（重命名前的全路径 / 移动和删除的源路径）
+    };
+
+    UndoRecord m_undoRecord;
+
+    void FillUndoItem(HMENU menu);     // 有可撤销的操作才往菜单里加一项
+    void PerformUndo();                // 真正执行撤销
+    void ClearUndoRecord();            // 没有可撤销的东西了
 
     // 用另一个自身进程打开这个目录（「在新窗口中打开」）
     void OpenFolderInNewWindow(const std::wstring& folderPath);
@@ -409,6 +437,9 @@ private:
     // 复制/移动完成后的那次刷新，是否要把"新出现的项"选中（和资源管理器一致）
     bool                                         m_selectNewAfterEnum = false;
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
+
+    // 这次粘贴的目标目录（撤销「复制/移动」时要对着它算"操作后在哪"）
+    std::wstring                                 m_operationTargetDirectory;
 
     // ---- 排序状态 ----
     int                                          m_sortColumn    = 0;      // 0 名称 1 日期 2 类型 3 大小

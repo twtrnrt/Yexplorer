@@ -19,9 +19,13 @@
 #include <shellapi.h>   // ShellExecuteW
 #include <shlobj.h>     // SHCreateItemFromParsingName / SHGetKnownFolderPath
 #include <shlwapi.h>    // StrCmpLogicalW（资源管理器同款的本地化自然排序）
+#include <shobjidl.h>   // IFileOperation / IShellItem2（撤销删除时要还原回收站里的项）
+#include <propsys.h>    // PSGetPropertyKeyFromName（按属性名取回收站的 DeletedFrom 键）
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
+
+#pragma comment(lib, "propsys.lib")
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -58,6 +62,10 @@ static const wchar_t* kInitialPath = L"C:\\";
 
 // 日志里最多记多少条
 static const size_t kMaxLogItems = 100;
+
+// 拼接 / 拆路径的小工具（实现放在下面，这里先声明：上面的操作完成处理要用到）
+static std::wstring JoinDirectoryFile(const std::wstring& directory, const std::wstring& fileName);
+static std::wstring FileNameOf(const std::wstring& path);
 
 // ============================================================================
 // 内部辅助函数
@@ -864,6 +872,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandOpen:
             OpenSelection();
             return 0;
+        case kCommandUndo:
+            PerformUndo();
+            return 0;
         case kCommandOpenInNewWindow:
         {
             // 「在新窗口中打开」：文件夹 / 盘符 用自身进程新开一个窗口
@@ -1069,6 +1080,30 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             }
 
             Logger::Info(L"文件操作完成");
+
+            // 记进撤销记录（单步：覆盖上一次）
+            if (m_lastOperation == FileOperationKind::Delete)
+            {
+                m_undoRecord.kind        = UndoKind::Delete;
+                m_undoRecord.beforePaths = m_operationPaths;   // 原路径：撤销时按它从回收站还原
+                m_undoRecord.afterPaths.clear();
+            }
+            else if (m_lastOperation == FileOperationKind::Move ||
+                     m_lastOperation == FileOperationKind::Copy)
+            {
+                m_undoRecord.kind = (m_lastOperation == FileOperationKind::Move)
+                                    ? UndoKind::Move : UndoKind::Copy;
+                m_undoRecord.beforePaths = m_operationPaths;
+                m_undoRecord.afterPaths.clear();
+
+                for (const std::wstring& source : m_operationPaths)
+                {
+                    // 操作完成后这一项在目标目录里；用户中途改名会导致找不到，
+                    // 撤销时那种项就静默跳过，不影响其它项
+                    m_undoRecord.afterPaths.push_back(
+                        JoinDirectoryFile(m_operationTargetDirectory, FileNameOf(source)));
+                }
+            }
         }
         else
         {
@@ -1536,6 +1571,7 @@ void MainWindow::DoPaste()
 
     m_lastOperation  = isCut ? FileOperationKind::Move : FileOperationKind::Copy;
     m_operationPaths = paths;
+    m_operationTargetDirectory = targetDirectory;   // 撤销时要按这个目录算"粘贴到哪了"
 
     Logger::Info(L"开始粘贴 " + std::to_wstring(paths.size()) + L" 项到 " + targetDirectory +
                  (isCut ? L"（移动）" : L"（复制）"));
@@ -1763,21 +1799,26 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 // ---------------------------------------------------------------------------
 // 文件夹空白处
 //
-// 分组照资源管理器：
+// 分组按用户要求：
 //   查看 >
+//   刷新            （和「查看」同一组，紧在查看下面）
 //   ─────
 //   粘贴            （剪贴板里有文件才出现）
 //   ─────
 //   新建文件夹
 //   新建 >
 //   ─────
-//   刷新
-//   ─────
 //   属性
+//
+// 撤销项加在最上面（有可撤销的操作时才出现，文案随最近那次操作走，
+// 和资源管理器一样显示成「撤销 删除」「撤销 重命名」这种）
 // ---------------------------------------------------------------------------
 void MainWindow::BuildBackgroundMenu(HMENU menu)
 {
+    FillUndoItem(menu);
+
     FillViewMenu(menu);
+    ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
 
     if (shellclip::HasFiles())
     {
@@ -1788,9 +1829,6 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     FillNewFolderAndNewMenu(menu);
-
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
@@ -1961,6 +1999,276 @@ void MainWindow::FillNewFolderAndNewMenu(HMENU menu)
                   kCommandNewFolder, L"新建文件夹(&N)");
 
     FillNewMenu(menu);
+}
+
+// ============================================================================
+// 撤销（和资源管理器一样：单步，只记最近一次操作）
+//
+// 文案跟系统同步，显示成「撤销 删除」「撤销 重命名」「撤销 移动」
+// 「撤销 复制」「撤销 新建」；没有可撤销的操作时整项不出现。
+//
+// 各种操作怎么反做：
+//   新建 / 复制 → 把多出来的那几项删掉（进回收站，安全，删错还能再捡回来）
+//   移动       → 从目标目录搬回原目录
+//   重命名     → 改回原来的名字
+//   删除       → 从回收站按原路径还原
+// ============================================================================
+
+// 把目录和文件名拼成完整路径（目录末尾补反斜杠）
+static std::wstring JoinDirectoryFile(const std::wstring& directory, const std::wstring& fileName)
+{
+    if (directory.empty())
+    {
+        return fileName;
+    }
+
+    std::wstring result = directory;
+    if (result.back() != L'\\' && result.back() != L'/')
+    {
+        result += L'\\';
+    }
+    result += fileName;
+    return result;
+}
+
+// 从完整路径里取文件名
+static std::wstring FileNameOf(const std::wstring& path)
+{
+    size_t slash = path.find_last_of(L"\\/");
+    return (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+}
+
+// ---------------------------------------------------------------------------
+// 从回收站还原若干项（按原路径匹配）
+//
+// 回收站里的每一项都有 System.Recycle.DeletedFrom 属性（它原来在哪个目录），
+// 配合项的名字就能还原出完整原路径。匹配上就 MoveItem 搬回原目录。
+//
+// 这个属性键在 SDK 的 propkey.h 里没有定义（只在系统属性系统里登记），
+// 所以运行时用 PSGetPropertyKeyFromName 按名字取，取不到就当成"不支持还原"。
+//
+// 找不到（用户清空过回收站、或者在同一目录里又删过同名文件）就什么都不做，
+// 调用方刷新一下列表即可。
+// ---------------------------------------------------------------------------
+static PROPERTYKEY RecycleDeletedFromKey()
+{
+    static PROPERTYKEY key;
+    static bool        resolved = false;
+
+    if (!resolved)
+    {
+        ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // 已初始化过也无所谓
+        ::PSGetPropertyKeyFromName(L"System.Recycle.DeletedFrom", &key);
+        resolved = true;
+    }
+
+    return key;
+}
+
+static HRESULT RestoreDeletedFromRecycleBin(const std::vector<std::wstring>& originalPaths, HWND owner)
+{
+    if (originalPaths.empty())
+    {
+        return E_INVALIDARG;
+    }
+
+    // ---- 1. 拿回收站这个虚拟文件夹 ----
+    IShellItem* binItem = nullptr;
+    HRESULT     hr      = ::SHGetKnownFolderItem(FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, nullptr,
+                                                 IID_IShellItem, reinterpret_cast<void**>(&binItem));
+    if (FAILED(hr) || binItem == nullptr)
+    {
+        Logger::Warn(L"打开回收站失败：" + Logger::FormatHresult(hr));
+        return hr;
+    }
+
+    IShellFolder* binFolder = nullptr;
+    hr = binItem->BindToHandler(nullptr, BHID_SFObject, IID_IShellFolder,
+                                reinterpret_cast<void**>(&binFolder));
+    binItem->Release();
+
+    if (FAILED(hr) || binFolder == nullptr)
+    {
+        Logger::Warn(L"取回收站文件夹失败：" + Logger::FormatHresult(hr));
+        return hr;
+    }
+
+    IEnumIDList* idList  = nullptr;
+    BOOL         matched = FALSE;
+    hr = binFolder->EnumObjects(owner, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS, &idList);
+
+    IFileOperation* operation = nullptr;
+    if (SUCCEEDED(hr))
+    {
+        hr = ::CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL,
+                                IID_IFileOperation, reinterpret_cast<void**>(&operation));
+    }
+
+    if (SUCCEEDED(hr) && operation != nullptr)
+    {
+        operation->SetOwnerWindow(owner);
+        operation->SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI);
+
+        LPITEMIDLIST child = nullptr;
+        while (idList->Next(1, &child, nullptr) == S_OK)
+        {
+            IShellItem2* item = nullptr;
+            if (SUCCEEDED(::SHCreateItemWithParent(nullptr, binFolder, child,
+                                                   IID_IShellItem2, reinterpret_cast<void**>(&item))))
+            {
+                LPWSTR deletedFrom = nullptr;
+
+                if (SUCCEEDED(item->GetString(RecycleDeletedFromKey(), &deletedFrom)) && deletedFrom != nullptr)
+                {
+                    LPWSTR displayName = nullptr;
+
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_PARENTRELATIVE, &displayName)) &&
+                        displayName != nullptr)
+                    {
+                        const std::wstring origin = JoinDirectoryFile(deletedFrom, displayName);
+
+                        auto found = std::find_if(originalPaths.begin(), originalPaths.end(),
+                                                  [&origin](const std::wstring& path)
+                                                  {
+                                                      return _wcsicmp(path.c_str(), origin.c_str()) == 0;
+                                                  });
+
+                        if (found != originalPaths.end())
+                        {
+                            // 目标目录要包成 IShellItem，IFileOperation 只认这个
+                            IShellItem* destination = nullptr;
+
+                            if (SUCCEEDED(::SHCreateItemFromParsingName(deletedFrom, nullptr,
+                                                                        IID_IShellItem,
+                                                                        reinterpret_cast<void**>(&destination))) &&
+                                destination != nullptr)
+                            {
+                                // 搬回原目录 = 还原
+                                operation->MoveItem(item, destination, nullptr, nullptr);
+                                destination->Release();
+                                matched = TRUE;
+                            }
+                        }
+
+                        ::CoTaskMemFree(displayName);
+                    }
+
+                    ::CoTaskMemFree(deletedFrom);
+                }
+
+                item->Release();
+            }
+
+            ::CoTaskMemFree(child);
+        }
+
+        if (matched)
+        {
+            hr = operation->PerformOperations();
+            Logger::Info(L"撤销删除：已从回收站还原，HRESULT=" + Logger::FormatHresult(hr));
+        }
+        else
+        {
+            Logger::Warn(L"撤销删除：回收站里找不到这些项（可能已被清空）");
+        }
+
+        operation->Release();
+    }
+
+    if (idList != nullptr)
+    {
+        idList->Release();
+    }
+    binFolder->Release();
+
+    return hr;
+}
+
+void MainWindow::FillUndoItem(HMENU menu)
+{
+    const wchar_t* verb = nullptr;
+
+    switch (m_undoRecord.kind)
+    {
+    case UndoKind::Create: verb = L"新建";   break;
+    case UndoKind::Rename: verb = L"重命名"; break;
+    case UndoKind::Move:   verb = L"移动";   break;
+    case UndoKind::Copy:   verb = L"复制";   break;
+    case UndoKind::Delete: verb = L"删除";   break;
+    default:               return;          // 没有可撤销的：这一项整条不出现
+    }
+
+    const std::wstring text = std::wstring(L"撤销 ") + verb + L"(&U)";
+
+    ::AppendMenuW(menu, MF_STRING, kCommandUndo, text.c_str());
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+}
+
+void MainWindow::ClearUndoRecord()
+{
+    m_undoRecord = UndoRecord();
+}
+
+void MainWindow::PerformUndo()
+{
+    if (m_operationRunning != nullptr && m_operationRunning->load())
+    {
+        Logger::Warn(L"有文件操作正在进行，撤销先不执行");
+        return;
+    }
+
+    // 拷贝一份再清空：撤销过程中就算出错也不会把记录搞乱
+    const UndoRecord record = m_undoRecord;
+    ClearUndoRecord();
+
+    switch (record.kind)
+    {
+    case UndoKind::Create:
+    case UndoKind::Copy:
+    {
+        // 把多出来的项删掉（进回收站，删错还能再捡回来）
+        for (const std::wstring& path : record.afterPaths)
+        {
+            shellops::DeleteItems({ path }, m_hWnd);
+        }
+        Logger::Info(L"撤销：已删除 " + std::to_wstring(record.afterPaths.size()) + L" 项");
+        break;
+    }
+
+    case UndoKind::Move:
+    {
+        // 从目标目录搬回原目录
+        const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            const std::wstring parent = NavigationHistory::ParentPath(record.beforePaths[i]);
+            shellops::MoveItems({ record.afterPaths[i] }, parent, m_hWnd);
+        }
+        Logger::Info(L"撤销：已移回 " + std::to_wstring(count) + L" 项");
+        break;
+    }
+
+    case UndoKind::Rename:
+    {
+        // 改回原来的名字
+        const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            shellops::RenameItem(record.afterPaths[i], FileNameOf(record.beforePaths[i]), m_hWnd);
+        }
+        Logger::Info(L"撤销：已改回 " + std::to_wstring(count) + L" 项的名字");
+        break;
+    }
+
+    case UndoKind::Delete:
+        RestoreDeletedFromRecycleBin(record.beforePaths, m_hWnd);
+        break;
+
+    default:
+        return;
+    }
+
+    RefreshCurrentFolder();
 }
 
 // ============================================================================
@@ -2400,6 +2708,11 @@ void MainWindow::DoNewItem(size_t index)
         RefreshCurrentFolder();
         return;
     }
+
+    // 记进撤销记录：撤销「新建」= 把刚建出来的这个文件删掉
+    m_undoRecord.kind = UndoKind::Create;
+    m_undoRecord.beforePaths.clear();
+    m_undoRecord.afterPaths.assign(1, created);
 
     // ---- 局部插入一行（不重扫整个目录）----
     std::wstring name = created;
@@ -3054,6 +3367,11 @@ void MainWindow::DoRename(size_t index, const std::wstring& newName)
 
     Logger::Info(L"重命名成功：" + oldName + L" → " + newName);
 
+    // 记进撤销记录：撤销就是把这个新名字改回 oldName
+    m_undoRecord.kind = UndoKind::Rename;
+    m_undoRecord.beforePaths.assign(1, oldPath);
+    m_undoRecord.afterPaths.assign(1, NavigationHistory::ParentPath(oldPath) + L"\\" + newName);
+
     // 局部更新：只改这一行的名字和路径，再按新的名字重新排一下，不重扫目录
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
 
@@ -3422,6 +3740,7 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
 
     m_lastOperation  = isMove ? FileOperationKind::Move : FileOperationKind::Copy;
     m_operationPaths = usableSources;
+    m_operationTargetDirectory = targetDirectory;   // 撤销时要按这个目录算"放到了哪"
 
     RunFileOperationAsync([usableSources, targetDirectory, owner, isMove]() -> HRESULT
     {
@@ -3451,6 +3770,11 @@ void MainWindow::DoNewFolder()
     if (SUCCEEDED(hr))
     {
         Logger::Info(L"新建文件夹成功：" + created);
+
+        // 记进撤销记录：撤销「新建」= 把这个刚建的文件夹删掉
+        m_undoRecord.kind = UndoKind::Create;
+        m_undoRecord.beforePaths.clear();
+        m_undoRecord.afterPaths.assign(1, created);
 
         // 不重扫整个目录：直接往列表里插一条，界面立刻更新
         // 目录名是最后一段
