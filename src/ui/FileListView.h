@@ -72,6 +72,9 @@ public:
     // 排序比较器：返回 true 表示 left 应该排在 right 前面
     using Comparator = std::function<bool(const shell::ShellEntry& left, const shell::ShellEntry& right)>;
 
+    // 用户拖完表头、改了三列固定列的宽度之后通知主窗口（主窗口负责存进配置）
+    using ColumnWidthChangedCallback = std::function<void()>;
+
     FileListView() = default;
     ~FileListView();
 
@@ -118,6 +121,17 @@ public:
     void SetContextMenuCallback(ContextMenuCallback callback) { m_onContextMenu = std::move(callback); }
     void SetColumnClickCallback(ColumnClickCallback callback) { m_onColumnClick = std::move(callback); }
     void SetRenameCallback(RenameCallback callback)           { m_onRename      = std::move(callback); }
+    void SetColumnWidthChangedCallback(ColumnWidthChangedCallback callback) { m_onColumnWidthChanged = std::move(callback); }
+
+    // 三列固定列的宽度（修改日期 / 类型 / 大小）。启动时用配置里存的值，
+    // 没存过就按默认 160 / 120 / 110。名称列不受这个影响，它永远自适应。
+    void SetFixedColumnWidths(int time, int type, int size);
+    void GetFixedColumnWidths(int& time, int& type, int& size) const
+    {
+        time = m_timeColumnWidth;
+        type = m_typeColumnWidth;
+        size = m_sizeColumnWidth;
+    }
 
     // 拖完之后回调：效果是"移动"说明文件已经被搬走，需要主窗口刷新列表
     void SetDragCompletedCallback(DragCompletedCallback callback) { m_onDragCompleted = std::move(callback); }
@@ -129,6 +143,14 @@ public:
     void SetSortState(int column, bool ascending);
 
     HWND Handle() const { return m_hWnd; }
+
+    // 列表的表头控件（SysHeader32）。
+    // 拖表头改列宽的通知是从"表头"发出来的，不是从列表发的，
+    // 所以主窗口转发通知时两边都要认。
+    HWND HeaderHandle() const
+    {
+        return (m_hWnd != nullptr) ? ListView_GetHeader(m_hWnd) : nullptr;
+    }
 
     // 取当前所有选中项的完整路径（复制/剪切/删除要用）
     std::vector<std::wstring> GetSelectedPaths() const;
@@ -207,6 +229,12 @@ private:
     RenameCallback                                m_onRename;
     DragCompletedCallback                         m_onDragCompleted;
     Comparator                                    m_comparator;
+    ColumnWidthChangedCallback                    m_onColumnWidthChanged;
+
+    // 三列固定列的宽度（用户可以拖表头改，改完会存进配置）
+    int                                           m_timeColumnWidth = 160;
+    int                                           m_typeColumnWidth = 120;
+    int                                           m_sizeColumnWidth = 110;
     HFONT                                         m_hFont     = nullptr;
     HFONT                                         m_hHeaderFont = nullptr;   // 分组标题用的粗体字
 

@@ -841,6 +841,48 @@ std::wstring GetParentPath(const std::wstring& path)
 // 判断 Shell 项是不是容器（决定双击是"进去"还是"打开"）
 // ============================================================================
 
+// 控制面板里那些"applet"（双击应该弹出面板窗口，而不是进到列表里看）
+//
+// 它们的解析名长这样：
+//   ::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{7B81BE6A-…}   （程序和功能）
+//   ::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\字体               （字体）
+//
+// 【为什么要固定成"不导航"】
+//   以前是靠"我们自己的枚举器能不能列出东西"来判断的，结果同一个项两次测试
+//   会给出不同答案（冷/热 COM 状态下 EnumerateFolder 结果不一致），表现就是
+//   "这一项有时候进目录、有时候弹面板"，很怪。
+//   控制面板里的 applet 在系统里双击就是弹面板，所以这里钉死，不再探测。
+//
+// 唯一例外是「Windows 工具」（::{D20EA4E1-…}），它真的是个容器，
+// 系统双击也是进去看工具列表，所以照旧按容器处理。
+static bool IsControlPanelAppletPath(const std::wstring& path)
+{
+    static const wchar_t* const kControlPanelChildPrefix =
+        L"::{26EE0668-A00A-44D7-9371-BEB064C98683}\\0\\";
+
+    static const wchar_t* const kWindowsToolsPath =
+        L"::{26EE0668-A00A-44D7-9371-BEB064C98683}\\0\\::{D20EA4E1-3957-11D2-A40B-0C5020524153}";
+
+    if (path.empty())
+    {
+        return false;
+    }
+
+    // 「Windows 工具」是个真容器，不算 applet
+    if (::_wcsicmp(path.c_str(), kWindowsToolsPath) == 0)
+    {
+        return false;
+    }
+
+    const size_t prefixLength = ::wcslen(kControlPanelChildPrefix);
+    if (path.size() < prefixLength)
+    {
+        return false;
+    }
+
+    return ::_wcsnicmp(path.c_str(), kControlPanelChildPrefix, prefixLength) == 0;
+}
+
 // 这些顶层命名空间项"此刻可能是空的"，但双击必须能进去看到空列表，
 // 不能被当成 applet 弹一个系统窗口。这里精确匹配（不加前缀匹配），
 // 免得把它们下面那些真正的 applet 也一起放过。
@@ -893,6 +935,12 @@ bool ShellItemIsContainer(const std::wstring& path)
     if (IsKnownEmptyContainerRoot(path))
     {
         return true;
+    }
+
+    // 控制面板里的 applet：一律不导航，交给双击那条路按 PIDL 弹面板（和系统一致）
+    if (IsControlPanelAppletPath(path))
+    {
+        return false;
     }
 
     HRESULT initHr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

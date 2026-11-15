@@ -23,7 +23,7 @@
 // 列定义
 // ============================================================================
 
-static const int kTimeColumnWidth  = 160;   // 修改日期
+static const int kTimeColumnWidth  = 160;   // 修改日期（默认值，用户拖过之后用拖出来的）
 static const int kTypeColumnWidth  = 120;   // 类型
 static const int kSizeColumnWidth  = 110;   // 大小
 static const int kNameColumnMin    = 260;   // 名称列保底宽度
@@ -315,22 +315,41 @@ void FileListView::ApplyColumns()
     column.iSubItem = 1;
     column.fmt      = LVCFMT_LEFT;
     column.pszText  = const_cast<wchar_t*>(L"修改日期");
-    column.cx       = kTimeColumnWidth;
+    column.cx       = m_timeColumnWidth;
     ListView_InsertColumn(m_hWnd, 1, &column);
 
     // 第 2 列：类型
     column.iSubItem = 2;
     column.fmt      = LVCFMT_LEFT;
     column.pszText  = const_cast<wchar_t*>(L"类型");
-    column.cx       = kTypeColumnWidth;
+    column.cx       = m_typeColumnWidth;
     ListView_InsertColumn(m_hWnd, 2, &column);
 
     // 第 3 列：大小（右对齐，和资源管理器一致）
     column.iSubItem = 3;
     column.fmt      = LVCFMT_RIGHT;
     column.pszText  = const_cast<wchar_t*>(L"大小");
-    column.cx       = kSizeColumnWidth;
+    column.cx       = m_sizeColumnWidth;
     ListView_InsertColumn(m_hWnd, 3, &column);
+}
+
+// 启动时套用配置里存的三列宽度（没有配置就用默认值，调用方不必判断）
+void FileListView::SetFixedColumnWidths(int time, int type, int size)
+{
+    m_timeColumnWidth = (time > 20) ? time : kTimeColumnWidth;
+    m_typeColumnWidth = (type > 20) ? type : kTypeColumnWidth;
+    m_sizeColumnWidth = (size > 20) ? size : kSizeColumnWidth;
+
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    ListView_SetColumnWidth(m_hWnd, 1, static_cast<UINT>(m_timeColumnWidth));
+    ListView_SetColumnWidth(m_hWnd, 2, static_cast<UINT>(m_typeColumnWidth));
+    ListView_SetColumnWidth(m_hWnd, 3, static_cast<UINT>(m_sizeColumnWidth));
+
+    LayoutColumns();   // 名称列跟着重新算（它吃剩下的宽度）
 }
 
 void FileListView::LayoutColumns()
@@ -343,7 +362,7 @@ void FileListView::LayoutColumns()
     RECT clientRect = {};
     ::GetClientRect(m_hWnd, &clientRect);
 
-    int fixedWidth     = kTimeColumnWidth + kTypeColumnWidth + kSizeColumnWidth;
+    int fixedWidth     = m_timeColumnWidth + m_typeColumnWidth + m_sizeColumnWidth;
     int scrollBarWidth = ::GetSystemMetrics(SM_CXVSCROLL);
     int nameWidth      = (clientRect.right - clientRect.left) - fixedWidth - scrollBarWidth;
 
@@ -475,11 +494,13 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     }
 
     // ---- 左边 48px 图标 ----
+    // 垂直位置：和右边"名称 + 容量"两行文字整体居中对齐（系统平铺就是这么排的）。
+    // 格子高 68，图标 48 → 上下各留 10；文字块从 +11 起两行（各 19px），中心也在 34 附近。
     HIMAGELIST imageList = ListView_GetImageList(m_hWnd, LVSIL_NORMAL);
     if (imageList != nullptr)
     {
         ::ImageList_Draw(imageList, IconIndexForEntry(entry), dc,
-                         tileRect.left + 4, tileRect.top + 9, ILD_TRANSPARENT);
+                         tileRect.left + 4, tileRect.top + 10, ILD_TRANSPARENT);
     }
 
     const int textLeft = tileRect.left + 62;
@@ -489,7 +510,7 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     HGDIOBJ oldFont = ::SelectObject(dc, m_hFont);
 
     // ---- 第一行：名字 ----
-    RECT nameRect = { textLeft, tileRect.top + 8, tileRect.right - 6, tileRect.top + 28 };
+    RECT nameRect = { textLeft, tileRect.top + 11, tileRect.right - 6, tileRect.top + 31 };
     ::SetTextColor(dc, nameColor);
     ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -497,7 +518,7 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     // ---- 第二行 + 进度条：只有查得到容量时才画（网络盘、空光驱没有）----
     if (entry.diskTotal > 0)
     {
-        RECT infoRect = { textLeft, tileRect.top + 29, tileRect.right - 6, tileRect.top + 49 };
+        RECT infoRect = { textLeft, tileRect.top + 30, tileRect.right - 6, tileRect.top + 50 };
         ::SetTextColor(dc, infoColor);
 
         const std::wstring info = DiskSpaceText(entry.diskFree, entry.diskTotal);
@@ -506,7 +527,7 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
 
         // 进度条：轨道浅灰，已用部分蓝（快满了变红，跟系统一样）
         const int barLeft   = textLeft;
-        const int barTop    = tileRect.top + 52;
+        const int barTop    = tileRect.top + 53;
         const int barHeight = 9;
 
         int barWidth = tileRect.right - 10 - barLeft;
@@ -1445,6 +1466,39 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         if (m_onColumnClick)
         {
             m_onColumnClick(clickInfo->iSubItem);
+        }
+        return 0;
+    }
+
+    // --------------------------------------------------------------
+    // 用户拖表头改完某一列的宽度（松手那一刻通知）
+    //
+    // 只记「修改日期 / 类型 / 大小」这三列；名称列永远自适应吃剩余宽度，
+    // 拖它没有意义，所以不记（和资源管理器的行为一致）。
+    // --------------------------------------------------------------
+    case HDN_ENDTRACK:
+    {
+        const NMHEADERW* headerInfo = reinterpret_cast<const NMHEADERW*>(lParam);
+        if (headerInfo == nullptr || headerInfo->iItem < 1)
+        {
+            return 0;
+        }
+
+        const int newWidth = ListView_GetColumnWidth(m_hWnd, headerInfo->iItem);
+
+        switch (headerInfo->iItem)
+        {
+        case 1: m_timeColumnWidth = newWidth; break;
+        case 2: m_typeColumnWidth = newWidth; break;
+        case 3: m_sizeColumnWidth = newWidth; break;
+        default: return 0;
+        }
+
+        LayoutColumns();   // 名称列跟着重算
+
+        if (m_onColumnWidthChanged)
+        {
+            m_onColumnWidthChanged();
         }
         return 0;
     }

@@ -211,6 +211,14 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     // 切换视图模式（modeIsUserChoice 为真表示是用户从菜单选的，之后不再自动改）
     void ApplyViewMode(FileListView::ViewMode mode, bool modeIsUserChoice);
 
+    // ---- 阶段 10：把窗口状态记住 / 恢复回来 ----
+    // 恢复（启动时调一次）：左栏宽度、三列宽度、上次的查看模式
+    void RestoreSavedLayout();
+
+    // 记住（关窗口时、拖完分隔线时、拖完表头列宽时调）：
+    // 窗口位置大小与最大化、左栏宽度、三列宽度、当前查看模式、当前目录
+    void SaveWindowState();
+
     // 按"当前目录是什么类型"给出该用的默认视图
     FileListView::ViewMode DefaultViewModeForCurrentPath() const;
 
@@ -297,10 +305,13 @@ private:
     std::wstring                                 m_lastStatusText;
 
     // ---- 左栏宽度（拖中间那条分隔线时改变）----
-    // 本轮只在这次运行里记住；关机重开又回默认 240，持久化留到阶段 10 统一做
+    // 拖动只改这一次运行里的值；松手那一刻会写进配置文件（阶段 10 已做）
     int  m_navWidth         = 0;       // 0 表示还没拖过，用默认宽度
     bool m_draggingSplitter = false;   // 是不是正在拖那条线
     bool m_paneVisible      = false;   // 左栏当前是否显示（窗口太窄时会收起来）
+
+    // 启动时要不要直接最大化（按上次关窗口时的状态）
+    bool m_startMaximized   = false;
 
     // 两条分隔线的位置：LayoutChildren 里算好，WM_PAINT 直接照着画
     RECT m_addressDividerRect = {};    // 地址栏下面那条横线

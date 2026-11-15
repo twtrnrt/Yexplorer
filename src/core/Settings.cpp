@@ -139,6 +139,12 @@ std::wstring Settings::FromUtf8(const std::string& text)
 
 bool Settings::Load()
 {
+    // 读是幂等的：多处都会顺手调一次，已经读过就直接返回，不再碰磁盘
+    if (m_loaded)
+    {
+        return true;
+    }
+
     m_pinnedItems.clear();
 
     std::wstring path = ConfigFilePath();
@@ -155,6 +161,7 @@ bool Settings::Load()
     {
         // 首次运行还没有配置文件，这是正常情况，不用记错误
         Logger::Info(L"没有配置文件，按空配置启动：" + path);
+        m_loaded = true;
         return true;
     }
 
@@ -192,6 +199,52 @@ bool Settings::Load()
                 m_pinnedItems.push_back(std::move(item));
             }
         }
+
+        // ---------------- 窗口位置与大小 ----------------
+        if (json.contains("window") && json["window"].is_object())
+        {
+            const nlohmann::json& win = json["window"];
+
+            WindowState state;
+            state.x         = win.value("x", 0);
+            state.y         = win.value("y", 0);
+            state.width     = win.value("width", 0);
+            state.height    = win.value("height", 0);
+            state.maximized = win.value("maximized", false);
+
+            // 宽高必须像个正常窗口，否则宁可不采用（免得配置文件被改坏后开出一个看不见的窗口）
+            state.valid     = (state.width >= 320 && state.height >= 240);
+
+            m_window = state;
+        }
+
+        // ---------------- 左栏宽度 ----------------
+        m_paneWidth = json.value("paneWidth", 0);
+
+        // ---------------- 三列固定列宽度 ----------------
+        if (json.contains("columns") && json["columns"].is_object())
+        {
+            const nlohmann::json& cols = json["columns"];
+
+            ColumnWidths widths;
+            widths.time  = cols.value("time", 0);
+            widths.type  = cols.value("type", 0);
+            widths.size  = cols.value("size", 0);
+            widths.valid = (widths.time > 20 && widths.type > 20 && widths.size > 20);
+
+            m_columns = widths;
+        }
+
+        // ---------------- 查看模式 ----------------
+        if (json.contains("view") && json["view"].is_object())
+        {
+            const nlohmann::json& view = json["view"];
+            m_viewMode       = view.value("mode", -1);
+            m_viewModeManual = view.value("manual", false);
+        }
+
+        // ---------------- 上次停留的目录 ----------------
+        m_lastFolder = FromUtf8(json.value("lastFolder", std::string()));
     }
     catch (const std::exception& error)
     {
@@ -201,10 +254,18 @@ bool Settings::Load()
 
         Logger::Error(L"配置文件解析失败，已改名留档：" + badPath + L"，原因：" +
                       FromUtf8(error.what()));
+        m_loaded = true;
         return false;
     }
 
-    Logger::Info(L"配置已加载，固定项 " + std::to_wstring(m_pinnedItems.size()) + L" 条");
+    m_loaded = true;
+
+    Logger::Info(L"配置已加载，固定项 " + std::to_wstring(m_pinnedItems.size()) + L" 条" +
+                 L"，上次目录=" + (m_lastFolder.empty() ? L"（无）" : m_lastFolder) +
+                 L"，窗口=" + (m_window.valid
+                                  ? (std::to_wstring(m_window.width) + L"x" +
+                                     std::to_wstring(m_window.height))
+                                  : std::wstring(L"（无）")));
     return true;
 }
 
@@ -240,6 +301,49 @@ bool Settings::Save()
         pinned.push_back(std::move(one));
     }
     json["pinned"] = std::move(pinned);
+
+    // ---------------- 窗口位置与大小 ----------------
+    if (m_window.valid)
+    {
+        nlohmann::json win;
+        win["x"]         = m_window.x;
+        win["y"]         = m_window.y;
+        win["width"]     = m_window.width;
+        win["height"]    = m_window.height;
+        win["maximized"] = m_window.maximized;
+        json["window"]   = std::move(win);
+    }
+
+    // ---------------- 左栏宽度 ----------------
+    if (m_paneWidth > 0)
+    {
+        json["paneWidth"] = m_paneWidth;
+    }
+
+    // ---------------- 三列固定列宽度 ----------------
+    if (m_columns.valid)
+    {
+        nlohmann::json cols;
+        cols["time"] = m_columns.time;
+        cols["type"] = m_columns.type;
+        cols["size"] = m_columns.size;
+        json["columns"] = std::move(cols);
+    }
+
+    // ---------------- 查看模式 ----------------
+    if (m_viewMode >= 0)
+    {
+        nlohmann::json view;
+        view["mode"]   = m_viewMode;
+        view["manual"] = m_viewModeManual;
+        json["view"]   = std::move(view);
+    }
+
+    // ---------------- 上次停留的目录 ----------------
+    if (!m_lastFolder.empty())
+    {
+        json["lastFolder"] = ToUtf8(m_lastFolder);
+    }
 
     // 先写临时文件再替换：万一写一半失败（断电、磁盘满），原配置还是好的
     std::wstring tempPath = path + L".tmp";

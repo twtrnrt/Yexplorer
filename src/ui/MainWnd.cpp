@@ -60,6 +60,16 @@ static const size_t kMaxLogItems = 100;
 // 内部辅助函数
 // ============================================================================
 
+// 上次记下来的窗口矩形还看得见吗？
+//
+// 为什么要检查：换了显示器、拔了副屏、改过分辨率，上次存的坐标可能整块落在屏幕外，
+// 直接用会开出一个"看不见的窗口"，用户以为程序没启动。
+// MONITOR_DEFAULTTONULL 在跟所有显示器都没交集时返回 NULL，正好用来判断。
+static bool IsWindowRectVisible(const RECT& rect)
+{
+    return ::MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) != nullptr;
+}
+
 // 把路径换成"给人看的名字"。
 //   普通磁盘路径（C:\Windows）原样返回，零开销；
 //   虚拟文件夹（此电脑这类）的路径是 ::{GUID}，直接显示很难看，
@@ -100,9 +110,45 @@ static std::wstring DisplayNameForPath(const std::wstring& path)
     return result;
 }
 
-// FILETIME 转成 64 位整数，方便比大小
-static uint64_t FileTimeValue(const FILETIME& time)
+// 上次记下的启动目录现在还能不能用？
+//
+// 普通磁盘目录：看目录还在不在（可能被用户删了、U 盘拔了），不在了就回默认目录；
+// 虚拟项（「::」开头、「shell:」开头）：问 Shell 能不能解析出来。
+static bool IsStartPathUsable(const std::wstring& path)
 {
+    if (path.empty())
+    {
+        return false;
+    }
+
+    // 「主文件夹」是本程序自己的伪路径，不需要问 Shell
+    if (shell::IsTopDesktopPath(path))
+    {
+        return true;
+    }
+
+    const bool isShellNamespace = (path.compare(0, 2, L"::") == 0) ||
+                                  (path.compare(0, 6, L"shell:") == 0);
+
+    if (isShellNamespace)
+    {
+        IShellItem* item = nullptr;
+        const bool parsed = SUCCEEDED(::SHCreateItemFromParsingName(path.c_str(), nullptr,
+                                                                   IID_PPV_ARGS(&item)));
+        if (item != nullptr)
+        {
+            item->Release();
+        }
+        return parsed;
+    }
+
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// FILETIME 转成 64 位整数，方便比大小
+static uint64_t FileTimeValue(const FILETIME& time){
     return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | static_cast<uint64_t>(time.dwLowDateTime);
 }
 
@@ -250,17 +296,50 @@ bool MainWindow::Create(HINSTANCE hInstance)
         return false;
     }
 
-    int screenWidth  = ::GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = ::GetSystemMetrics(SM_CYSCREEN);
-    int posX = (screenWidth  - kInitialWidth)  / 2;
-    int posY = (screenHeight - kInitialHeight) / 2;
+    // 配置必须在建窗口之前读：窗口开在哪儿、多大，要按上次关掉时的样子来。
+    // （Load 是幂等的，后面 CreateChildControls 里再调一次不会重读磁盘）
+    core::Settings::Instance().Load();
+
+    int posX = 0;
+    int posY = 0;
+    int windowWidth  = kInitialWidth;
+    int windowHeight = kInitialHeight;
+
+    const core::WindowState& saved = core::Settings::Instance().Window();
+
+    if (saved.valid)
+    {
+        RECT savedRect = { saved.x, saved.y, saved.x + saved.width, saved.y + saved.height };
+
+        if (IsWindowRectVisible(savedRect))
+        {
+            posX         = saved.x;
+            posY         = saved.y;
+            windowWidth  = saved.width;
+            windowHeight = saved.height;
+            m_startMaximized = saved.maximized;
+        }
+        else
+        {
+            Logger::Warn(L"上次的窗口位置已经不在任何显示器上了，改回居中开窗");
+        }
+    }
+
+    if (posX == 0 && posY == 0 && !saved.valid)
+    {
+        // 首次运行：按屏幕居中
+        int screenWidth  = ::GetSystemMetrics(SM_CXSCREEN);
+        int screenHeight = ::GetSystemMetrics(SM_CYSCREEN);
+        posX = (screenWidth  - windowWidth)  / 2;
+        posY = (screenHeight - windowHeight) / 2;
+    }
 
     m_hWnd = ::CreateWindowExW(
         0,
         kWindowClassName,
         kWindowTitleBase,
         WS_OVERLAPPEDWINDOW,
-        posX, posY, kInitialWidth, kInitialHeight,
+        posX, posY, windowWidth, windowHeight,
         nullptr, nullptr, hInstance,
         this);
 
@@ -273,6 +352,13 @@ void MainWindow::Show(int nCmdShow)
     {
         return;
     }
+
+    // 上次关窗口时是最大化的，就还按最大化打开
+    if (m_startMaximized)
+    {
+        nCmdShow = SW_SHOWMAXIMIZED;
+    }
+
     ::ShowWindow(m_hWnd, nCmdShow);
     ::UpdateWindow(m_hWnd);
 }
@@ -537,6 +623,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         CreateChildControls();
         m_fileListView.SetIconCache(&m_iconCache);
 
+        // 拖完表头列宽，把三列宽度记进配置（下次打开还是这个宽度）
+        m_fileListView.SetColumnWidthChangedCallback([this]()
+        {
+            SaveWindowState();
+        });
+
+        // 阶段 10：把上次记下来的样子恢复出来（左栏宽度、三列宽度、查看模式）
+        RestoreSavedLayout();
+
         // 从本程序把文件拖到别处并且是"移动"时，源目录内容已经变了，要刷新列表
         m_fileListView.SetDragCompletedCallback([this](DWORD)
         {
@@ -548,8 +643,22 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         LayoutChildren();
 
-        m_history.Reset(kInitialPath);
-        StartEnumeration(kInitialPath);
+        // 上次停在哪个目录就直接打开哪个（目录已经不在了就回 C:\）
+        std::wstring startPath = core::Settings::Instance().LastFolder();
+
+        if (startPath.empty() || !IsStartPathUsable(startPath))
+        {
+            if (!startPath.empty())
+            {
+                Logger::Warn(L"上次的目录已经不在了，改回默认目录：" + startPath);
+            }
+            startPath = kInitialPath;
+        }
+
+        Logger::Info(L"启动目录：" + startPath);
+
+        m_history.Reset(startPath);
+        StartEnumeration(startPath);
         return 0;
     }
 
@@ -655,6 +764,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         {
             m_draggingSplitter = false;
             ::ReleaseCapture();
+
+            // 拖完这一下就把左栏宽度记进配置：下次打开还是这个宽度
+            SaveWindowState();
             return 0;
         }
         break;
@@ -779,8 +891,11 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         {
             break;
         }
-        if (header->hwndFrom == m_fileListView.Handle())
+        if (header->hwndFrom == m_fileListView.Handle() ||
+            header->hwndFrom == m_fileListView.HeaderHandle())
         {
+            // 表头的通知（拖完列宽 HDN_ENDTRACK）是从表头控件发出来的，
+            // 列表只是帮忙转发，所以两个句柄都要认，否则拖完列宽记不住。
             return m_fileListView.HandleNotify(lParam);
         }
         if (header->hwndFrom == m_navigationPane.Handle())
@@ -914,6 +1029,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         break;
+
+    // --------------------------------------------------------------
+    // 关窗口
+    // --------------------------------------------------------------
+    case WM_CLOSE:
+        // 这是最后一次机会把"关掉时的样子"记下来（窗口还没销毁，位置大小都取得到）
+        SaveWindowState();
+        break;   // 交给系统继续走默认流程（DestroyWindow）
 
     // --------------------------------------------------------------
     // 销毁
@@ -1624,6 +1747,142 @@ void MainWindow::ApplyViewMode(FileListView::ViewMode mode, bool modeIsUserChoic
     {
         LayoutChildren();
     }
+}
+
+// ============================================================================
+// 阶段 10：窗口状态记住 / 恢复
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 启动时恢复
+//
+// 只恢复"不影响正确性"的东西：左栏宽度、三列宽度、上次的查看模式。
+// 窗口位置大小在 Create() 里就用了（那时候还没有 HWND，没法在这里做）。
+//
+// 查看模式分两种情况：
+//   用户以前从「查看」菜单亲手选过 → 一直用他选的那个；
+//   没选过 → 保持"按目录类型自动定"的老逻辑（这里不插手）。
+// ----------------------------------------------------------------------------
+void MainWindow::RestoreSavedLayout()
+{
+    core::Settings& settings = core::Settings::Instance();
+
+    // ---- 左栏宽度 ----
+    const int paneWidth = settings.PaneWidth();
+    if (paneWidth > 0)
+    {
+        m_navWidth = paneWidth;
+        Logger::Info(L"恢复左栏宽度：" + std::to_wstring(paneWidth));
+    }
+
+    // ---- 三列固定列宽度 ----
+    const core::ColumnWidths& columns = settings.Columns();
+    if (columns.valid)
+    {
+        m_fileListView.SetFixedColumnWidths(columns.time, columns.type, columns.size);
+        Logger::Info(L"恢复列宽：修改日期=" + std::to_wstring(columns.time) +
+                     L"，类型=" + std::to_wstring(columns.type) +
+                     L"，大小=" + std::to_wstring(columns.size));
+    }
+
+    // ---- 查看模式 ----
+    const int savedView = settings.ViewMode();
+    if (savedView >= 0 && savedView <= static_cast<int>(FileListView::ViewMode::Tiles))
+    {
+        m_viewModeManual = settings.ViewModeManual();
+        ApplyViewMode(static_cast<FileListView::ViewMode>(savedView), false);
+        Logger::Info(L"恢复查看模式：" + std::to_wstring(savedView) +
+                     (m_viewModeManual ? L"（用户选定）" : L"（自动）"));
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 写进配置
+//
+// 什么时候调：
+//   · 关窗口时（最后一次，记窗口位置）
+//   · 拖完左栏分隔线松手时（记左栏宽度）
+//   · 拖完表头列宽松手时（记三列宽度）
+// ----------------------------------------------------------------------------
+void MainWindow::SaveWindowState()
+{
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    core::Settings& settings = core::Settings::Instance();
+
+    // ---- 窗口位置与大小 ----
+    // 用 GetWindowPlacement 而不是 GetWindowRect：
+    // 最大化时 GetWindowRect 拿到的是"铺满屏幕"的矩形，直接存下来的话
+    // 下次先还原会变成一个占满屏幕的怪尺寸。GetWindowPlacement 的
+    // rcNormalPosition 是"还原之后"的那个矩形，正是我们要记的。
+    WINDOWPLACEMENT placement = {};
+    placement.length = sizeof(placement);
+
+    core::WindowState window;
+
+    if (::GetWindowPlacement(m_hWnd, &placement))
+    {
+        window.x         = placement.rcNormalPosition.left;
+        window.y         = placement.rcNormalPosition.top;
+        window.width     = placement.rcNormalPosition.right - placement.rcNormalPosition.left;
+        window.height    = placement.rcNormalPosition.bottom - placement.rcNormalPosition.top;
+        window.maximized = (placement.showCmd == SW_SHOWMAXIMIZED);
+    }
+    else
+    {
+        RECT windowRect = {};
+        ::GetWindowRect(m_hWnd, &windowRect);
+        window.x      = windowRect.left;
+        window.y      = windowRect.top;
+        window.width  = windowRect.right - windowRect.left;
+        window.height = windowRect.bottom - windowRect.top;
+    }
+
+    // 太小或者明显的异常值不存（免得配置文件写坏之后开出一个看不见的窗口）
+    window.valid = (window.width >= 320 && window.height >= 240);
+
+    if (window.valid)
+    {
+        settings.SetWindow(window);
+    }
+
+    // ---- 左栏宽度 ----
+    if (m_navWidth > 0)
+    {
+        settings.SetPaneWidth(m_navWidth);
+    }
+
+    // ---- 三列固定列宽度 ----
+    core::ColumnWidths columns;
+    m_fileListView.GetFixedColumnWidths(columns.time, columns.type, columns.size);
+    columns.valid = true;
+    settings.SetColumns(columns);
+
+    // ---- 查看模式 ----
+    settings.SetViewMode(static_cast<int>(m_fileListView.CurrentViewMode()), m_viewModeManual);
+
+    // ---- 上次停留的目录 ----
+    const std::wstring current = m_history.Current();
+    if (!current.empty())
+    {
+        settings.SetLastFolder(current);
+    }
+
+    if (!settings.Save())
+    {
+        Logger::Warn(L"窗口状态保存失败（下次打开会是默认的样子）");
+        return;
+    }
+
+    Logger::Info(L"窗口状态已保存：位置=" + std::to_wstring(window.x) + L"," +
+                 std::to_wstring(window.y) + L"，大小=" + std::to_wstring(window.width) + L"x" +
+                 std::to_wstring(window.height) +
+                 (window.maximized ? L"（最大化）" : L"") +
+                 L"，左栏=" + std::to_wstring(m_navWidth) +
+                 L"，目录=" + current);
 }
 
 // ============================================================================
@@ -2369,6 +2628,11 @@ void MainWindow::OnItemActivated(size_t index)
 
     if (entry.isFolder && !entry.fullPath.empty())
     {
+        // 记一条"双击的是哪一项"：以后排查"双击没反应"时，日志里这条后面
+        // 紧跟的「导航到 / 按 PIDL 打开成功 / 打开失败」就是它的结果，
+        // 一眼能对上是哪个项出的问题。
+        Logger::Info(L"双击：[" + entry.name + L"] " + entry.fullPath);
+
         // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」）不一定真能"进去"：
         // 控制面板里「恢复」「凭据管理器」「Windows Defender 防火墙」这些，
         // 属性上是文件夹，其实是 applet（双击应该弹设置界面），往里进只会得到一个空列表，
@@ -2420,6 +2684,9 @@ void MainWindow::OnItemActivated(size_t index)
 
     if (!entry.isFolder && !entry.fullPath.empty())
     {
+        // 同上：日志里留下"双击了哪一项"，后面跟的就是它的打开结果
+        Logger::Info(L"双击：[" + entry.name + L"] " + entry.fullPath);
+
         // 普通文件也走系统默认动词：这样"设备和打印机"里的打印机、
         // 带特殊外壳扩展的文档等非常规项也能打开（ShellExecute 对它们会失败）。
         // 同样先试 PIDL（命名空间目录里的项才带 PIDL），再退路径字符串。

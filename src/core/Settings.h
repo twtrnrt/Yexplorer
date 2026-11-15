@@ -32,6 +32,29 @@ struct PinnedItem
     bool         isFolder;  // true = 文件夹（点了进目录）；false = 程序（点了启动）
 };
 
+// 窗口位置与大小（重启后要回到原样）
+// valid = false 表示配置文件里还没记过（首次运行），此时按默认大小居中开。
+struct WindowState
+{
+    int  x         = 0;
+    int  y         = 0;
+    int  width     = 0;
+    int  height    = 0;
+    bool maximized = false;
+    bool valid     = false;
+};
+
+// 详细信息视图里三列固定列的宽度。
+// 名称列不存 —— 它永远"吃掉剩下的宽度"（和资源管理器一样），
+// 只有「修改日期 / 类型 / 大小」是用户可能去拖的固定列。
+struct ColumnWidths
+{
+    int  time  = 0;
+    int  type  = 0;
+    int  size  = 0;
+    bool valid = false;
+};
+
 // 本软件公用配置。全程序只有一个实例（Settings::Instance()）。
 class Settings
 {
@@ -55,6 +78,37 @@ public:
 
     bool IsPinned(const std::wstring& path) const;
 
+    // ---------------- 阶段 10：记住窗口状态 ----------------
+    // 说明：这一组不做"每改一次就自动存盘"，由调用方决定什么时候写。
+    // 现在只在两处写：关窗口时、拖完分隔线 / 拖完表头列宽时。
+
+    // 配置是否已经从磁盘读过了（读是幂等的，重复调用不会重读）
+    bool Loaded() const { return m_loaded; }
+
+    const WindowState&  Window() const { return m_window; }
+    void                SetWindow(const WindowState& state) { m_window = state; }
+
+    // 左栏宽度。0 表示没记过（用默认值）
+    int  PaneWidth() const { return m_paneWidth; }
+    void SetPaneWidth(int width) { m_paneWidth = width; }
+
+    const ColumnWidths& Columns() const { return m_columns; }
+    void                SetColumns(const ColumnWidths& widths) { m_columns = widths; }
+
+    // 上次用的查看模式（FileListView::ViewMode 的整数值）。-1 表示没记过。
+    // manual = 用户是不是从「查看」菜单亲手选的（是的话以后不再按目录自动切）
+    int  ViewMode() const { return m_viewMode; }
+    bool ViewModeManual() const { return m_viewModeManual; }
+    void SetViewMode(int mode, bool manual)
+    {
+        m_viewMode       = mode;
+        m_viewModeManual = manual;
+    }
+
+    // 上次停留的目录（下次启动直接打开这里）
+    const std::wstring& LastFolder() const { return m_lastFolder; }
+    void                SetLastFolder(const std::wstring& path) { m_lastFolder = path; }
+
 private:
     Settings() = default;
 
@@ -69,6 +123,15 @@ private:
     static bool EnsureDirectory(const std::wstring& filePath);
 
     std::vector<PinnedItem> m_pinnedItems;
+
+    // 阶段 10 的窗口状态
+    bool          m_loaded         = false;   // 已经读过磁盘了
+    WindowState   m_window;
+    int           m_paneWidth      = 0;       // 0 = 没记过
+    ColumnWidths  m_columns;
+    int           m_viewMode       = -1;      // -1 = 没记过
+    bool          m_viewModeManual = false;
+    std::wstring  m_lastFolder;
 };
 
 } // namespace core
