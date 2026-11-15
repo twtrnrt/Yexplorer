@@ -1859,6 +1859,9 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 // ---------------------------------------------------------------------------
 void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 {
+    // 撤销 / 恢复 放在最上面一组（空白处、单选、多选都一样）
+    FillUndoItem(menu);
+
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
     // 打开方式：只给"普通文件"；菜单内容全部来自内存里的账本，零成本
@@ -1902,6 +1905,9 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 // ---------------------------------------------------------------------------
 void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderPath*/)
 {
+    // 撤销 / 恢复 放在最上面一组（空白处、单选、多选都一样）
+    FillUndoItem(menu);
+
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
     ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
 
@@ -1935,6 +1941,9 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderP
 // ---------------------------------------------------------------------------
 void MainWindow::BuildMultipleMenu(HMENU menu)
 {
+    // 撤销 / 恢复 放在最上面一组（空白处、单选、多选都一样）
+    FillUndoItem(menu);
+
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
