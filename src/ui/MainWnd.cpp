@@ -1737,10 +1737,37 @@ void MainWindow::SetOpenWithProgramAlive(const std::wstring& extension,
     }
 }
 
-void MainWindow::ShowOpenWithSettings(const std::wstring& extension, bool firstTime)
+void MainWindow::ShowOpenWithSettings(const std::wstring& extension, bool firstTime,
+                                      const std::wstring& filePath)
 {
     ui::OpenWithDialog dialog(m_hWnd, &m_iconCache);
-    dialog.ShowModal(extension, firstTime);
+    dialog.ShowModal(extension, firstTime, filePath);
+
+    // 用户点了「打开」→ 用刚设好的默认程序把这个文件打开
+    if (!dialog.OpenRequested() || filePath.empty())
+    {
+        return;
+    }
+
+    const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
+
+    if (entry == nullptr || entry->defaultKey.empty())
+    {
+        return;
+    }
+
+    for (const core::OpenWithItem& item : entry->items)
+    {
+        if (core::OpenWithKey(item) == entry->defaultKey)
+        {
+            std::wstring error;
+            if (!shell::Launch(m_hWnd, item, filePath, error))
+            {
+                ::MessageBoxW(m_hWnd, error.c_str(), L"打开方式", MB_OK | MB_ICONERROR);
+            }
+            return;
+        }
+    }
 }
 
 void MainWindow::OpenSelectionWithProgram(size_t programIndex)
@@ -1764,16 +1791,13 @@ void MainWindow::OpenSelectionWithProgram(size_t programIndex)
     const std::wstring programKey = core::OpenWithKey(program);
 
     // 打开前先确认程序还在（时机 D）
+    // 不在的话不弹消息框，直接打开设置窗口重选（用户要求）
     bool diskMissing = false;
     if (!shell::IsAvailable(program, diskMissing))
     {
         SetOpenWithProgramAlive(extension, programKey, 0);
 
-        const std::wstring message = diskMissing
-            ? L"这个程序所在的磁盘没有连接（可能是 U 盘或移动硬盘没插）。"
-            : L"这个程序已经找不到了（可能被卸载或移动了）。";
-
-        ::MessageBoxW(m_hWnd, message.c_str(), L"打开方式", MB_OK | MB_ICONWARNING);
+        ShowOpenWithSettings(extension, false, selected.front());
         return;
     }
 
@@ -1832,21 +1856,14 @@ bool MainWindow::TryOpenFileWithOurChoice(const std::wstring& filePath,
     }
 
     // ---- 2. 没设过（或设的那个已经从账本里被删掉了）→ 让用户设一次 ----
+    // 用户要求：不再弹"原来的默认程序已经不在列表里了"这种消息框，直接打开设置窗口
     if (!haveProgram)
     {
-        if (!neverConfigured)
-        {
-            // 设过、但那条程序已经从列表里删掉了
-            ::MessageBoxW(m_hWnd,
-                          L"原来的默认程序已经不在列表里了，请重新选一个。",
-                          L"打开方式", MB_OK | MB_ICONWARNING);
-        }
-
         ui::OpenWithDialog dialog(m_hWnd, &m_iconCache);
-        const bool configured = dialog.ShowModal(extension, neverConfigured);
+        dialog.ShowModal(extension, neverConfigured, filePath);
 
-        // 点「跳过」（或没设默认就关掉）：这次按系统默认打开，不记录，下次还会问
-        if (dialog.Skipped() || !configured)
+        // 没设默认就关掉了（点「关闭」）→ 这次按系统默认打开，不记录，下次还会问
+        if (!dialog.OpenRequested())
         {
             if (!shell::LaunchWithSystemDefault(m_hWnd, filePath))
             {
@@ -1856,7 +1873,7 @@ bool MainWindow::TryOpenFileWithOurChoice(const std::wstring& filePath,
             return true;
         }
 
-        // 设置窗口已经把配置写回去了，重新取一次
+        // 用户点了「打开」：用刚设好的默认程序开这个文件
         const core::OpenWithEntry* refreshed =
             core::Settings::Instance().FindOpenWith(extension);
 
@@ -1882,42 +1899,13 @@ bool MainWindow::TryOpenFileWithOurChoice(const std::wstring& filePath,
     }
 
     // ---- 3. 打开前最后确认一次程序还在（时机 D）----
+    // 程序不在了（卸载/移动/磁盘没插）：不再弹消息框，直接把设置窗口弹出来让用户重选
     bool diskMissing = false;
     if (!shell::IsAvailable(program, diskMissing))
     {
         SetOpenWithProgramAlive(extension, core::OpenWithKey(program), 0);
 
-        const std::wstring message = diskMissing
-            ? L"默认程序所在的磁盘没有连接（可能是 U 盘或移动硬盘没插）。\n\n要重新选择打开程序吗？"
-            : L"默认程序已经找不到了（可能被卸载或移动了）。\n\n要重新选择打开程序吗？";
-
-        if (::MessageBoxW(m_hWnd, message.c_str(), L"打开方式",
-                          MB_OKCANCEL | MB_ICONWARNING) == IDOK)
-        {
-            ShowOpenWithSettings(extension, false);
-
-            // 重选成功后直接用新选的程序打开这一个文件
-            const core::OpenWithEntry* refreshed =
-                core::Settings::Instance().FindOpenWith(extension);
-
-            if (refreshed != nullptr && !refreshed->defaultKey.empty())
-            {
-                for (const core::OpenWithItem& item : refreshed->items)
-                {
-                    if (core::OpenWithKey(item) == refreshed->defaultKey)
-                    {
-                        std::wstring error;
-                        if (!shell::Launch(m_hWnd, item, filePath, error))
-                        {
-                            ::MessageBoxW(m_hWnd, error.c_str(), L"打开方式",
-                                          MB_OK | MB_ICONERROR);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
+        ShowOpenWithSettings(extension, false, filePath);
         return true;
     }
 

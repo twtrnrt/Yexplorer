@@ -79,9 +79,10 @@ IconCache::IconCache() = default;
 
 IconCache::~IconCache()
 {
-    // m_systemImageList / m_largeSystemImageList 由 wil::com_ptr 自动释放
-    m_hImageList      = nullptr;
-    m_hLargeImageList = nullptr;
+    // m_systemImageList / m_mediumSystemImageList / m_largeSystemImageList 由 wil::com_ptr 自动释放
+    m_hImageList       = nullptr;
+    m_hMediumImageList = nullptr;
+    m_hLargeImageList  = nullptr;
 }
 
 bool IconCache::Initialize()
@@ -92,6 +93,7 @@ bool IconCache::Initialize()
     }
 
     // SHIL_SMALL     ：系统小图标列表（16px，列表/详细信息视图用这个）
+    // SHIL_LARGE     ：系统中图标列表（32px，「打开方式」那两个窗口的列表用）
     // SHIL_EXTRALARGE：系统大图标列表（48px，「大图标」视图用这个）
     // 直接把 IImageList 当 HIMAGELIST 用是官方支持的用法
     HRESULT hr = ::SHGetImageList(SHIL_SMALL, IID_PPV_ARGS(m_systemImageList.put()));
@@ -102,8 +104,16 @@ bool IconCache::Initialize()
 
     m_hImageList = reinterpret_cast<HIMAGELIST>(m_systemImageList.get());
 
+    // 中图标列表拿不到不算失败：那两个窗口退化成没图标，别的功能不受影响
+    if (SUCCEEDED(::SHGetImageList(SHIL_LARGE, IID_PPV_ARGS(m_mediumSystemImageList.put())))
+        && m_mediumSystemImageList != nullptr)
+    {
+        m_hMediumImageList = reinterpret_cast<HIMAGELIST>(m_mediumSystemImageList.get());
+    }
+
     // 大图标列表拿不到不算失败：界面照样能用，只是「大图标」视图会没有图标
-    if (SUCCEEDED(::SHGetImageList(SHIL_EXTRALARGE, IID_PPV_ARGS(m_largeSystemImageList.put()))))
+    if (SUCCEEDED(::SHGetImageList(SHIL_EXTRALARGE, IID_PPV_ARGS(m_largeSystemImageList.put())))
+        && m_largeSystemImageList != nullptr)
     {
         m_hLargeImageList = reinterpret_cast<HIMAGELIST>(m_largeSystemImageList.get());
     }
@@ -139,7 +149,8 @@ int IconCache::GetIconIndex(const std::wstring& name, bool isFolder, IconSize si
         return 0;
     }
 
-    const bool large = (size == IconSize::Large);
+    // Small 用 16px 那套；Medium(32) 和 Large(48) 共用大图标那套查询与索引
+    const bool large = (size != IconSize::Small);
 
     // 文件夹：统一图标，零查询
     if (isFolder)
@@ -169,7 +180,8 @@ int IconCache::GetIconIndexByPath(const std::wstring& path, IconSize size)
         return 0;
     }
 
-    const bool large = (size == IconSize::Large);
+    // Small 用 16px 那套；Medium(32) 和 Large(48) 共用大图标那套查询与索引
+    const bool large = (size != IconSize::Small);
 
     SHFILEINFOW fileInfo = {};
     DWORD_PTR result = ::SHGetFileInfoW(
@@ -202,7 +214,8 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size)
         return 0;
     }
 
-    const bool large = (size == IconSize::Large);
+    // Small 用 16px 那套；Medium(32) 和 Large(48) 共用大图标那套查询与索引
+    const bool large = (size != IconSize::Small);
 
     // 「C:」这种光秃秃的盘符要补成「C:\」：不补的话系统会把它当成"当前目录"，
     // 取回来的不是驱动器图标
@@ -385,7 +398,8 @@ HICON IconCache::CreateDimmedIcon(HICON source, int size)
 
 int IconCache::GetDimmedIconIndex(int originalIndex, IconSize size)
 {
-    const bool large = (size == IconSize::Large);
+    // Small 用 16px 那套；Medium(32) 和 Large(48) 共用大图标那套查询与索引
+    const bool large = (size != IconSize::Small);
 
     // 大图标列表没拿到时，不能往空句柄里加图标，直接原样返回
     HIMAGELIST     targetList  = large ? m_hLargeImageList : m_hImageList;

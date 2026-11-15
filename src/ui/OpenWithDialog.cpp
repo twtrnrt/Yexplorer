@@ -5,9 +5,10 @@
 // 「打开方式」设置窗口的实现。界面说明见 OpenWithDialog.h。
 //
 // 几个关键决定：
-//   1. 按钮自己画（项目里所有按钮都是扁平的，混一个系统立体按钮会很突兀）；
-//   2. 列表用系统 ListView 带复选框：勾选状态由系统画，稳定、好点；
-//   3. 「默认」列用 ●/○ 字符表达（用颜色区分），点击这一列就设成默认；
+//   1. 按钮自己画（跟主界面那种扁平的按钮保持一致）；
+//   2. 列表整行自绘（LVS_OWNERDRAWFIXED）：系统自带复选框会把"选中行"涂成蓝底白字，
+//      改不成参考窗口那种浅蓝底，所以复选框、图标、名字、圆点全部自己画；
+//   3. 勾选框直接用系统主题画（uxtheme 的 BP_CHECKBOX），跟资源管理器里一模一样；
 //   4. 打开窗口时才读系统候选（用户明确要求），平时右键菜单绝不读。
 // ============================================================================
 
@@ -23,6 +24,10 @@
 #include <commdlg.h>
 #include <shlwapi.h>
 #include <shellapi.h>
+#include <uxtheme.h>
+#include <vsstyle.h>   // 主题部件/状态常量（BP_CHECKBOX、CBS_CHECKEDNORMAL…）
+
+#pragma comment(lib, "uxtheme.lib")
 
 #include <algorithm>
 
@@ -40,10 +45,42 @@ const int kControlIdList = 2001;
 const int kDialogWidth  = 620;
 const int kDialogHeight = 440;
 
-const int kTitleHeight = 26;   // 标题一行
-const int kHintHeight  = 22;   // 说明一行
-const int kPadding     = 14;
+const int kHintHeight   = 22;   // 列表上方那一行说明字
+const int kPadding      = 14;
 const int kButtonHeight = 28;
+
+// 列表外面那圈圆角浅灰框（照参考窗口的样子）
+const int kFrameRadius  = 6;
+const int kFrameInset   = 1;    // 列表控件往里缩 1 像素，别把框线盖住
+
+// 列宽（逻辑像素）：程序名吃满剩余宽度，另外两列固定
+const int kStatusColumnWidth = 120;
+const int kDefaultColumnWidth = 56;
+
+// 列表行高（逻辑像素）：32px 图标 + 上下各留 2
+const int kRowHeight = 36;
+
+// 列表配色（对照参考窗口）
+const COLORREF kRowLineColor      = RGB(232, 235, 239);   // 行与行之间的浅灰线
+const COLORREF kRowSelectedColor  = RGB(232, 240, 254);   // 选中行的浅蓝底
+const COLORREF kRowSelectedLine   = RGB(196, 214, 244);   // 选中行底下的线，稍微深一点
+const COLORREF kRowTextColor      = RGB(31, 35, 40);
+const COLORREF kRowDimmedText     = RGB(150, 150, 150);   // 已卸载的行标灰
+const COLORREF kDotOnColor        = RGB(47, 111, 208);    // 默认程序：实心蓝点
+const COLORREF kDotOffColor       = RGB(154, 163, 173);   // 非默认：空心灰圈
+const COLORREF kDotOnFill         = RGB(47, 111, 208);
+
+    // 圆角框的边框色：和行分隔线同一个浅灰（用户指定 232,235,239）
+const COLORREF kFrameColor    = RGB(232, 235, 239);
+const COLORREF kHintTextColor = RGB(96, 103, 111);
+
+// 行分隔线两端离表格左右边框的距离（用户要求 3 像素，别顶着边框）
+const int kRowLineInset = 3;
+
+// 列表上方那行说明字：左边一段管勾选，右边一段是「默认程序」列的表头
+// （表格自己没有表头，这两个字由窗口画，并且要跟最右那列对齐）
+const wchar_t* const kHintLabel    = L"勾选后在右键「打开方式」菜单显示";
+const wchar_t* const kDefaultLabel = L"默认程序";
 
 } // namespace
 
@@ -58,6 +95,8 @@ OpenWithDialog::OpenWithDialog(HWND owner, shell::IconCache* icons)
 
 OpenWithDialog::~OpenWithDialog()
 {
+    ReleaseRowIcons();
+
     if (m_font != nullptr)
     {
         ::DeleteObject(m_font);
@@ -113,11 +152,14 @@ int OpenWithDialog::Scale(int value) const
 // 显示（模态）
 // ============================================================================
 
-bool OpenWithDialog::ShowModal(const std::wstring& extension, bool firstTime)
+bool OpenWithDialog::ShowModal(const std::wstring& extension,
+                               bool firstTime,
+                               const std::wstring& filePath)
 {
     m_extension = extension;
+    m_filePath  = filePath;
     m_firstTime = firstTime;
-    m_skipped   = false;
+    m_openRequested = false;
 
     // 从配置里拷一份工作副本（改完关窗口才写回，改一半放弃也不影响配置）
     const core::OpenWithEntry* saved = core::Settings::Instance().FindOpenWith(m_extension);
@@ -171,6 +213,10 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension, bool firstTime)
     }
 
     ProbeAll();
+
+    // 打开窗口这一刻从系统拉到的候选就是账本快照，立刻落盘（用户要求"设置自动保存"）
+    SaveNow();
+
     ReloadList();
 
     // ---- 模态循环 ----
@@ -201,13 +247,7 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension, bool firstTime)
     ::EnableWindow(m_hOwner, TRUE);
     ::SetForegroundWindow(m_hOwner);
 
-    // ---- 写回配置 ----
-    if (m_skipped)
-    {
-        // 点了「跳过」：这次不记录，把预选撤掉（下次双击还会问）
-        m_entry.defaultKey.clear();
-    }
-
+    // ---- 写回配置（自动保存：窗口里任何改动都会即时落盘，这里再存一次兜底）----
     core::Settings::Instance().EnsureOpenWith(m_extension) = m_entry;
     core::Settings::Instance().Save();
 
@@ -217,6 +257,23 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension, bool firstTime)
                                              : m_entry.defaultKey));
 
     return !m_entry.defaultKey.empty();
+}
+
+// ============================================================================
+// 把当前工作副本立刻写进配置文件
+//
+// 用户要求"设置自动保存"：勾选、设默认、删除、加程序之后马上就存，
+// 不用等关窗口；这样即使窗口被强制关掉／程序崩了，设置也不会丢。
+// ============================================================================
+void OpenWithDialog::SaveNow()
+{
+    if (m_extension.empty())
+    {
+        return;
+    }
+
+    core::Settings::Instance().EnsureOpenWith(m_extension) = m_entry;
+    core::Settings::Instance().Save();
 }
 
 // ============================================================================
@@ -252,11 +309,21 @@ bool OpenWithDialog::CreateDialogWindow()
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top  + ((ownerRect.bottom - ownerRect.top) - height) / 2;
 
-    std::wstring title = L"打开方式 - " + m_extension;
-    if (m_firstTime)
+    // 扩展名：标题里用大写、不带点（"TXT"）
+    std::wstring titleExtension = m_extension;
+
+    if (!titleExtension.empty() && titleExtension.front() == L'.')
     {
-        title += L"（第一次打开这类文件）";
+        titleExtension.erase(titleExtension.begin());
     }
+
+    std::transform(titleExtension.begin(), titleExtension.end(), titleExtension.begin(),
+                   [](wchar_t ch) { return static_cast<wchar_t>(::towupper(ch)); });
+
+    // 第一次打开这类文件 → "设置默认打开 TXT 的程序"；平时管理 → "打开方式（TXT）"
+    const std::wstring title = m_firstTime
+                                   ? (L"设置默认打开" + titleExtension + L"的程序")
+                                   : (L"打开方式（" + titleExtension + L"）");
 
     m_hWnd = ::CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
                                kClassName,
@@ -281,10 +348,13 @@ bool OpenWithDialog::CreateDialogWindow()
 
 void OpenWithDialog::CreateControls()
 {
+    // LVS_OWNERDRAWFIXED：整行由我们自己画。
+    // 为什么不用系统自带的复选框 + NM_CUSTOMDRAW：那样"选中行"永远被系统涂成蓝色，
+    // 改不成参考窗口那种浅蓝底，圆点也没法自己画。全自绘才完全可控。
     m_hList = ::CreateWindowExW(
         0, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
-            LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER | LVS_NOSORTHEADER,
+            LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER | LVS_NOSORTHEADER | LVS_OWNERDRAWFIXED,
         0, 0, 0, 0,
         m_hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdList)),
         ::GetModuleHandleW(nullptr), nullptr);
@@ -294,14 +364,15 @@ void OpenWithDialog::CreateControls()
         ::SendMessageW(m_hList, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
 
         ::SendMessageW(m_hList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
-                       LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+                       LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
 
-        // 小图标来自系统图标列表（和主窗口同一份）
+        // 图标用系统 32px 那一档（程序图标比 16px 的小图标看得清，也不像 48px 那么占地方）
         if (m_icons != nullptr)
         {
+            m_iconList = m_icons->ImageList(shell::IconCache::IconSize::Medium);
+
             ::SendMessageW(m_hList, LVM_SETIMAGELIST, LVSIL_SMALL,
-                           reinterpret_cast<LPARAM>(m_icons->ImageList(
-                               shell::IconCache::IconSize::Small)));
+                           reinterpret_cast<LPARAM>(m_iconList));
         }
 
         LVCOLUMNW column = {};
@@ -312,11 +383,11 @@ void OpenWithDialog::CreateControls()
         ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
 
         column.pszText = const_cast<LPWSTR>(L"状态");
-        column.cx      = Scale(120);
+        column.cx      = Scale(kStatusColumnWidth);
         ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
 
         column.pszText = const_cast<LPWSTR>(L"默认");
-        column.cx      = Scale(56);
+        column.cx      = Scale(kDefaultColumnWidth);
         column.fmt     = LVCFMT_CENTER;
         ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&column));
     }
@@ -340,57 +411,125 @@ void OpenWithDialog::Layout()
     const int clientWidth  = clientRect.right;
     const int clientHeight = clientRect.bottom;
 
-    // ---- 列表 ----
-    const int listTop = padding + Scale(kTitleHeight) + Scale(kHintHeight) + Scale(6);
-    const int listBottomMargin = Scale(kButtonHeight) + padding * 2 + Scale(6);
+    // ---- 框（列表住在框里）----
+    // 上面只留一行说明字，不再像以前那样"一个大标题 + 一行小字"两行
+    const int frameTop    = padding + Scale(kHintHeight) + Scale(8);
+    const int frameBottom = clientHeight - padding - Scale(kButtonHeight) - Scale(8);
 
-    m_listRect.left   = padding;
-    m_listRect.top    = listTop;
-    m_listRect.right  = clientWidth - padding;
-    m_listRect.bottom = clientHeight - listBottomMargin;
+    m_frameRect.left   = padding;
+    m_frameRect.top    = frameTop;
+    m_frameRect.right  = clientWidth - padding;
+    m_frameRect.bottom = frameBottom;
 
+    // ---- 列表：往里缩 1 像素，让框线露出来 ----
+    const int inset = Scale(kFrameInset);
+
+    m_listRect.left   = m_frameRect.left + inset;
+    m_listRect.top    = m_frameRect.top + inset;
+    m_listRect.right  = m_frameRect.right - inset;
+    m_listRect.bottom = m_frameRect.bottom - inset;
+
+    // 框是直角，列表不用裁形状，直接摆进框里（比框小 1px，别盖住框线）
     ::MoveWindow(m_hList,
                  m_listRect.left, m_listRect.top,
                  m_listRect.right - m_listRect.left,
                  m_listRect.bottom - m_listRect.top,
                  TRUE);
 
-    // 程序名列吃满剩余宽度，另外两列固定
-    const int nameWidth = (m_listRect.right - m_listRect.left) - Scale(120) - Scale(56) -
-                          ::GetSystemMetrics(SM_CXVSCROLL) - Scale(4);
+    // 程序名列吃满剩余宽度，另外两列固定。
+    // 只有内容超过可视高度（真会出现竖滚动条）时才给它留宽度，
+    // 否则右边会空出一条——用户看到的"表格右侧 51px 空白"就是这个。
+    const int listWidth  = m_listRect.right - m_listRect.left;
+    const int listHeight = m_listRect.bottom - m_listRect.top;
+
+    const int rowCount = static_cast<int>(m_entry.items.size());
+    const bool needScrollBar = (rowCount * Scale(kRowHeight)) > (listHeight - Scale(2));
+    const int scrollWidth = needScrollBar ? ::GetSystemMetrics(SM_CXVSCROLL) : 0;
+
+    const int nameWidth = listWidth - scrollWidth -
+                          Scale(kStatusColumnWidth) - Scale(kDefaultColumnWidth);
+
     ::SendMessageW(m_hList, LVM_SETCOLUMNWIDTH, 0, std::max(Scale(160), nameWidth));
 
-    // ---- 按钮（从右往左排）----
-    m_buttonCount = 0;
-    const int buttonWidths[ButtonCount] = {
-        Scale(104),   // 添加程序…
-        Scale(64),    // 删除
-        Scale(64),    // 刷新
-        Scale(76),    // 跳过（只有首次显示）
-        Scale(64),    // 关闭
-    };
+    // ---- 「默认程序」四个字：正对最右那列居中 ----
+    // 位置按列表里"真实的列宽"算，别自己猜（猜错了就会偏）
+    const int actualNameWidth =
+        static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 0, 0));
+    const int actualStatusWidth =
+        static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 1, 0));
 
-    const int gap = Scale(8);
-    const int buttonY = clientHeight - padding - Scale(kButtonHeight);
-    int rightEdge = clientWidth - padding;
+    const int defaultColumnLeft = m_listRect.left + actualNameWidth + actualStatusWidth;
+    const int defaultColumnWidth =
+        static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 2, 0));
 
-    // 从右往左：关闭在最右
-    for (int index = ButtonClose; index >= 0; --index)
+    const int defaultColumnCenter = defaultColumnLeft + defaultColumnWidth / 2;
+
+    // 文字宽度要用真实字体量（拿空 DC + DrawText 量出来是 0，
+    // 之前就出现过"右边只剩一个竖条"的现象）
+    int labelWidth = Scale(50);
+
+    HDC measureDc = ::GetDC(m_hWnd);
+    if (measureDc != nullptr)
     {
-        if (index == ButtonSkip && !m_firstTime)
+        HGDIOBJ oldFont = (m_font != nullptr) ? ::SelectObject(measureDc, m_font) : nullptr;
+
+        SIZE textSize = {};
+        if (::GetTextExtentPoint32W(measureDc, kDefaultLabel,
+                                    static_cast<int>(::wcslen(kDefaultLabel)), &textSize))
         {
-            m_buttonRects[index] = {};
-            continue;
+            labelWidth = textSize.cx + Scale(2);
         }
 
-        const int width = buttonWidths[index];
-        m_buttonRects[index].left   = rightEdge - width;
-        m_buttonRects[index].top    = buttonY;
-        m_buttonRects[index].right  = rightEdge;
-        m_buttonRects[index].bottom = buttonY + Scale(kButtonHeight);
+        if (oldFont != nullptr)
+        {
+            ::SelectObject(measureDc, oldFont);
+        }
+        ::ReleaseDC(m_hWnd, measureDc);
+    }
 
-        rightEdge -= width + gap;
-        ++m_buttonCount;
+    m_defaultLabelRect.left   = defaultColumnCenter - labelWidth / 2;
+    m_defaultLabelRect.right  = m_defaultLabelRect.left + labelWidth;
+    m_defaultLabelRect.top    = padding;
+    m_defaultLabelRect.bottom = padding + Scale(kHintHeight);
+
+    // ---- 按钮：左边一组（添加程序/删除/刷新）靠左，右边一组（打开/关闭）靠右 ----
+    m_buttonCount = 0;
+
+    const int widthAdd    = Scale(104);
+    const int widthSmall  = Scale(64);
+    const int widthOpen   = Scale(76);
+    const int gap         = Scale(8);
+    const int buttonY     = clientHeight - padding - Scale(kButtonHeight);
+    const int buttonHeight = Scale(kButtonHeight);
+
+    // 左边：从左往右添加程序、删除、刷新
+    int leftEdge = padding;
+
+    m_buttonRects[ButtonAdd].left  = leftEdge;
+    m_buttonRects[ButtonAdd].right = leftEdge + widthAdd;
+    leftEdge = m_buttonRects[ButtonAdd].right + gap;
+
+    m_buttonRects[ButtonRemove].left  = leftEdge;
+    m_buttonRects[ButtonRemove].right = leftEdge + widthSmall;
+    leftEdge = m_buttonRects[ButtonRemove].right + gap;
+
+    m_buttonRects[ButtonRefresh].left  = leftEdge;
+    m_buttonRects[ButtonRefresh].right = leftEdge + widthSmall;
+
+    // 右边：从右往左关闭、打开
+    int rightEdge = clientWidth - padding;
+
+    m_buttonRects[ButtonClose].right = rightEdge;
+    m_buttonRects[ButtonClose].left  = rightEdge - widthSmall;
+    rightEdge = m_buttonRects[ButtonClose].left - gap;
+
+    m_buttonRects[ButtonOpen].right = rightEdge;
+    m_buttonRects[ButtonOpen].left  = rightEdge - widthOpen;
+
+    for (int index = 0; index < ButtonCount; ++index)
+    {
+        m_buttonRects[index].top    = buttonY;
+        m_buttonRects[index].bottom = buttonY + buttonHeight;
     }
 }
 
@@ -412,26 +551,19 @@ void OpenWithDialog::Draw(HDC dc)
 
     const int padding = Scale(kPadding);
 
-    // ---- 标题 ----
-    std::wstring title = L"选择用哪个程序打开「" + m_extension + L"」文件";
-    ::SetTextColor(dc, RGB(32, 32, 32));
+    // ---- 列表上方那一行说明字（照参考窗口：左一段、右一段，右段正对默认列）----
+    ::SetTextColor(dc, kHintTextColor);
 
-    RECT titleRect = { padding, padding, clientRect.right - padding,
-                       padding + Scale(kTitleHeight) };
-    ::DrawTextW(dc, title.c_str(), -1, &titleRect,
+    RECT hintRect = { padding, padding, m_defaultLabelRect.left - Scale(8),
+                      padding + Scale(kHintHeight) };
+    ::DrawTextW(dc, kHintLabel, -1, &hintRect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    ::DrawTextW(dc, kDefaultLabel, -1, const_cast<LPRECT>(&m_defaultLabelRect),
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-    // ---- 说明 ----
-    std::wstring hint = m_firstTime
-        ? L"这一步只需做一次：勾选留在右键菜单里的程序，右侧 ● 表示默认用它打开"
-        : L"勾选 = 出现在右键「打开方式」菜单；点右侧圆点 = 设为默认程序";
-
-    RECT hintRect = { padding, padding + Scale(kTitleHeight),
-                      clientRect.right - padding,
-                      padding + Scale(kTitleHeight) + Scale(kHintHeight) };
-    ::SetTextColor(dc, RGB(110, 110, 110));
-    ::DrawTextW(dc, hint.c_str(), -1, &hintRect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    // ---- 列表外那圈圆角浅灰框 ----
+    DrawRoundFrame(dc);
 
     // ---- 按钮 ----
     for (int index = 0; index < ButtonCount; ++index)
@@ -440,39 +572,270 @@ void OpenWithDialog::Draw(HDC dc)
     }
 }
 
-void OpenWithDialog::DrawFlatButton(HDC dc, int index)
+// ============================================================================
+// 自绘一整行（LVS_OWNERDRAWFIXED 下 WM_DRAWITEM 调到这里）
+//
+// 一行从左到右是：复选框 | 32px 程序图标 | 程序名 | 状态 | 默认圆点
+// 参考窗口里"选中行"是浅蓝底 + 深色字，所以不能用系统那套蓝底白字，必须自己铺底色。
+// ============================================================================
+void OpenWithDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool selected)
 {
-    if (index == ButtonSkip && !m_firstTime)
+    if (index < 0 || index >= static_cast<int>(m_entry.items.size()))
     {
         return;
     }
 
+    const core::OpenWithItem& item = m_entry.items[index];
+    const bool dimmed = (item.alive == 0);   // 已卸载的行整体标灰
+
+    // ---- 底色 ----
+    HBRUSH background = ::CreateSolidBrush(selected ? kRowSelectedColor : RGB(255, 255, 255));
+    ::FillRect(dc, &rowRect, background);
+    ::DeleteObject(background);
+
+    // ---- 行底下那条线（两端各离表格边框 3 像素，别顶着边框）----
+    RECT listClient = {};
+    ::GetClientRect(m_hList, &listClient);
+
+    const int lineInset = Scale(kRowLineInset);
+
+    HPEN linePen = ::CreatePen(PS_SOLID, 1, selected ? kRowSelectedLine : kRowLineColor);
+    HGDIOBJ oldPen = ::SelectObject(dc, linePen);
+    ::MoveToEx(dc, listClient.left + lineInset, rowRect.bottom - 1, nullptr);
+    ::LineTo(dc, listClient.right - lineInset, rowRect.bottom - 1);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(linePen);
+
+    const int rowHeight = rowRect.bottom - rowRect.top;
+
+    // ---- 复选框 ----
+    const int checkLeft = Scale(8);
+    const int checkSize = Scale(14);
+    RECT checkBox = { checkLeft, rowRect.top + (rowHeight - checkSize) / 2,
+                      checkLeft + checkSize, rowRect.top + (rowHeight - checkSize) / 2 + checkSize };
+    DrawCheckBox(dc, checkBox, item.enabled, dimmed);
+
+    // ---- 图标（24px，垂直居中；行高不变，所以上下留白多了一点）----
+    const int iconLeft = Scale(30);
+    const int iconSize = Scale(24);
+    const HICON icon = (index < static_cast<int>(m_rowIcons.size())) ? m_rowIcons[index] : nullptr;
+
+    if (icon != nullptr)
+    {
+        ::DrawIconEx(dc, iconLeft, rowRect.top + (rowHeight - iconSize) / 2, icon,
+                     iconSize, iconSize, 0, nullptr, DI_NORMAL);
+    }
+
+    ::SetBkMode(dc, TRANSPARENT);
+
+    // ---- 程序名 ----
+    const int nameLeft = iconLeft + iconSize + Scale(8);
+    const int nameColumnWidth = static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 0, 0));
+    const int statusLeft = nameColumnWidth;
+
+    RECT nameRect = { nameLeft, rowRect.top, statusLeft - Scale(4), rowRect.bottom - 1 };
+    ::SetTextColor(dc, dimmed ? kRowDimmedText : kRowTextColor);
+    ::DrawTextW(dc, item.name.c_str(), -1, &nameRect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    // ---- 状态 ---- 只标"已卸载或找不到"；"系统未列出"这种提示用户说不用显示
+    std::wstring status;
+    if (item.alive == 0)
+    {
+        status = L"已卸载或找不到";
+    }
+
+    const int statusColumnWidth = static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 1, 0));
+    const int dotLeft = statusLeft + statusColumnWidth;
+    const int dotWidth =
+        static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 2, 0));
+
+    RECT statusRect = { statusLeft, rowRect.top, dotLeft - Scale(4), rowRect.bottom - 1 };
+    ::SetTextColor(dc, kRowDimmedText);
+    ::DrawTextW(dc, status.c_str(), -1, &statusRect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    // ---- 默认圆点 ----
+    RECT dotRect = { dotLeft, rowRect.top, dotLeft + dotWidth, rowRect.bottom - 1 };
+    DrawDefaultDot(dc, dotRect, (index == DefaultIndex()), selected);
+}
+
+// ============================================================================
+// 自绘复选框
+//
+// 优先用系统主题（uxtheme）画，跟资源管理器里那个勾选框一模一样：
+// 白底、细灰边、蓝/黑勾。只有在主题不可用（经典外观）时才退回手画。
+// ============================================================================
+void OpenWithDialog::DrawCheckBox(HDC dc, const RECT& box, bool checked, bool dimmed)
+{
+    // 主题里的勾选框比我们自己量的框小一圈，整体往里收一点才不至于撑满
+    RECT themed = box;
+    ::InflateRect(&themed, -Scale(1), -Scale(1));
+
+    HTHEME theme = ::OpenThemeData(m_hWnd, L"Button");
+
+    if (theme != nullptr)
+    {
+        int state = 0;
+
+        if (dimmed)
+        {
+            state = checked ? CBS_CHECKEDDISABLED : CBS_UNCHECKEDDISABLED;
+        }
+        else
+        {
+            state = checked ? CBS_CHECKEDNORMAL : CBS_UNCHECKEDNORMAL;
+        }
+
+        ::DrawThemeBackground(theme, dc, BP_CHECKBOX, state, &themed, nullptr);
+        ::CloseThemeData(theme);
+        return;
+    }
+
+    // ---- 没有主题时的手画版本 ----
+    HPEN pen = ::CreatePen(PS_SOLID, 1, dimmed ? RGB(190, 190, 190) : RGB(120, 120, 120));
+    HGDIOBJ oldPen = ::SelectObject(dc, pen);
+    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(WHITE_BRUSH));
+    ::Rectangle(dc, box.left, box.top, box.right, box.bottom);
+    ::SelectObject(dc, oldBrush);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(pen);
+
+    if (!checked)
+    {
+        return;
+    }
+
+    // 对勾：两段 1 像素线，位置按方框比例算
+    const int width  = box.right - box.left;
+    const int height = box.bottom - box.top;
+
+    HPEN markPen = ::CreatePen(PS_SOLID, 1, dimmed ? RGB(150, 150, 150) : RGB(60, 60, 60));
+    oldPen = ::SelectObject(dc, markPen);
+
+    ::MoveToEx(dc, box.left + width / 4, box.top + height / 2, nullptr);
+    ::LineTo(dc, box.left + width * 2 / 5, box.top + height * 3 / 4);
+    ::LineTo(dc, box.right - width / 5, box.top + height / 4);
+
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(markPen);
+}
+
+// ============================================================================
+// 画「默认」列那个圆点
+//
+// 不用 ●/○ 字符：字符大小跟着字体走，跟最右那列对不齐也看不出"是个单选按钮"。
+// 自己画直径十几像素的圆：默认 = 实心蓝点，非默认 = 空心灰圈。
+// 因为这一列整列跳过了系统绘制，底色得自己先铺一遍。
+// ============================================================================
+void OpenWithDialog::DrawDefaultDot(HDC dc, const RECT& cell, bool isDefault, bool isSelected)
+{
+    HBRUSH background = ::CreateSolidBrush(isSelected ? kRowSelectedColor : RGB(255, 255, 255));
+    ::FillRect(dc, &cell, background);
+    ::DeleteObject(background);
+
+    const int diameter = Scale(14);
+    const int centerX  = (cell.left + cell.right) / 2;
+    const int centerY  = (cell.top + cell.bottom) / 2;
+
+    RECT circle = { centerX - diameter / 2, centerY - diameter / 2,
+                    centerX + diameter / 2, centerY + diameter / 2 };
+
+    HPEN ringPen = ::CreatePen(PS_SOLID, 1, isDefault ? kDotOnColor : kDotOffColor);
+    HGDIOBJ oldPen  = ::SelectObject(dc, ringPen);
+    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+
+    ::Ellipse(dc, circle.left, circle.top, circle.right, circle.bottom);
+
+    if (isDefault)
+    {
+        // 实心内点
+        const int inner = (diameter / 2) - 1;
+
+        HBRUSH fillBrush = ::CreateSolidBrush(kDotOnFill);
+        ::SelectObject(dc, fillBrush);
+        ::SelectObject(dc, ringPen);
+
+        ::Ellipse(dc, centerX - inner, centerY - inner,
+                  centerX + inner, centerY + inner);
+
+        ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+        ::DeleteObject(fillBrush);
+    }
+
+    ::SelectObject(dc, oldBrush);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(ringPen);
+}
+
+// ============================================================================
+// 画列表外面那圈框
+//
+// 原来是圆角，反复调还是不对劲（圆角在列表白底上接缝明显），用户拍板"直接直角好了"。
+// 直角 1 像素线最稳，颜色跟上面那行说明字一样（灰 RGB(96,103,111)）。
+// ============================================================================
+void OpenWithDialog::DrawRoundFrame(HDC dc)
+{
+    if (m_frameRect.right <= m_frameRect.left || m_frameRect.bottom <= m_frameRect.top)
+    {
+        return;
+    }
+
+    ::SetBkMode(dc, TRANSPARENT);
+
+    HPEN pen = ::CreatePen(PS_SOLID, 1, kFrameColor);
+    HGDIOBJ oldPen = ::SelectObject(dc, pen);
+    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+
+    ::Rectangle(dc, m_frameRect.left, m_frameRect.top, m_frameRect.right, m_frameRect.bottom);
+
+    ::SelectObject(dc, oldBrush);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(pen);
+}
+
+void OpenWithDialog::DrawFlatButton(HDC dc, int index)
+{
     const RECT& rect = m_buttonRects[index];
     if (rect.right <= rect.left)
     {
         return;
     }
 
-    // 悬停/按下的是浅灰/深灰底，其余透明（露出窗口底色）
-    COLORREF fill = RGB(248, 248, 248);
+    // 照参考窗口的样子画成"系统标准按钮"：白底 + 1px 灰边 + 悬停/按下变色。
+    // （项目里其它地方是纯扁平按钮，但这是个弹窗，跟参考窗口一致更顺眼）
+    COLORREF fill   = RGB(252, 252, 252);
+    COLORREF border = RGB(173, 173, 173);
+
     if (m_pressedButton == index)
     {
-        fill = RGB(210, 210, 210);
+        fill   = RGB(212, 214, 219);
+        border = RGB(140, 140, 140);
     }
     else if (m_hotButton == index)
     {
-        fill = RGB(232, 232, 232);
+        fill   = RGB(240, 242, 245);
+        border = RGB(120, 150, 200);
     }
 
     HBRUSH brush = ::CreateSolidBrush(fill);
     ::FillRect(dc, &rect, brush);
     ::DeleteObject(brush);
 
+    // 边框：矩形向下取整到 rect 内侧（gdi 的 right/bottom 是开区间）
+    HPEN pen = ::CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldPen = ::SelectObject(dc, pen);
+    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+    ::SelectObject(dc, oldBrush);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(pen);
+
     const wchar_t* texts[ButtonCount] = {
-        L"添加程序…", L"删除", L"刷新", L"跳过", L"关闭",
+        L"添加程序…", L"删除", L"刷新", L"打开", L"关闭",
     };
 
-    ::SetTextColor(dc, (index == ButtonClose) ? RGB(32, 32, 32) : RGB(64, 64, 64));
+    ::SetTextColor(dc, RGB(32, 32, 32));
 
     RECT textRect = rect;
     ::DrawTextW(dc, texts[index], -1, &textRect,
@@ -518,6 +881,33 @@ LRESULT OpenWithDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         Layout();
         return 0;
 
+    case WM_MEASUREITEM:
+    {
+        // 自绘列表的行高由我们说了算（ListView 自己不量）
+        MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+
+        if (measure != nullptr && measure->CtlID == static_cast<UINT>(kControlIdList))
+        {
+            measure->itemHeight = static_cast<UINT>(Scale(kRowHeight));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+
+        if (draw != nullptr && draw->CtlID == static_cast<UINT>(kControlIdList) &&
+            draw->itemID != static_cast<UINT>(-1))
+        {
+            DrawRow(draw->hDC, draw->rcItem, static_cast<int>(draw->itemID),
+                    (draw->itemState & ODS_SELECTED) != 0);
+            return TRUE;
+        }
+        break;
+    }
+
     case WM_PAINT:
     {
         PAINTSTRUCT paint = {};
@@ -538,11 +928,6 @@ LRESULT OpenWithDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         int hot = -1;
         for (int index = 0; index < ButtonCount; ++index)
         {
-            if (index == ButtonSkip && !m_firstTime)
-            {
-                continue;
-            }
-
             const RECT& rect = m_buttonRects[index];
             if (rect.right > rect.left && ::PtInRect(&rect, POINT{x, y}))
             {
@@ -581,11 +966,6 @@ LRESULT OpenWithDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         for (int index = 0; index < ButtonCount; ++index)
         {
-            if (index == ButtonSkip && !m_firstTime)
-            {
-                continue;
-            }
-
             const RECT& rect = m_buttonRects[index];
             if (rect.right > rect.left && ::PtInRect(&rect, POINT{x, y}))
             {
@@ -631,6 +1011,20 @@ LRESULT OpenWithDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             ::SendMessageW(m_hWnd, WM_CLOSE, 0, 0);
             return 0;
         }
+
+        // 空格：切换当前选中那一行的勾选（跟参考窗口里空格切复选框一个意思）
+        if (wParam == VK_SPACE && m_hList != nullptr)
+        {
+            const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
+            if (selected >= 0 && selected < static_cast<int>(m_entry.items.size()))
+            {
+                m_entry.items[selected].enabled = !m_entry.items[selected].enabled;
+                SaveNow();
+                ListView_RedrawItems(m_hList, selected, selected);
+                ::UpdateWindow(m_hList);
+            }
+            return 0;
+        }
         break;
 
     case WM_CLOSE:
@@ -653,88 +1047,61 @@ LRESULT OpenWithDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         switch (header->code)
         {
-        case LVN_ITEMCHANGED:
-        {
-            const NMLISTVIEW* change = reinterpret_cast<const NMLISTVIEW*>(lParam);
-
-            if ((change->uChanged & LVIF_STATE) != 0 &&
-                ((change->uNewState & LVIS_STATEIMAGEMASK) !=
-                 (change->uOldState & LVIS_STATEIMAGEMASK)) &&
-                !m_syncingChecks && change->iItem >= 0)
-            {
-                const bool checked = ListView_GetCheckState(m_hList, change->iItem) != FALSE;
-                OnCheckChanged(change->iItem, checked);
-            }
-            return 0;
-        }
-
         case NM_CLICK:
         {
-            LVHITTESTINFO hit = {};
-            hit.pt = {GET_X_LPARAM(::GetMessagePos()), GET_Y_LPARAM(::GetMessagePos())};
-            ::ScreenToClient(m_hList, &hit.pt);
-            ::SendMessageW(m_hList, LVM_HITTEST, 0, reinterpret_cast<LPARAM>(&hit));
+            // NM_CLICK 带的是 NMITEMACTIVATE，里面直接有"点了哪一行、点的坐标"。
+            // 不要自己用 GetMessagePos 去算：那是全局鼠标位置，跟这个通知不是一回事
+            const NMITEMACTIVATE* activate = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+            const int index = activate->iItem;
+            const int clickX = activate->ptAction.x;
 
-            // 点「默认」列 → 设为默认程序
-            if (hit.iItem >= 0 && hit.iSubItem == 2)
+            if (index < 0)
             {
-                SetDefaultIndex(hit.iItem);
+                return 0;
             }
+
+            const int nameColumnWidth =
+                static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 0, 0));
+            const int statusColumnWidth =
+                static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 1, 0));
+            const int dotColumnLeft = nameColumnWidth + statusColumnWidth;
+
+            // 整行都是自绘的，所以按点击的横坐标分区判断：
+            //   最左边一小块 = 复选框；最右一列 = 默认圆点；其余地方只选中不改状态
+            if (clickX < Scale(28))
+            {
+                if (index < static_cast<int>(m_entry.items.size()))
+                {
+                    m_entry.items[index].enabled = !m_entry.items[index].enabled;
+                    SaveNow();       // 勾选即存（自动保存）
+                    ListView_RedrawItems(m_hList, index, index);
+                    ::UpdateWindow(m_hList);
+                }
+            }
+            else if (clickX >= dotColumnLeft)
+            {
+                SetDefaultIndex(index);
+            }
+
             return 0;
         }
 
         case NM_DBLCLK:
         {
-            LVHITTESTINFO hit = {};
-            hit.pt = {GET_X_LPARAM(::GetMessagePos()), GET_Y_LPARAM(::GetMessagePos())};
-            ::ScreenToClient(m_hList, &hit.pt);
-            ::SendMessageW(m_hList, LVM_HITTEST, 0, reinterpret_cast<LPARAM>(&hit));
+            const NMITEMACTIVATE* activate = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
 
             // 双击任意一行也是"就用这个程序"
-            if (hit.iItem >= 0)
+            if (activate->iItem >= 0)
             {
-                SetDefaultIndex(hit.iItem);
+                SetDefaultIndex(activate->iItem);
             }
             return 0;
-        }
-
-        case NM_CUSTOMDRAW:
-        {
-            const LPNMLVCUSTOMDRAW custom = reinterpret_cast<LPNMLVCUSTOMDRAW>(lParam);
-
-            if (custom->nmcd.dwDrawStage == CDDS_PREPAINT)
-            {
-                return CDRF_NOTIFYITEMDRAW;
-            }
-
-            if (custom->nmcd.dwDrawStage == CDDS_ITEMPREPAINT)
-            {
-                const int index = static_cast<int>(custom->nmcd.dwItemSpec);
-
-                if (index >= 0 && index < static_cast<int>(m_entry.items.size()))
-                {
-                    // 已卸载的条目在设置窗口里标灰（菜单里才直接消失）
-                    if (m_entry.items[index].alive == 0)
-                    {
-                        custom->clrText = RGB(150, 150, 150);
-                        return CDRF_NEWFONT;
-                    }
-
-                    // 「默认」列用圆点表示，选中的画成蓝色
-                    if (custom->iSubItem == 2)
-                    {
-                        const bool isDefault = (index == DefaultIndex());
-                        custom->clrText = isDefault ? RGB(0, 95, 184) : RGB(140, 140, 140);
-                        return CDRF_NEWFONT;
-                    }
-                }
-            }
-            return CDRF_DODEFAULT;
         }
 
         default:
             break;
         }
+
         return 0;
     }
 
@@ -864,25 +1231,41 @@ void OpenWithDialog::ReloadList()
 
     ListView_DeleteAllItems(m_hList);
 
-    const int defaultIndex = DefaultIndex();
+    ReleaseRowIcons();
+    m_rowIcons.reserve(m_entry.items.size());
 
     for (size_t i = 0; i < m_entry.items.size(); ++i)
     {
         const core::OpenWithItem& item = m_entry.items[i];
 
+        // 图标先拿系统 32px 那一档，再缩成 24px（参考窗口里的图标就是 24 的观感，
+        // 但 SHGetFileInfo 没有 24 这一档，只能从 32 缩下来，效果跟系统一致）
         const int iconIndex = (m_icons != nullptr)
-                                  ? shell::IconIndexFor(item, *m_icons)
+                                  ? shell::IconIndexFor(item, *m_icons,
+                                                        shell::IconCache::IconSize::Medium)
                                   : -1;
 
-        LVITEMW row = {};
-        row.mask     = LVIF_TEXT | LVIF_PARAM;
-        if (iconIndex >= 0)
+        HICON icon = nullptr;
+
+        if (m_iconList != nullptr && iconIndex >= 0)
         {
-            row.mask  |= LVIF_IMAGE;
-            row.iImage = iconIndex;
+            HICON source = ::ImageList_GetIcon(m_iconList, iconIndex, ILD_TRANSPARENT);
+
+            if (source != nullptr)
+            {
+                icon = reinterpret_cast<HICON>(
+                    ::CopyImage(source, IMAGE_ICON, Scale(24), Scale(24), 0));
+                ::DestroyIcon(source);
+            }
         }
+
+        m_rowIcons.push_back(icon);
+
+        // 整行都是自绘的：ListView 里只挂一个"行存在"的记号（lParam 就是下标），
+        // 文字、图标都不交给它，避免两边各画一份
+        LVITEMW row = {};
+        row.mask     = LVIF_PARAM;
         row.iItem    = static_cast<int>(i);
-        row.pszText  = const_cast<LPWSTR>(item.name.c_str());
         row.lParam   = static_cast<LPARAM>(i);
 
         const int inserted = static_cast<int>(
@@ -893,31 +1276,8 @@ void OpenWithDialog::ReloadList()
             continue;
         }
 
-        // 状态列
-        std::wstring status;
-        if (item.alive == 0)
-        {
-            status = L"已卸载或找不到";
-        }
-        else if (!m_inSystemCandidates[i])
-        {
-            status = L"（系统未列出）";
-        }
-
-        LVITEMW text = {};
-        text.mask    = LVIF_TEXT;
-        text.iItem   = inserted;
-        text.iSubItem = 1;
-        text.pszText = const_cast<LPWSTR>(status.c_str());
-        ::SendMessageW(m_hList, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&text));
-
-        // 默认列
-        text.iSubItem = 2;
-        text.pszText = const_cast<LPWSTR>(
-            (inserted == defaultIndex) ? L"●" : L"○");
-        ::SendMessageW(m_hList, LVM_SETITEMTEXTW, inserted, reinterpret_cast<LPARAM>(&text));
-
-        ListView_SetCheckState(m_hList, inserted, item.enabled ? TRUE : FALSE);
+        // 状态列 / 默认列的文字不用塞进 ListView：整行都是我们自己画的，
+        // 内容直接从 m_entry.items 里取，塞一份反而会出现"两边不一致"的问题
     }
 
     m_syncingChecks = false;
@@ -926,30 +1286,20 @@ void OpenWithDialog::ReloadList()
     ::InvalidateRect(m_hList, nullptr, TRUE);
 }
 
-void OpenWithDialog::SyncCheckState(int index, bool checked)
+// ============================================================================
+// 释放每行的 24px 图标
+// ============================================================================
+void OpenWithDialog::ReleaseRowIcons()
 {
-    if (m_hList == nullptr || index < 0)
+    for (HICON icon : m_rowIcons)
     {
-        return;
+        if (icon != nullptr)
+        {
+            ::DestroyIcon(icon);
+        }
     }
 
-    m_syncingChecks = true;
-    ListView_SetCheckState(m_hList, index, checked ? TRUE : FALSE);
-    m_syncingChecks = false;
-}
-
-// ============================================================================
-// 交互
-// ============================================================================
-
-void OpenWithDialog::OnCheckChanged(int index, bool checked)
-{
-    if (index < 0 || index >= static_cast<int>(m_entry.items.size()))
-    {
-        return;
-    }
-
-    m_entry.items[index].enabled = checked;
+    m_rowIcons.clear();
 }
 
 int OpenWithDialog::DefaultIndex() const
@@ -985,12 +1335,14 @@ void OpenWithDialog::SetDefaultIndex(int index)
         m_entry.items[index].enabled = true;
     }
 
+    SaveNow();       // 唯一改动就即时落盘
     ReloadList();
 }
 
 void OpenWithDialog::OnAddProgram()
 {
-    wchar_t fileName[MAX_PATH] = {};
+    // 直接弹系统的 exe 选择框（用户明确要求：不必为"挑一个程序"单独做一个窗口）
+    wchar_t fileName[MAX_PATH] = L"";
 
     OPENFILENAMEW dialog = {};
     dialog.lStructSize = sizeof(dialog);
@@ -1053,6 +1405,7 @@ void OpenWithDialog::OnAddProgram()
     m_inSystemCandidates.push_back(false);
 
     ProbeAll();
+    SaveNow();
     ReloadList();
 }
 
@@ -1083,6 +1436,7 @@ void OpenWithDialog::OnRemoveSelected()
         m_entry.defaultKey.clear();
     }
 
+    SaveNow();
     ReloadList();
 }
 
@@ -1103,9 +1457,9 @@ void OpenWithDialog::OnButtonClick(int buttonIndex)
         RefreshCandidatesFromSystem(true);
         return;
 
-    case ButtonSkip:
-        // 首次询问里的「跳过」：这次先用系统默认打开，不记录，下次还会问
-        m_skipped = true;
+    case ButtonOpen:
+        // 「打开」：保存设置，然后用默认程序打开这个文件
+        m_openRequested = true;
         ::SendMessageW(m_hWnd, WM_CLOSE, 0, 0);
         return;
 

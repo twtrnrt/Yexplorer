@@ -187,7 +187,12 @@ private:
     void OpenSelectionWithProgram(size_t programIndex);
 
     // 打开某扩展名的设置窗口（manageOnly=false 时是"第一次询问"）
-    void ShowOpenWithSettings(const std::wstring& extension, bool firstTime);
+    // 打开「打开方式」设置窗口。
+    //   filePath 非空 = 从"打开某个文件"触发（窗口里有「打开」按钮）；
+    //   为空 = 从右键「添加或管理程序」触发。
+    // 用户在窗口里点了「打开」就顺手用默认程序把这个文件打开。
+    void ShowOpenWithSettings(const std::wstring& extension, bool firstTime,
+                              const std::wstring& filePath = L"");
 
     // 按账本打开一个文件。返回 true 表示"这件事我们管了"（成功或已给用户提示），
     // 返回 false 表示"不归我们管"（特殊类型、或者没配置又跳过了），调用方走原来的逻辑。

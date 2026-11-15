@@ -49,28 +49,42 @@ public:
     // ------------------------------------------------------------------
     // 图标尺寸
     //
-    //   Small —— 16px，详细信息/列表/小图标视图、左栏导航都用这个
-    //   Large —— 48px，只有「大图标」视图用
+    //   Small  —— 16px，详细信息/列表/小图标视图、左栏导航都用这个
+    //   Medium —— 32px，「打开方式」设置窗口、添加程序窗口的列表用（图标清楚又不占地方）
+    //   Large  —— 48px，只有「大图标」视图用
     //
-    // 两个尺寸都是系统现成的图像列表（SHIL_SMALL / SHIL_EXTRALARGE），
-    // 我们只是引用它们、并不自己画图标，所以两条列表的内存都不额外占。
+    // 三个尺寸都是系统现成的图像列表（SHIL_SMALL / SHIL_LARGE / SHIL_EXTRALARGE），
+    // 我们只是引用它们、并不自己画图标，所以三条列表的内存都不额外占。
+    //
+    // 【索引为什么能通用】SHGetFileInfo 带 SHGFI_LARGEICON 拿回来的索引，
+    // 在 SHIL_LARGE(32) 和 SHIL_EXTRALARGE(48) 两套列表里指的是同一个图标，
+    // 所以 Medium 和 Large 共用同一份查询结果与缓存，不用各查一遍。
     // ------------------------------------------------------------------
     enum class IconSize
     {
         Small,
+        Medium,
         Large
     };
 
     // 系统图标图像列表句柄（可直接塞给 ListView_SetImageList）
     HIMAGELIST ImageList(IconSize size = IconSize::Small) const
     {
-        return (size == IconSize::Large) ? m_hLargeImageList : m_hImageList;
+        if (size == IconSize::Large)
+        {
+            return m_hLargeImageList;
+        }
+        return (size == IconSize::Medium) ? m_hMediumImageList : m_hImageList;
     }
 
     // 统一的文件夹图标索引（导航栏「快速访问」这类分组标题用）
     int FolderIconIndex(IconSize size = IconSize::Small) const
     {
-        return (size == IconSize::Large) ? m_largeFolderIconIndex : m_folderIconIndex;
+        if (size == IconSize::Large)
+        {
+            return m_largeFolderIconIndex;
+        }
+        return (size == IconSize::Medium) ? m_largeFolderIconIndex : m_folderIconIndex;
     }
 
     // ------------------------------------------------------------------
@@ -132,9 +146,11 @@ private:
 
 private:
     wil::com_ptr<IImageList> m_systemImageList;       // 系统小图标图像列表（16px）
+    wil::com_ptr<IImageList> m_mediumSystemImageList; // 系统中图标图像列表（32px）
     wil::com_ptr<IImageList> m_largeSystemImageList;  // 系统大图标图像列表（48px）
-    HIMAGELIST               m_hImageList      = nullptr;
-    HIMAGELIST               m_hLargeImageList = nullptr;
+    HIMAGELIST               m_hImageList        = nullptr;
+    HIMAGELIST               m_hMediumImageList  = nullptr;
+    HIMAGELIST               m_hLargeImageList   = nullptr;
 
     // 缓存分两套：小图标一套、大图标一套（两种尺寸的索引彼此不通用）
     std::unordered_map<std::wstring, int> m_extensionIconCache;       // 扩展名 → 小图标索引
