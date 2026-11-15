@@ -12,6 +12,10 @@
 #include <windowsx.h>    // GET_X_LPARAM
 
 #include <algorithm>
+#include <cmath>
+
+// 分隔符箭头要贴一张带透明度的位图，AlphaBlend 在这个库里
+#pragma comment(lib, "msimg32.lib")
 
 namespace
 {
@@ -21,11 +25,38 @@ const wchar_t* kAddressBarClassName = L"FileExplorerAddressBar";
 // 视觉参数（100% DPI 下的像素，实际用 Scale 放大）
 const int kPaddingX       = 8;    // 左侧起始留白
 const int kSegmentPadX    = 7;    // 每段文字左右内边距
-const int kSeparatorWidth = 16;   // 段与段之间留给 ">" 的宽度
+const int kSeparatorWidth = 16;   // 段与段之间留给箭头的宽度
 const int kCornerRadius   = 6;
 
 const COLORREF kHotColor      = RGB(240, 240, 240);
 const COLORREF kSeparatorColor = RGB(120, 120, 120);
+
+// 点到线段的距离（画抗锯齿箭头时，用它算出每个像素被线覆盖了多少）
+double DistanceToSegment(double px, double py,
+                         double ax, double ay,
+                         double bx, double by)
+{
+    const double dx = bx - ax;
+    const double dy = by - ay;
+    const double lengthSquared = dx * dx + dy * dy;
+
+    double t = 0.0;
+
+    if (lengthSquared > 0.0)
+    {
+        t = ((px - ax) * dx + (py - ay) * dy) / lengthSquared;
+
+        if (t < 0.0) { t = 0.0; }
+        if (t > 1.0) { t = 1.0; }
+    }
+
+    const double nearestX = ax + dx * t;
+    const double nearestY = ay + dy * t;
+    const double ex = px - nearestX;
+    const double ey = py - nearestY;
+
+    return std::sqrt(ex * ex + ey * ey);
+}
 
 } // namespace
 
@@ -40,6 +71,130 @@ AddressBar::~AddressBar()
         ::DeleteObject(m_hOwnFont);
         m_hOwnFont = nullptr;
     }
+
+    if (m_separatorBitmap != nullptr)
+    {
+        ::DeleteObject(m_separatorBitmap);
+        m_separatorBitmap = nullptr;
+    }
+}
+
+// ============================================================================
+// 生成"分隔符小箭头"的位图
+//
+// 为什么不用 LineTo 直接画：
+//   1) GDI 的直线没有抗锯齿，斜线会出一格一格的毛刺；
+//   2) LineTo 不含终点像素，两条线拼出来的尖角会一边长一边短。
+//
+// 所以这里是"手工抗锯齿"：建一张 32 位带 alpha 的小位图，逐个像素算它到
+// 两条线段的距离，按覆盖程度给 alpha —— 边缘自然变淡，两条线几何上完全对称。
+// AlphaBlend 要的是"预乘 alpha"，所以颜色值也要乘上同样的覆盖率。
+// ============================================================================
+void AddressBar::EnsureSeparatorBitmap()
+{
+    // 箭头的几何尺寸（100% DPI 下：宽 2*3+2 = 8，高 2*5+2 = 12）
+    const int armWidth  = Scale(3);   // 横向伸出
+    const int armHeight = Scale(5);   // 上下各伸出
+    const int width     = armWidth * 2 + 2;
+    const int height    = armHeight * 2 + 2;
+
+    if (m_separatorBitmap != nullptr &&
+        m_separatorBmpWidth == width && m_separatorBmpHeight == height)
+    {
+        return;   // 已经生成过，尺寸也对
+    }
+
+    if (m_separatorBitmap != nullptr)
+    {
+        ::DeleteObject(m_separatorBitmap);
+        m_separatorBitmap = nullptr;
+    }
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = width;
+    bmi.bmiHeader.biHeight      = -height;   // 负数 = 自上而下存，和像素下标顺序一致
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void*  bits   = nullptr;
+    HBITMAP bitmap = ::CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+
+    if (bitmap == nullptr || bits == nullptr)
+    {
+        if (bitmap != nullptr)
+        {
+            ::DeleteObject(bitmap);
+        }
+        return;
+    }
+
+    // 尖角在右侧正中，两条线对称地向左上方、左下方伸出
+    const double tipX   = static_cast<double>(width - 1);
+    const double tipY   = static_cast<double>(height - 1) / 2.0;
+    const double backX  = 1.0;
+    const double upperY = 1.0;
+    const double lowerY  = static_cast<double>(height - 2);
+
+    const double halfLineWidth = 0.55;   // 线宽约 1.1 像素
+
+    // 直接按位取 COLORREF 的三通道（不用 GetXValue 宏：那些宏里有 (WORD) 强转，
+    // 传常量颜色进去会触发"截断常量值"的编译警告）
+    const double red   = static_cast<double>((kSeparatorColor >> 0)  & 0xFF);   // 红
+    const double green = static_cast<double>((kSeparatorColor >> 8)  & 0xFF);   // 绿
+    const double blue  = static_cast<double>((kSeparatorColor >> 16) & 0xFF);   // 蓝
+
+    DWORD* pixels = static_cast<DWORD*>(bits);
+
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            // 按像素中心算到两条线段的距离，取更近的那条
+            const double px = x + 0.5;
+            const double py = y + 0.5;
+
+            double distance = DistanceToSegment(px, py, tipX, tipY, backX, upperY);
+
+            const double lowerDistance =
+                DistanceToSegment(px, py, tipX, tipY, backX, lowerY);
+
+            if (lowerDistance < distance)
+            {
+                distance = lowerDistance;
+            }
+
+            // 覆盖率：线心附近完全不透明，往外一个像素线性淡出
+            double coverage = halfLineWidth + 0.5 - distance;
+
+            if (coverage <= 0.0)
+            {
+                pixels[y * width + x] = 0;
+                continue;
+            }
+
+            if (coverage > 1.0)
+            {
+                coverage = 1.0;
+            }
+
+            const BYTE alpha = static_cast<BYTE>(coverage * 255.0 + 0.5);
+            const BYTE r     = static_cast<BYTE>(red   * coverage + 0.5);
+            const BYTE g     = static_cast<BYTE>(green * coverage + 0.5);
+            const BYTE b     = static_cast<BYTE>(blue  * coverage + 0.5);
+
+            // 预乘 alpha 的 BGRA
+            pixels[y * width + x] = (static_cast<DWORD>(alpha) << 24) |
+                                    (static_cast<DWORD>(r)     << 16) |
+                                    (static_cast<DWORD>(g)     << 8)  |
+                                     static_cast<DWORD>(b);
+        }
+    }
+
+    m_separatorBitmap    = bitmap;
+    m_separatorBmpWidth  = width;
+    m_separatorBmpHeight = height;
 }
 
 bool AddressBar::EnsureClassRegistered(HINSTANCE hInstance)
@@ -580,26 +735,30 @@ void AddressBar::Draw(HDC hdc)
         {
             RECT sepRect = { rect.right, rect.top, rect.right + sepWidth, rect.bottom };
 
-            // ------------------------------------------------------------
-            // 分隔符：不再画字体里的 ">"（那个角太尖、显得又小又挤），
-            // 改成自己画一个小尖角：两条 1px 的浅灰线，开口比 ">" 更开，
-            // 观感贴近资源管理器地址栏里那种细箭头。
-            // 想调形状就改这三个数：armWidth（横向伸出）、armHeight（上下各伸出）
-            // ------------------------------------------------------------
-            const int centerX = sepRect.left + (sepRect.right - sepRect.left) / 2;
-            const int centerY = sepRect.top + (sepRect.bottom - sepRect.top) / 2;
-            const int armWidth  = Scale(3);   // 横向伸出：小一点箭头更细长（系统那种观感）
-            const int armHeight = Scale(5);   // 上下各伸出
+            // 段之间的箭头：贴预先画好的抗锯齿小位图（几何对称、边缘平滑）
+            EnsureSeparatorBitmap();
 
-            HPEN   pen    = ::CreatePen(PS_SOLID, 1, kSeparatorColor);
-            HGDIOBJ oldPen = ::SelectObject(hdc, pen);
+            if (m_separatorBitmap != nullptr)
+            {
+                const int bitmapX = sepRect.left +
+                                    ((sepRect.right - sepRect.left) - m_separatorBmpWidth) / 2;
+                const int bitmapY = sepRect.top +
+                                    ((sepRect.bottom - sepRect.top) - m_separatorBmpHeight) / 2;
 
-            ::MoveToEx(hdc, centerX - armWidth, centerY - armHeight, nullptr);
-            ::LineTo(hdc, centerX + armWidth, centerY);
-            ::LineTo(hdc, centerX - armWidth, centerY + armHeight);
+                HDC     memoryDC  = ::CreateCompatibleDC(hdc);
+                HGDIOBJ oldBitmap = ::SelectObject(memoryDC, m_separatorBitmap);
 
-            ::SelectObject(hdc, oldPen);
-            ::DeleteObject(pen);
+                BLENDFUNCTION blend = {};
+                blend.BlendOp             = AC_SRC_OVER;
+                blend.SourceConstantAlpha = 255;
+                blend.AlphaFormat         = AC_SRC_ALPHA;
+
+                ::AlphaBlend(hdc, bitmapX, bitmapY, m_separatorBmpWidth, m_separatorBmpHeight,
+                             memoryDC, 0, 0, m_separatorBmpWidth, m_separatorBmpHeight, blend);
+
+                ::SelectObject(memoryDC, oldBitmap);
+                ::DeleteDC(memoryDC);
+            }
         }
     }
 

@@ -92,6 +92,10 @@ private:
     void RebuildSegments();
     void LayoutSegments(HDC hdc);
 
+    // 段之间的那个小箭头：一次性画成一张带 alpha 的位图（手工抗锯齿、上下对称），
+    // 之后每次绘制只是贴图。DPI 缩放变了尺寸不对就重建。
+    void EnsureSeparatorBitmap();
+
     void Draw(HDC hdc);
 
     void BeginEditingImpl();
@@ -124,6 +128,11 @@ private:
 
     HFONT m_hFont   = nullptr;                    // 路径文字字体
     HFONT m_hOwnFont = nullptr;                   // 如果外部没给字体，自己建一个
+
+    // 分隔符箭头用的位图（32 位带 alpha，见 EnsureSeparatorBitmap）
+    HBITMAP m_separatorBitmap    = nullptr;
+    int     m_separatorBmpWidth  = 0;
+    int     m_separatorBmpHeight = 0;
 
     std::function<void(const std::wstring&)> m_navigateCallback;
 };
