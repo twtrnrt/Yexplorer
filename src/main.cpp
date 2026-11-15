@@ -173,15 +173,45 @@ int WINAPI wWinMain(HINSTANCE hInstance,
 
     // ---------- 步骤 4：主窗口与消息循环 ----------
     {
-        // 命令行里带了目录就用它开机（「在新窗口中打开」就是这么传进来的）
-        const std::wstring startupPath = ExtractStartupPath(lpCmdLine);
+        // 命令行参数有两种可能：
+        //   1) 一个目录（「在新窗口中打开」就是这么传的）→ 直接打开它
+        //   2) 一个文件（别的程序「打开所在文件夹」、或者被当成某扩展的打开方式）
+        //      → 打开它所在的目录，并把这个文件选中高亮
+        std::wstring startupPath = ExtractStartupPath(lpCmdLine);
+        std::wstring startupSelectFile;
+
         if (!startupPath.empty())
         {
-            Logger::Info(L"命令行参数：" + startupPath);
+            // 判断是不是"存在的文件"。目录、取不到属性的（不存在/无权限）都按原样走：
+            // 目录照旧打开；不存在的路径照旧让主窗口回退到默认目录。
+            const DWORD attributes = ::GetFileAttributesW(startupPath.c_str());
+
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                const size_t slash = startupPath.find_last_of(L"\\/");
+
+                if (slash != std::wstring::npos)
+                {
+                    startupSelectFile = startupPath;
+
+                    // 父目录。注意 "C:\a.txt" 会切出 "C:"，
+                    // 那不是"根目录"的写法，得补一个反斜杠
+                    startupPath = startupPath.substr(0, slash);
+
+                    if (startupPath.size() == 2 && startupPath[1] == L':')
+                    {
+                        startupPath.push_back(L'\\');
+                    }
+                }
+            }
+
+            Logger::Info(L"命令行参数：" + startupPath +
+                         (startupSelectFile.empty() ? L"" : L"（启动后选中：" + startupSelectFile + L"）"));
         }
 
         MainWindow mainWindow;
-        if (mainWindow.Create(hInstance, startupPath))
+        if (mainWindow.Create(hInstance, startupPath, startupSelectFile))
         {
             mainWindow.Show(SW_SHOW);
             exitCode = mainWindow.RunMessageLoop();

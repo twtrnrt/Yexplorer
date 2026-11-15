@@ -278,10 +278,13 @@ MainWindow::~MainWindow()
 // 创建与消息循环
 // ============================================================================
 
-bool MainWindow::Create(HINSTANCE hInstance, const std::wstring& initialPath)
+bool MainWindow::Create(HINSTANCE hInstance,
+                        const std::wstring& initialPath,
+                        const std::wstring& initialSelectFile)
 {
-    m_hInstance   = hInstance;
-    m_startupPath = initialPath;
+    m_hInstance        = hInstance;
+    m_startupPath      = initialPath;
+    m_startupSelectFile = initialSelectFile;
 
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
@@ -4296,6 +4299,22 @@ void MainWindow::OnEnumerationDone()
         {
             m_fileListView.SelectPaths(addedPaths);
         }
+    }
+
+    // ------------------------------------------------------------
+    // 启动时命令行传进来的是「文件」：
+    // 目录已经打开了，现在把这个文件选中并滚到可见。
+    // 只做一次 —— 选完立刻清空，之后 F5 刷新、文件变化都不会再抢用户的选中。
+    // ------------------------------------------------------------
+    if (!m_startupSelectFile.empty())
+    {
+        const std::wstring selectPath = m_startupSelectFile;
+        m_startupSelectFile.clear();
+
+        m_fileListView.SelectPaths({ selectPath });
+        m_fileListView.EnsureVisiblePath(selectPath);
+
+        Logger::Info(L"启动时选中传入的文件：" + selectPath);
     }
 
     // 标题也只在内容真的变了才重设（道理同 UpdateTitle：避免任务栏闪）

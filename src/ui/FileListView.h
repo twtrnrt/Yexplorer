@@ -127,6 +127,10 @@ public:
     // 只选中这些路径（先把已有选中全清掉）。粘贴完成后用来高亮新出现的东西
     void SelectPaths(const std::vector<std::wstring>& paths);
 
+    // 滚动到某个路径那一项，让它出现在可见区域里（列表里没有这一项就什么都不做）。
+    // 启动时命令行传进来一个文件、要在父目录里高亮它，就靠这个把视图滚过去。
+    void EnsureVisiblePath(const std::wstring& path);
+
     void SetActivateCallback(ActivateCallback callback)       { m_onActivate    = std::move(callback); }
     void SetContextMenuCallback(ContextMenuCallback callback) { m_onContextMenu = std::move(callback); }
     void SetColumnClickCallback(ColumnClickCallback callback) { m_onColumnClick = std::move(callback); }

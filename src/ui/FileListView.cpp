@@ -879,6 +879,24 @@ void FileListView::SelectPaths(const std::vector<std::wstring>& paths)
     }
 }
 
+void FileListView::EnsureVisiblePath(const std::wstring& path)
+{
+    if (m_hWnd == nullptr || m_result == nullptr || path.empty())
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < m_result->entries.size(); ++i)
+    {
+        if (_wcsicmp(m_result->entries[i].fullPath.c_str(), path.c_str()) == 0)
+        {
+            // 第二个参数 FALSE = 只要露出来就行，不要硬顶到最上面
+            ListView_EnsureVisible(m_hWnd, static_cast<int>(i), FALSE);
+            return;
+        }
+    }
+}
+
 bool FileListView::IsCutPath(const std::wstring& fullPath) const
 {    if (m_cutPaths.empty() || fullPath.empty())
     {

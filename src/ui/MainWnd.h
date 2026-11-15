@@ -102,7 +102,12 @@ public:
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
-    bool Create(HINSTANCE hInstance, const std::wstring& initialPath = std::wstring());
+    // initialPath      —— 启动时直接打开的目录（空 = 按上次停的目录启动）
+    // initialSelectFile —— 当命令行传进来的是"文件"时，这里是那个文件本身：
+    //                      目录会打开它所在的文件夹，首次枚举完成后把这一项选中
+    bool Create(HINSTANCE hInstance,
+                const std::wstring& initialPath = std::wstring(),
+                const std::wstring& initialSelectFile = std::wstring());
     void Show(int nCmdShow);
     int  RunMessageLoop();
 
@@ -369,6 +374,10 @@ private:
     // 启动时命令行指定的目录（「在新窗口中打开」用它开新窗口）。
     // 空表示没指定，按上次停的目录启动。
     std::wstring m_startupPath;
+
+    // 启动时命令行传进来的是文件 → 这里是那个文件的完整路径。
+    // 首次枚举完成后选中它并滚到可见，选完立刻清空（以后刷新不再抢选中）。
+    std::wstring m_startupSelectFile;
 
     // ---- 视图模式 ----
     // 当前列表视图（大图标/小图标/列表/详细信息）。
