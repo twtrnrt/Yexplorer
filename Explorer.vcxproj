@@ -145,6 +145,7 @@
     <ClCompile Include="src\shell\ShellDragDrop.cpp" />
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
     <ClCompile Include="src\shell\ShellNew.cpp" />
+    <ClCompile Include="src\shell\DefaultManager.cpp" />
     <ClCompile Include="src\shell\ShellOperations.cpp" />
     <ClCompile Include="src\ui\AddressBar.cpp" />
     <ClCompile Include="src\ui\FileListView.cpp" />
@@ -169,6 +170,7 @@
     <ClInclude Include="src\shell\ShellDragDrop.h" />
     <ClInclude Include="src\shell\ShellOpenWith.h" />
     <ClInclude Include="src\shell\ShellNew.h" />
+    <ClInclude Include="src\shell\DefaultManager.h" />
     <ClInclude Include="src\shell\ShellOperations.h" />
     <ClInclude Include="src\ui\AddressBar.h" />
     <ClInclude Include="src\ui\FileListView.h" />

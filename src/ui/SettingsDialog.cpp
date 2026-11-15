@@ -17,6 +17,7 @@
 
 #include "core/Logger.h"
 #include "core/Settings.h"
+#include "shell/DefaultManager.h"
 
 namespace
 {
@@ -25,7 +26,7 @@ const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 // 客户区大小（不含标题栏与边框）
 const int kClientWidth  = 420;
-const int kClientHeight = 150;
+const int kClientHeight = 330;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -36,6 +37,8 @@ const int kControlIdClose     = 4002;
 const COLORREF kBackgroundColor = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
 const COLORREF kHintColor       = RGB(96, 103, 111);
+const COLORREF kErrorColor      = RGB(178, 34, 34);
+const COLORREF kDividerColor    = RGB(232, 235, 239);   // 分隔线（和窗口边框同一个灰）
 
 // 关闭按钮（和「打开方式」窗口里那套标准按钮外观一致）
 const COLORREF kButtonFace       = RGB(252, 252, 252);
@@ -50,6 +53,18 @@ const wchar_t* kTitleText = L"设置";
 
 const wchar_t* kHintText1 = L"勾选后，「打开方式」和「新建」菜单里的每一项前面会显示小图标。";
 const wchar_t* kHintText2 = L"不勾选就是纯文字菜单（默认，弹出更快）。改动立即保存。";
+
+// 「默认文件管理器」按钮的两套文案
+const wchar_t* kActionTextRegister  = L"注册为默认文件管理器";
+const wchar_t* kActionTextRestore   = L"恢复系统默认文件管理器";
+
+const wchar_t* kDefaultHintOff1 = L"注册后，双击文件夹和磁盘都会用本程序打开。";
+const wchar_t* kDefaultHintOff2 = L"Win+E 和任务栏不受影响，仍打开系统资源管理器。";
+
+const wchar_t* kDefaultHintOn1  = L"本程序现在是打开文件夹的默认程序。";
+const wchar_t* kDefaultHintOn2  = L"点上面的按钮可以恢复成系统资源管理器。";
+
+const wchar_t* kActionFailedText = L"操作失败，详情见日志文件。";
 
 } // 匿名命名空间
 
@@ -254,6 +269,9 @@ bool SettingsDialog::CreateDialogWindow()
                        core::Settings::Instance().MenuIcons() ? BST_CHECKED : BST_UNCHECKED, 0);
     }
 
+    // 「默认文件管理器」按钮的初始文案：问一次注册表，看当前 exe 是不是已经注册过
+    m_defaultManagerRegistered = shell::IsDefaultFileManager();
+
     Layout();
     return true;
 }
@@ -273,6 +291,16 @@ void SettingsDialog::Layout()
                      clientRect.right - padding * 2, Scale(24),
                      TRUE);
     }
+
+    // 「注册 / 恢复默认文件管理器」按钮：分隔线下面，靠左
+    // （宽度按最长那句文案「恢复系统默认文件管理器」留的）
+    const int actionWidth  = Scale(236);
+    const int actionHeight = Scale(32);
+
+    m_actionRect.left   = padding;
+    m_actionRect.top    = padding + Scale(148);
+    m_actionRect.right  = m_actionRect.left + actionWidth;
+    m_actionRect.bottom = m_actionRect.top + actionHeight;
 
     // 关闭按钮：右下角
     const int buttonWidth  = Scale(88);
@@ -300,6 +328,20 @@ void SettingsDialog::ApplyCheckState()
     Logger::Info(std::wstring(L"设置：右键菜单显示图标 = ") + (showIcons ? L"开" : L"关"));
 }
 
+void SettingsDialog::ToggleDefaultManager()
+{
+    // 已注册 → 恢复系统默认；未注册 → 注册成本程序
+    const bool ok = m_defaultManagerRegistered
+                  ? shell::RestoreSystemFileManager()
+                  : shell::RegisterDefaultFileManager();
+
+    // 以注册表的实际状态为准（注册/恢复失败时按钮文案不该跟着变）
+    m_defaultManagerRegistered = shell::IsDefaultFileManager();
+    m_lastActionFailed         = !ok;
+
+    ::InvalidateRect(m_hWnd, nullptr, TRUE);
+}
+
 void SettingsDialog::Draw(HDC dc)
 {
     RECT clientRect = {};
@@ -320,35 +362,77 @@ void SettingsDialog::Draw(HDC dc)
     ::SetTextColor(dc, kTitleColor);
     ::DrawTextW(dc, kTitleText, -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // ---- 说明两行 ----
+    // ---- 说明两行（右键菜单图标那个开关）----
     ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kHintColor);
 
     RECT hintRect = { Scale(kPadding), Scale(kPadding) + Scale(80),
-                      clientRect.right - Scale(kPadding), m_closeRect.top - Scale(6) };
+                      clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(126) };
 
     ::DrawTextW(dc, kHintText1, -1, &hintRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
     hintRect.top += Scale(20);
     ::DrawTextW(dc, kHintText2, -1, &hintRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
+    // ---- 分隔线（1px，浅灰）----
+    const int dividerY = Scale(kPadding) + Scale(132);
+
+    HPEN dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
+    HGDIOBJ oldPen  = ::SelectObject(dc, dividerPen);
+
+    ::MoveToEx(dc, Scale(kPadding), dividerY, nullptr);
+    ::LineTo(dc, clientRect.right - Scale(kPadding), dividerY);
+
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(dividerPen);
+
+    // ---- 「注册 / 恢复默认文件管理器」按钮 ----
+    DrawButton(dc, m_actionRect,
+               m_defaultManagerRegistered ? kActionTextRestore : kActionTextRegister,
+               m_hotAction, m_pressedAction);
+
+    // ---- 按钮下面这句状态说明 ----
+    ::SelectObject(dc, m_font);
+    ::SetTextColor(dc, kHintColor);
+
+    RECT stateRect = { Scale(kPadding), m_actionRect.bottom + Scale(10),
+                       clientRect.right - Scale(kPadding),
+                       m_closeRect.top - Scale(4) };
+
+    std::wstring stateText = m_defaultManagerRegistered
+                           ? (std::wstring(kDefaultHintOn1) + L"\n" + kDefaultHintOn2)
+                           : (std::wstring(kDefaultHintOff1) + L"\n" + kDefaultHintOff2);
+
+    ::DrawTextW(dc, stateText.c_str(), -1, &stateRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+    // 上一次点按钮失败：单独一行红字，别让用户以为已经生效了
+    if (m_lastActionFailed)
+    {
+        ::SetTextColor(dc, kErrorColor);
+
+        RECT errorRect = stateRect;
+        errorRect.top = stateRect.top + Scale(40);
+        ::DrawTextW(dc, kActionFailedText, -1, &errorRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
+    }
+
     ::SelectObject(dc, oldFont);
 
     // ---- 关闭按钮 ----
-    DrawCloseButton(dc);
+    DrawButton(dc, m_closeRect, L"关闭", m_hotClose, m_pressedClose);
 }
 
-void SettingsDialog::DrawCloseButton(HDC dc)
+void SettingsDialog::DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
+                                bool hot, bool pressed)
 {
     COLORREF face   = kButtonFace;
     COLORREF border = kButtonBorder;
 
-    if (m_pressedClose)
+    if (pressed)
     {
         face   = kButtonDownFace;
         border = kButtonDownBorder;
     }
-    else if (m_hotClose)
+    else if (hot)
     {
         face   = kButtonHotFace;
         border = kButtonHotBorder;
@@ -356,14 +440,16 @@ void SettingsDialog::DrawCloseButton(HDC dc)
 
     // 底
     HBRUSH faceBrush = ::CreateSolidBrush(face);
-    ::FillRect(dc, &m_closeRect, faceBrush);
+    ::FillRect(dc, &rect, faceBrush);
     ::DeleteObject(faceBrush);
 
     // 1 像素边
-    HPEN borderPen = ::CreatePen(PS_SOLID, 1, border);
+    HPEN   borderPen = ::CreatePen(PS_SOLID, 1, border);
     HGDIOBJ oldPen   = ::SelectObject(dc, borderPen);
     HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
-    ::Rectangle(dc, m_closeRect.left, m_closeRect.top, m_closeRect.right, m_closeRect.bottom);
+
+    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+
     ::SelectObject(dc, oldBrush);
     ::SelectObject(dc, oldPen);
     ::DeleteObject(borderPen);
@@ -373,8 +459,8 @@ void SettingsDialog::DrawCloseButton(HDC dc)
     ::SetTextColor(dc, kButtonText);
     ::SetBkMode(dc, TRANSPARENT);
 
-    RECT textRect = m_closeRect;
-    ::DrawTextW(dc, L"关闭", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT textRect = rect;
+    ::DrawTextW(dc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     ::SelectObject(dc, oldFont);
 }
@@ -418,12 +504,20 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_MOUSEMOVE:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        const bool hot = (::PtInRect(&m_closeRect, pt) != FALSE);
 
-        if (hot != m_hotClose)
+        const bool hotClose  = (::PtInRect(&m_closeRect, pt) != FALSE);
+        const bool hotAction = (::PtInRect(&m_actionRect, pt) != FALSE);
+
+        if (hotClose != m_hotClose)
         {
-            m_hotClose = hot;
+            m_hotClose = hotClose;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
+        }
+
+        if (hotAction != m_hotAction)
+        {
+            m_hotAction = hotAction;
+            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -440,17 +534,34 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 
     case WM_MOUSELEAVE:
         m_trackingLeave = false;
+
         if (m_hotClose || m_pressedClose)
         {
-            m_hotClose    = false;
+            m_hotClose     = false;
             m_pressedClose = false;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
+        }
+
+        if (m_hotAction || m_pressedAction)
+        {
+            m_hotAction     = false;
+            m_pressedAction = false;
+            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
         }
         return 0;
 
     case WM_LBUTTONDOWN:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        if (::PtInRect(&m_actionRect, pt))
+        {
+            m_pressedAction = true;
+            ::SetCapture(hWnd);
+            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
+            return 0;
+        }
+
         if (::PtInRect(&m_closeRect, pt))
         {
             m_pressedClose = true;
@@ -462,12 +573,29 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 
     case WM_LBUTTONUP:
     {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        // 「注册 / 恢复默认文件管理器」
+        if (m_pressedAction)
+        {
+            m_pressedAction = false;
+            ::ReleaseCapture();
+
+            const bool inside = (::PtInRect(&m_actionRect, pt) != FALSE);
+            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
+
+            if (inside)
+            {
+                ToggleDefaultManager();
+            }
+            return 0;
+        }
+
         if (m_pressedClose)
         {
             m_pressedClose = false;
             ::ReleaseCapture();
 
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             const bool inside = (::PtInRect(&m_closeRect, pt) != FALSE);
 
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
