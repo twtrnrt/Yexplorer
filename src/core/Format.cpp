@@ -45,23 +45,78 @@ std::wstring SizeText(uint64_t size, bool isFolder)
         return L"文件夹";
     }
 
+    // 单位按 1024 逐级升：B → KB → MB → GB → TB → PB → EB。
+    // 用户要求"超过 1024M 就显示 1G、超过 1024G 就显示 1T"，所以这里统一用
+    // 乘除 1024 的方式一级级往上走，绝不在某个单位上一直堆大数字。
+    static const wchar_t* const kUnits[] = { L"B", L"KB", L"MB", L"GB", L"TB", L"PB", L"EB" };
+
+    double value   = static_cast<double>(size);
+    int    unitIdx = 0;
+
+    while (value >= 1024.0 && unitIdx < 6)
+    {
+        value /= 1024.0;
+        ++unitIdx;
+    }
+
     wchar_t buffer[64] = {};
 
-    if (size < 1024ULL)
+    if (unitIdx == 0)
     {
         ::swprintf_s(buffer, L"%llu B", static_cast<unsigned long long>(size));
     }
-    else if (size < 1024ULL * 1024ULL)
+    else
     {
-        ::swprintf_s(buffer, L"%.1f KB", static_cast<double>(size) / 1024.0);
+        // 大单位保留两位小数，小单位一位就够了（和原来列表里的观感一致）
+        const int decimals = (unitIdx >= 3) ? 2 : 1;
+        ::swprintf_s(buffer, L"%.*f %s", decimals, value, kUnits[unitIdx]);
     }
-    else if (size < 1024ULL * 1024ULL * 1024ULL)
+
+    return std::wstring(buffer);
+}
+
+// ----------------------------------------------------------------------------
+// 磁盘容量文本：同一个 1024 进位规则，按 3 位有效数字写
+//   512 字节 → "512 字节"
+//   97.7 GB  → "97.7 GB"
+//   234 GB   → "234 GB"
+//   3.63 TB  → "3.63 TB"
+// ----------------------------------------------------------------------------
+std::wstring CapacityText(uint64_t bytes)
+{
+    static const wchar_t* const kUnits[] = { L"KB", L"MB", L"GB", L"TB", L"PB", L"EB" };
+
+    // 不足 1 KB 的容量（U 盘一般不会这样，但别写错）直接按字节说
+    if (bytes < 1024ULL)
     {
-        ::swprintf_s(buffer, L"%.1f MB", static_cast<double>(size) / (1024.0 * 1024.0));
+        wchar_t small[64] = {};
+        ::swprintf_s(small, L"%llu 字节", static_cast<unsigned long long>(bytes));
+        return std::wstring(small);
+    }
+
+    double value   = static_cast<double>(bytes) / 1024.0;
+    int    unitIdx = 0;
+
+    while (value >= 1024.0 && unitIdx < 5)
+    {
+        value /= 1024.0;
+        ++unitIdx;
+    }
+
+    wchar_t buffer[64] = {};
+
+    // 3 位有效数字：>=100 不带小数；>=10 一位；其余两位
+    if (value >= 100.0)
+    {
+        ::swprintf_s(buffer, L"%.0f %s", value, kUnits[unitIdx]);
+    }
+    else if (value >= 10.0)
+    {
+        ::swprintf_s(buffer, L"%.1f %s", value, kUnits[unitIdx]);
     }
     else
     {
-        ::swprintf_s(buffer, L"%.2f GB", static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0));
+        ::swprintf_s(buffer, L"%.2f %s", value, kUnits[unitIdx]);
     }
 
     return std::wstring(buffer);

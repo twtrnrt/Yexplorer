@@ -95,6 +95,16 @@ public:
     void SetViewMode(ViewMode mode);
     ViewMode CurrentViewMode() const { return m_viewMode; }
 
+    // ------------------------------------------------------------------
+    // 平铺视图一行能并排几块卡片
+    //
+    // 「此电脑」的分组标题要靠"占位格"把这行剩下的位置填掉才能独占一行，
+    // 占位格的数量必须和控件真实排列的列数一致，否则窗口一改宽度
+    // （比如从 3 列变 2 列）就整片错位。
+    // 所以这里不写死 300，而是问控件自己要的间距（LVM_GETITEMSPACING）。
+    // ------------------------------------------------------------------
+    int TilesPerRow() const;
+
     void Resize(int x, int y, int width, int height);
 
     // 换一整个结果（换目录 / 重新枚举后）

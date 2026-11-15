@@ -712,6 +712,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------
     case WM_SIZE:
         LayoutChildren();
+
+        // 窗口宽度变了，「此电脑」平铺一行能放几块卡片就变了，
+        // 分组标题后面的占位格数要跟着重算，否则标题行填不满、卡片会乱跑
+        RefreshThisPcGrouping();
         return 0;
 
     // --------------------------------------------------------------
@@ -3376,6 +3380,9 @@ void MainWindow::ApplyViewMode(FileListView::ViewMode mode, bool modeIsUserChoic
     {
         LayoutChildren();
     }
+
+    // 切到/切出平铺视图时，一行几格变了，「此电脑」的占位格要重补
+    RefreshThisPcGrouping();
 }
 
 // ============================================================================
@@ -3995,6 +4002,167 @@ void MainWindow::DoNewFolder()
     }
 }
 
+// ============================================================================
+// 「此电脑」分组
+//
+// entries：排序之后的原始条目（进来时不含标题行/占位格）
+// perRow ：平铺视图一行能并排几格；其它视图传 1（不需要占位格）
+//
+// 分组依据是驱动器类型：DRIVE_REMOTE(4) 是网络盘，其余本地盘/光驱/U 盘
+// 都归「设备和驱动器」。某组为空就不插那行标题，免得出现空组。
+//
+// 占位格是给平铺视图用的：标题只占一格，后面补 perRow-1 个空格把它顶成
+// 独占一行；每组末尾如果没把行填满，也要补齐，否则下一组标题会挤在半行上。
+// ============================================================================
+static void BuildThisPcGrouped(std::vector<shell::ShellEntry>& entries, int perRow)
+{
+    if (perRow < 1)
+    {
+        perRow = 1;
+    }
+
+    std::vector<shell::ShellEntry> localDrives;    // 设备和驱动器
+    std::vector<shell::ShellEntry> networkDrives;  // 网络位置
+
+    for (auto& entry : entries)
+    {
+        if (entry.driveType == DRIVE_REMOTE)
+        {
+            networkDrives.push_back(std::move(entry));
+        }
+        else
+        {
+            localDrives.push_back(std::move(entry));
+        }
+    }
+
+    std::vector<shell::ShellEntry> grouped;
+    grouped.reserve(entries.size() + 8);
+
+    // 插一个组标题；平铺视图下再补上占位格，把这一行剩下的位置填掉
+    auto pushHeader = [&grouped, perRow](const wchar_t* text)
+    {
+        shell::ShellEntry header;
+        header.name          = text;
+        header.isGroupHeader = true;
+        grouped.push_back(std::move(header));
+
+        for (int i = 1; i < perRow; ++i)
+        {
+            shell::ShellEntry spacer;
+            spacer.isSpacer = true;
+            grouped.push_back(std::move(spacer));
+        }
+    };
+
+    // 这一组的最后一行如果没填满，补几个占位格；
+    // 否则下一组的标题会挤到这一行的空位上
+    auto padLastRow = [&grouped, perRow](size_t itemCount)
+    {
+        const int remainder = static_cast<int>(itemCount % static_cast<size_t>(perRow));
+
+        if (remainder != 0)
+        {
+            for (int i = remainder; i < perRow; ++i)
+            {
+                shell::ShellEntry spacer;
+                spacer.isSpacer = true;
+                grouped.push_back(std::move(spacer));
+            }
+        }
+    };
+
+    if (!localDrives.empty())
+    {
+        pushHeader(L"设备和驱动器");
+
+        for (auto& entry : localDrives)
+        {
+            grouped.push_back(std::move(entry));
+        }
+
+        padLastRow(localDrives.size());
+    }
+
+    if (!networkDrives.empty())
+    {
+        pushHeader(L"网络位置");
+
+        for (auto& entry : networkDrives)
+        {
+            grouped.push_back(std::move(entry));
+        }
+    }
+
+    // 顺手记一笔，方便核对"到底枚举出几项、分了几组"
+    Logger::Info(L"此电脑分组完成：设备 " + std::to_wstring(localDrives.size()) +
+                 L" 个、网络 " + std::to_wstring(networkDrives.size()) +
+                 L" 个、一行 " + std::to_wstring(perRow) + L" 格、总行数 " +
+                 std::to_wstring(grouped.size()));
+
+    entries = std::move(grouped);
+}
+
+// ---------------------------------------------------------------------------
+// 窗口尺寸 / 视图变化之后，按控件真实列数重排「此电脑」的分组标题行
+//
+// 只在"列数变了"的时候才重排（拖窗口跨过一格宽度边界时才触发），
+// 平时什么都不做。
+// ---------------------------------------------------------------------------
+void MainWindow::RefreshThisPcGrouping()
+{
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    if (_wcsicmp(m_history.Current().c_str(), shell::kThisPcPath) != 0)
+    {
+        return;
+    }
+
+    std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+    if (result == nullptr || result->entries.empty())
+    {
+        return;
+    }
+
+    const bool tilesView = (m_fileListView.CurrentViewMode() == FileListView::ViewMode::Tiles);
+    const int  perRow    = tilesView ? m_fileListView.TilesPerRow() : 1;
+
+    if (perRow == m_thisPcPerRow)
+    {
+        return;     // 列数没变，不用动
+    }
+
+    // 把上次插的标题/占位格剔掉，只留真实条目，再按新列数重建
+    std::vector<shell::ShellEntry> raw;
+    raw.reserve(result->entries.size());
+
+    for (const auto& entry : result->entries)
+    {
+        if (!entry.isGroupHeader && !entry.isSpacer)
+        {
+            raw.push_back(entry);
+        }
+    }
+
+    if (raw.empty())
+    {
+        return;
+    }
+
+    BuildThisPcGrouped(raw, perRow);
+
+    result->entries = std::move(raw);
+    m_thisPcPerRow  = perRow;
+
+    // SetResult 内部会自己记住选中项和滚动位置，再按路径恢复
+    m_fileListView.SetResult(result);
+
+    Logger::Info(L"此电脑分组按新列数重排：一行 " + std::to_wstring(perRow) + L" 格");
+}
+
 void MainWindow::OnEnumerationDone()
 {
     std::shared_ptr<shell::EnumerateResult> result;
@@ -4019,126 +4187,39 @@ void MainWindow::OnEnumerationDone()
     m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
 
     // ------------------------------------------------------------
-    // 「此电脑」加分组标题（两组：设备和驱动器 / 网络位置）
+    // 「此电脑」加分组标题（设备和驱动器 / 网络位置）
     //
-    // 系统里此电脑是这样分组的。我们用不了列表控件的原生分组（虚拟模式
-    // 不支持），所以改成在数据里插"假标题行"，由列表控件把这种行画成标题。
+    // 列表控件在虚拟模式（LVS_OWNERDATA）下不支持原生分组，所以改成在数据里
+    // 插「假标题行」，由列表控件把这种行画成标题（见 FileListView 的
+    // CDDS_ITEMPREPAINT 分支）。
     //
-    // 分组依据是驱动器类型：DRIVE_REMOTE(4) 是网络盘，其余本地盘/光驱/U 盘
-    // 都归「设备和驱动器」。网络位置为空时就不插第二个标题，免得出现空组。
+    // 平铺视图下标题只占一格，必须在后面补「占位格」把这一行剩下的格子填掉，
+    // 标题才能像系统那样独占一行、后面的卡片才不会跑到标题右边去。
+    // 补几个格 = 控件这一行能并排几个（TilesPerRow，按真实间距算，不写死 300）。
     //
-    // 插在这里（排序之后、SetResult 之前）最合适：
-    //   · 排序不会把标题行挪到中间去
-    //   · 换目录、刷新都会重新走一遍这里，标题不会丢也不会重复
-    //
-    // 前面先判一下第 0 行是不是已经有标题行了：万一同一份结果被处理两次
-    // （比如刷新和"操作完成"挨着来），也不会插出两行标题。
+    // 顺便记下这次用的列数：窗口一改宽度列数就变，RefreshThisPcGrouping
+    // 会拿这个值比较，变了就重排一次。
     // ------------------------------------------------------------
+    int thisPcPerRow = 1;
+
     if (_wcsicmp(result->path.c_str(), shell::kThisPcPath) == 0 &&
         (result->entries.empty() || !result->entries.front().isGroupHeader))
     {
-        std::vector<shell::ShellEntry> localDrives;    // 设备和驱动器
-        std::vector<shell::ShellEntry> networkDrives;  // 网络位置
-
-        for (auto& entry : result->entries)
-        {
-            if (entry.driveType == DRIVE_REMOTE)
-            {
-                networkDrives.push_back(std::move(entry));
-            }
-            else
-            {
-                localDrives.push_back(std::move(entry));
-            }
-        }
-
-        std::vector<shell::ShellEntry> grouped;
-        grouped.reserve(result->entries.size() + 8);
-
-        // 平铺视图里一行能并排几块卡片（卡片固定 300 宽）：
-        // 组标题后面要补这么多"空占位格"，把这一行剩下的位置填掉，
-        // 标题才能像系统那样独占一行。别的视图下一行放几个无所谓（不需要占位）。
-        int perRow = 1;
-
-        // 注意：视图是在这段之后才 ApplyViewMode 的，所以这里不能只看 m_viewMode，
-        // 还要按"当前目录默认该用哪种视图"算一遍，否则首次进此电脑会按详细信息算，
-        // 占位格就补错了。
+        // 视图是在这段之后才 ApplyViewMode 的，所以这里不能只看 m_viewMode，
+        // 还要按"当前目录默认该用哪种视图"算一遍，否则首次进此电脑会按
+        // 详细信息算，占位格就补错了。
         bool tilesView = (m_viewMode == FileListView::ViewMode::Tiles);
         if (!m_viewModeManual && DefaultViewModeForCurrentPath() == FileListView::ViewMode::Tiles)
         {
             tilesView = true;
         }
 
-        if (tilesView)
-        {
-            RECT clientRect = {};
-            if (::GetClientRect(m_fileListView.Handle(), &clientRect))
-            {
-                perRow = (clientRect.right - clientRect.left) / 300;
-                if (perRow < 1)
-                {
-                    perRow = 1;
-                }
-            }
-        }
+        thisPcPerRow = tilesView ? m_fileListView.TilesPerRow() : 1;
 
-        // 插一个组标题；平铺视图下再补上占位格
-        auto pushHeader = [&grouped, perRow](const wchar_t* text)
-        {
-            shell::ShellEntry header;
-            header.name          = text;
-            header.isGroupHeader = true;
-            grouped.push_back(std::move(header));
-
-            for (int i = 1; i < perRow; ++i)
-            {
-                shell::ShellEntry spacer;
-                spacer.isSpacer = true;
-                grouped.push_back(std::move(spacer));
-            }
-        };
-
-        if (!localDrives.empty())
-        {
-            pushHeader(L"设备和驱动器");
-
-            for (auto& entry : localDrives)
-            {
-                grouped.push_back(std::move(entry));
-            }
-
-            // 这一组如果没把最后一行填满，后面的组标题就会挤到这一行的空位上。
-            // 补几个占位格把行尾填满，下一组的标题才能从新的一行开始。
-            const int remainder = static_cast<int>(localDrives.size()) % perRow;
-            if (remainder != 0)
-            {
-                for (int i = remainder; i < perRow; ++i)
-                {
-                    shell::ShellEntry spacer;
-                    spacer.isSpacer = true;
-                    grouped.push_back(std::move(spacer));
-                }
-            }
-        }
-
-        if (!networkDrives.empty())
-        {
-            pushHeader(L"网络位置");
-
-            for (auto& entry : networkDrives)
-            {
-                grouped.push_back(std::move(entry));
-            }
-        }
-
-        // 顺手记一笔，方便核对"到底枚举出几项、分了几组"
-        Logger::Info(L"此电脑分组完成：设备 " + std::to_wstring(localDrives.size()) +
-                     L" 个、网络 " + std::to_wstring(networkDrives.size()) +
-                     L" 个、一行 " + std::to_wstring(perRow) + L" 格、总行数 " +
-                     std::to_wstring(grouped.size()));
-
-        result->entries = std::move(grouped);
+        BuildThisPcGrouped(result->entries, thisPcPerRow);
     }
+
+    m_thisPcPerRow = thisPcPerRow;
 
     // 进入/刷新目录时定一次视图：本机磁盘目录用详细信息，
     // 此电脑和各种系统文件夹用小图标（和系统默认一致）。

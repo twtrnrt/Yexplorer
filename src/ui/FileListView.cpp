@@ -11,6 +11,7 @@
 #include "FileListView.h"
 
 #include "shell/ShellDragDrop.h"
+#include "core/Format.h"
 #include "core/Logger.h"
 
 #include <uxtheme.h>   // SetWindowTheme
@@ -255,6 +256,29 @@ void FileListView::SetViewMode(ViewMode mode)
                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
+int FileListView::TilesPerRow() const
+{
+    if (m_hWnd == nullptr)
+    {
+        return 1;
+    }
+
+    // 控件自己的列宽：SetIconSpacing 设的是 300，但主题/DPI 可能把它再放大一点，
+    // 所以问控件要比自己按常数除更准。LVM_GETITEMSPACING 返回 LOWORD=cx、HIWORD=cy。
+    const DWORD spacing  = static_cast<DWORD>(::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+    const int   spacingX = static_cast<int>(LOWORD(spacing));
+
+    int columnWidth = (spacingX > 0) ? spacingX : 300;
+
+    RECT clientRect = {};
+    ::GetClientRect(m_hWnd, &clientRect);
+
+    const int width  = clientRect.right - clientRect.left;
+    const int perRow = width / columnWidth;
+
+    return (perRow < 1) ? 1 : perRow;
+}
+
 // ============================================================================
 // 外观
 // ============================================================================
@@ -387,17 +411,11 @@ void FileListView::LayoutColumns()
 
 namespace
 {
-    // 「97.7 GB 可用，共 234 GB」——和资源管理器一样的说法
+    // 「97.7 GB 可用，共 234 GB」——和资源管理器一样的说法。
+    // 数字交给 format::CapacityText：按 1024 进位自动换单位（GB/TB 都认）
     std::wstring DiskSpaceText(uint64_t freeBytes, uint64_t totalBytes)
     {
-        const double gb = 1024.0 * 1024.0 * 1024.0;
-
-        wchar_t buffer[128] = {};
-        ::swprintf_s(buffer,
-                     L"%.1f GB 可用，共 %.1f GB",
-                     static_cast<double>(freeBytes) / gb,
-                     static_cast<double>(totalBytes) / gb);
-        return buffer;
+        return format::CapacityText(freeBytes) + L" 可用，共 " + format::CapacityText(totalBytes);
     }
 }
 

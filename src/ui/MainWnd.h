@@ -150,6 +150,10 @@ private:
     // 启动后台枚举（只负责枚举与界面刷新，不改历史）
     void StartEnumeration(const std::wstring& path);
 
+    // 窗口尺寸 / 视图变化后，按控件真实列数重排「此电脑」的分组标题行
+    // （只在列数变化时才重排，平时什么都不做）
+    void RefreshThisPcGrouping();
+
     // 重新枚举当前目录（复制/删除/新建之后调用）
     void RefreshCurrentFolder();
 
@@ -450,6 +454,10 @@ private:
     // 复制/移动完成后的那次刷新，是否要把"新出现的项"选中（和资源管理器一致）
     bool                                         m_selectNewAfterEnum = false;
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
+
+    // 上次给「此电脑」排分组标题时用的"一行几格"。
+    // 窗口宽度一变这个数就变，RefreshThisPcGrouping 拿它做比较。
+    int                                          m_thisPcPerRow = 0;
 
     // 这次粘贴的目标目录（撤销「复制/移动」时要对着它算"操作后在哪"）
     std::wstring                                 m_operationTargetDirectory;
