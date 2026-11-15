@@ -160,6 +160,13 @@ public:
     const std::wstring& LastFolder() const { return m_lastFolder; }
     void                SetLastFolder(const std::wstring& path) { m_lastFolder = path; }
 
+    // ---------------- 界面开关 ----------------
+    // 右键菜单里是否显示程序图标（「打开方式」各项、「新建」各项前面）。
+    // 默认关：不显示图标就是以前的纯文字菜单，最省事也最快。
+    // 打开以后菜单项改成自绘，图标来自后台预先取好的内存缓存，弹出菜单时仍然零成本。
+    bool MenuIcons() const { return m_menuIcons; }
+    void SetMenuIcons(bool show) { m_menuIcons = show; }
+
     // ---------------- 「打开方式」账本 ----------------
     const std::vector<OpenWithEntry>& OpenWithEntries() const { return m_openWith; }
 
@@ -192,6 +199,7 @@ private:
     int           m_viewMode       = -1;      // -1 = 没记过
     bool          m_viewModeManual = false;
     std::wstring  m_lastFolder;
+    bool          m_menuIcons      = false;   // 右键菜单是否显示图标（默认关）
 
     // 「打开方式」账本（按扩展名分组）
     std::vector<OpenWithEntry> m_openWith;

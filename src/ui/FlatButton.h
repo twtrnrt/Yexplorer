@@ -35,6 +35,7 @@ public:
         Refresh,   // 刷新（圆形箭头）
         Home,      // 主页（小房子，点了去「我的文档」）
         Computer,  // 计算机（点了去「此电脑」，用系统自带的电脑图标）
+        Gear,      // 齿轮（设置按钮，放在地址栏右边）
     };
 
     FlatButton() = default;

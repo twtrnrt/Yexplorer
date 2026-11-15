@@ -30,6 +30,7 @@ const wchar_t* kGlyphUp      = L"\xE74A";   // ↑
 const wchar_t* kGlyphRefresh = L"\xE72C";   // 刷新（圆形箭头）
 const wchar_t* kGlyphHome    = L"\xE80F";   // 主页（小房子）
 const wchar_t* kGlyphPc      = L"\xE977";   // 计算机（系统图标取不到时的备用字形）
+const wchar_t* kGlyphGear    = L"\xE713";   // 设置（齿轮）
 
 } // namespace
 
@@ -484,6 +485,7 @@ void FlatButton::DrawArrow(HDC hdc, const RECT& clientRect)
     case ArrowKind::Refresh:  glyph = kGlyphRefresh; break;
     case ArrowKind::Home:     glyph = kGlyphHome;    break;
     case ArrowKind::Computer: glyph = kGlyphPc;      break;
+    case ArrowKind::Gear:     glyph = kGlyphGear;    break;
     }
 
     ::SetBkMode(hdc, TRANSPARENT);

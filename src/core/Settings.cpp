@@ -264,6 +264,10 @@ bool Settings::Load()
         // ---------------- 上次停留的目录 ----------------
         m_lastFolder = FromUtf8(json.value("lastFolder", std::string()));
 
+        // ---------------- 界面开关 ----------------
+        // 右键菜单显示图标：没记过就是关（保持原来的纯文字菜单）
+        m_menuIcons = json.value("menuIcons", false);
+
         // ---------------- 「打开方式」账本 ----------------
         // 结构：{ ".txt": { "default": "…", "items": [ {...}, … ] }, … }
         if (json.contains("openWith") && json["openWith"].is_object())
@@ -407,6 +411,13 @@ bool Settings::Save()
     if (!m_lastFolder.empty())
     {
         json["lastFolder"] = ToUtf8(m_lastFolder);
+    }
+
+    // ---------------- 界面开关 ----------------
+    // 只在"开"的时候写，关就是默认值，不往文件里塞多余的字段
+    if (m_menuIcons)
+    {
+        json["menuIcons"] = true;
     }
 
     // ---------------- 「打开方式」账本 ----------------

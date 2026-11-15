@@ -43,6 +43,9 @@
 #include "ui/FlatButton.h"
 #include "ui/NavigationPane.h"
 #include "ui/OpenWithDialog.h"
+#include "ui/SettingsDialog.h"
+#include "ui/MenuIcons.h"
+#include "shell/ShellNew.h"
 
 // 子控件 ID
 static const int kControlIdBack    = 1001;
@@ -52,6 +55,7 @@ static const int kControlIdAddress = 1004;
 static const int kControlIdHome    = 1010;   // 主页（去「我的文档」）
 static const int kControlIdRefresh = 1011;   // 刷新
 static const int kControlIdThisPc  = 1012;   // 计算机图标（去「此电脑」）
+static const int kControlIdSettings = 1013;  // 设置（地址栏右端的齿轮）
 
 // 快捷键命令 ID（和控件 ID 分开编号，避免撞号）
 static const int kCommandCopy      = 3101;   // Ctrl+C
@@ -71,6 +75,10 @@ static const int kCommandProperties = 3202;  // 属性
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
 static const int kCommandOpenWithManage = 3210;   // 添加或管理程序…
 static const int kCommandOpenWithBase   = 3400;   // 用列表里第 N 个程序打开
+
+// 右键菜单「新建」子菜单里的命令
+//   3500 ~ 3599 分给"新建项快照里第 N 项"
+static const int kCommandNewBase        = 3500;
 
 // 右键菜单「查看」子菜单（和资源管理器一样，几种视图里挑一个）
 static const int kCommandViewLarge   = 3301;  // 大图标
@@ -164,6 +172,15 @@ private:
     // ---- 右键菜单 ----
     void ShowContextMenu(POINT screenPoint);
     void ShowPropertiesForSelection();
+
+    // 「新建」菜单（二级菜单：文件夹 + 系统 ShellNew 里登记的各类新文件模板）
+    void FillNewMenu(HMENU parentMenu);
+
+    // 按「新建」快照里第 index 项建一个东西出来（文件夹 / 文本文档 / 快捷方式…）
+    void DoNewItem(size_t index);
+
+    // 启动后把「新建」项枚举出来、把菜菜单图标取好（都在后台线程做）
+    void StartBackgroundMenuData();
 
     // ---- 打开选中项 ----
     void OpenSelection();
@@ -284,6 +301,7 @@ private:
     FlatButton   m_homeButton;         // 主页（点一下去「我的文档」）
     FlatButton   m_refreshButton;      // 刷新
     FlatButton   m_thisPcButton;       // 计算机图标（地址栏左端，点了去「此电脑」）
+    FlatButton   m_settingsButton;     // 设置（齿轮，地址栏右端）
     AddressBar   m_addressBar;         // 地址栏（分段可点击，比如 C: > Windows）
 
     HWND         m_hStatusBar     = nullptr;
@@ -302,6 +320,29 @@ private:
     // ---- 数据 ----
     shell::IconCache   m_iconCache;
     NavigationHistory  m_history;
+
+    // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----
+    MenuIconCache      m_menuIcons;
+
+    // ---- 「新建」项快照（后台枚举一次，菜单只读这份）----
+    std::vector<shell::ShellNewItem> m_shellNewItems;
+    std::mutex                       m_shellNewMutex;
+    std::thread                      m_shellNewThread;
+
+    // 自绘菜单项的数据。
+    // 菜单还开着的时候必须一直活着（WM_MEASUREITEM / WM_DRAWITEM 会取它），
+    // 所以每次弹菜单前清空、弹完再清空，期间由这个 vector 兜住。
+    // 用 unique_ptr 是为了地址稳定：vector 扩容搬家时数据对象本身不会动。
+    struct MenuDrawItem
+    {
+        std::wstring text;              // 菜单项文字
+        HICON        icon = nullptr;    // 16px 图标（可为空：画空位，不探测）
+    };
+
+    std::vector<std::unique_ptr<MenuDrawItem>> m_menuDrawItems;
+
+    // 画一个自绘菜单项（WM_DRAWITEM 里调）
+    void DrawMenuItem(const DRAWITEMSTRUCT* drawItem);
 
     // 导航来源表：key 是小写路径，value 是"从哪儿进来的、叫什么名字"。
     // 见上面 NavigationOrigin 的说明。只在列表里双击进入时写入，

@@ -45,6 +45,9 @@ static const UINT WM_APP_OPERATION_DONE = WM_APP + 2;
 // 自定义消息：当前目录的内容变了（别的程序删了/搬走了/新建了文件）
 static const UINT WM_APP_FOLDER_CHANGED = WM_APP + 3;
 
+// 自定义消息：后台「新建」项枚举完成（主线程收到后去预取图标）
+static const UINT WM_APP_SHELLNEW_READY = WM_APP + 4;
+
 // 目录变化后的延迟刷新：短时间内的连续变化合并成一次刷新
 // （批量复制一万个文件会连发几千条通知，不合并的话界面会刷成幻灯片）
 static const UINT_PTR kFolderChangeTimerId  = 1;
@@ -242,6 +245,13 @@ MainWindow::~MainWindow()
     {
         m_operationThread.join();
     }
+
+    // 等后台「新建」项枚举收尾，再把菜单图标的取图线程收掉
+    if (m_shellNewThread.joinable())
+    {
+        m_shellNewThread.join();
+    }
+    m_menuIcons.Shutdown();
 
     if (m_hAccelerator != nullptr)
     {
@@ -511,6 +521,10 @@ void MainWindow::CreateChildControls()
     m_thisPcButton.Create(m_hWnd, kControlIdThisPc, FlatButton::ArrowKind::Computer, m_hInstance);
     m_thisPcButton.SetBackgroundColor(RGB(255, 255, 255));
 
+    // 设置：贴在地址栏右端（齿轮），白色底
+    m_settingsButton.Create(m_hWnd, kControlIdSettings, FlatButton::ArrowKind::Gear, m_hInstance);
+    m_settingsButton.SetBackgroundColor(RGB(255, 255, 255));
+
     // ---------------- 4. 地址栏（分段可点击） ----------------
     if (m_addressBar.Create(m_hWnd, kControlIdAddress, m_hInstance))
     {
@@ -640,6 +654,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
         RegisterDropTargets();
+
+        // 右键菜单要用的数据：「新建」项清单 + 菜单小图标，全部在后台准备，
+        // 不占启动时间；菜单弹出时只读内存
+        StartBackgroundMenuData();
 
         LayoutChildren();
 
@@ -792,6 +810,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
 
+        // ---- 「新建」子菜单里点了某一项：命令 ID = 3500 + 快照下标 ----
+        if (controlId >= kCommandNewBase && controlId <= kCommandNewBase + 99)
+        {
+            DoNewItem(static_cast<size_t>(controlId - kCommandNewBase));
+            return 0;
+        }
+
         // ---- 快捷键命令（由加速键表发来，通知码为 0/1）----
         switch (controlId)
         {
@@ -892,9 +917,73 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 // 计算机图标：去「此电脑」（虚拟文件夹，路径是它的 CLSID）
                 NavigateToPath(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
                 return 0;
+            case kControlIdSettings:
+            {
+                // 设置窗口（里面就一个「右键菜单显示图标」开关）
+                SettingsDialog dialog;
+                dialog.ShowModal(m_hWnd);
+                return 0;
+            }
             default:
                 break;
             }
+        }
+        break;
+    }
+
+    // --------------------------------------------------------------
+    // 自绘菜单项：量尺寸 + 绘制
+    //
+    // 只有「打开方式」「新建」两个子菜单在开关打开时才用 MF_OWNERDRAW，
+    // 其余菜单项还是系统自己画。这两条消息是发给"菜单所有者"的（就是本窗口）。
+    // --------------------------------------------------------------
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+
+        if (measure != nullptr && measure->CtlType == ODT_MENU && measure->itemData != 0)
+        {
+            const MenuDrawItem* data =
+                reinterpret_cast<const MenuDrawItem*>(measure->itemData);
+
+            // 高度取系统菜单项高度，保证和同一菜单里的普通项一样高
+            measure->itemHeight = static_cast<UINT>(::GetSystemMetrics(SM_CYMENU));
+
+            // 宽度：图标位 + 文字 + 右侧留白
+            int textWidth = Scale(120);
+
+            HDC dc = ::GetDC(m_hWnd);
+            if (dc != nullptr)
+            {
+                HGDIOBJ oldFont = ::SelectObject(dc, m_hUiFont);
+
+                SIZE textSize = {};
+                if (::GetTextExtentPoint32W(dc, data->text.c_str(),
+                                            static_cast<int>(data->text.size()), &textSize))
+                {
+                    textWidth = textSize.cx;
+                }
+
+                ::SelectObject(dc, oldFont);
+                ::ReleaseDC(m_hWnd, dc);
+            }
+
+            measure->itemWidth = static_cast<UINT>(Scale(8) + Scale(16) + Scale(8) +
+                                                  textWidth + Scale(24));
+
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+
+        if (draw != nullptr && draw->CtlType == ODT_MENU)
+        {
+            DrawMenuItem(draw);
+            return TRUE;
         }
         break;
     }
@@ -1019,6 +1108,22 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_APP_FOLDER_CHANGED:
         ::SetTimer(m_hWnd, kFolderChangeTimerId, kFolderChangeDelayMs, nullptr);
         return 0;
+
+    // --------------------------------------------------------------
+    // 后台「新建」项枚举完成：结果已经进 m_shellNewItems，这里去预取图标
+    // --------------------------------------------------------------
+    case WM_APP_SHELLNEW_READY:
+    {
+        std::vector<shell::ShellNewItem> items;
+
+        {
+            std::lock_guard<std::mutex> lock(m_shellNewMutex);
+            items = m_shellNewItems;
+        }
+
+        m_menuIcons.PrefetchNewItems(items);
+        return 0;
+    }
 
     // --------------------------------------------------------------
     // 定时器：目录变化防抖之后真正刷新
@@ -1500,6 +1605,9 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     bool                      hasSelection = !selected.empty();
     bool                      hasClipboard = shellclip::HasFiles();   // 系统剪贴板里有没有文件
 
+    // 每次弹菜单前把上一次的自绘项数据清掉（下面的 owner-draw 项要用到它们）
+    m_menuDrawItems.clear();
+
     HMENU menu = ::CreatePopupMenu();
     if (menu == nullptr)
     {
@@ -1552,7 +1660,21 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandDelete, L"删除(&D)");
     ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandRename, L"重命名(&M)");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandNewFolder, L"新建文件夹(&N)");
+
+    // ---- 新建（子菜单：文件夹 + 系统里登记的各种"新建"模板）----
+    FillNewMenu(menu);
+
+    // 一级菜单里再保留一个「新建文件夹」（原来就有，用户要求保留；Ctrl+Shift+N 同效）
+    {
+        const std::wstring currentPath = m_history.Current();
+        const bool canCreate = !currentPath.empty() &&
+                               currentPath.compare(0, 2, L"::") != 0 &&
+                               currentPath.compare(0, 6, L"shell:") != 0;
+
+        ::AppendMenuW(menu, MF_STRING | (canCreate ? 0 : MF_GRAYED),
+                      kCommandNewFolder, L"新建文件夹(&N)");
+    }
+
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh,   L"刷新(&R)");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
@@ -1591,10 +1713,68 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 
     ::DestroyMenu(menu);
 
+    // 菜单已经关了，自绘项的数据可以放掉（下次弹菜单前还会再清一次，双保险）
+    m_menuDrawItems.clear();
+
     if (command != 0)
     {
         ::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(static_cast<WORD>(command), 0), 0);
     }
+}
+
+// ============================================================================
+// 自绘菜单项的绘制（开关打开后「打开方式」「新建」子菜单里的每一行都走这里）
+//
+// 和系统菜单保持一致的观感：
+//   选中行 → 系统高亮色底 + 高亮字色
+//   普通行 → 菜单底色 + 菜单字色
+//   左侧固定 16px 图标位，没有图标就留空（图标都是提前缓存好的，这里不取）
+// ============================================================================
+void MainWindow::DrawMenuItem(const DRAWITEMSTRUCT* drawItem)
+{
+    if (drawItem == nullptr || drawItem->itemData == 0)
+    {
+        return;
+    }
+
+    const MenuDrawItem* data = reinterpret_cast<const MenuDrawItem*>(drawItem->itemData);
+    const RECT& rc = drawItem->rcItem;
+
+    const bool selected = ((drawItem->itemState & ODS_SELECTED) != 0);
+    const bool disabled = ((drawItem->itemState & ODS_DISABLED) != 0);
+
+    // ---- 底色 ----
+    HBRUSH background = ::CreateSolidBrush(
+        selected ? ::GetSysColor(COLOR_HIGHLIGHT) : ::GetSysColor(COLOR_MENU));
+    ::FillRect(drawItem->hDC, &rc, background);
+    ::DeleteObject(background);
+
+    // ---- 图标（左端）----
+    const int iconSize = Scale(16);
+    const int iconLeft = rc.left + Scale(8);
+    const int iconTop  = rc.top + ((rc.bottom - rc.top) - iconSize) / 2;
+
+    if (data->icon != nullptr)
+    {
+        ::DrawIconEx(drawItem->hDC, iconLeft, iconTop, data->icon, iconSize, iconSize,
+                     0, nullptr, DI_NORMAL);
+    }
+
+    // ---- 文字 ----
+    RECT textRect = rc;
+    textRect.left = iconLeft + iconSize + Scale(8);
+    textRect.right -= Scale(12);
+
+    ::SetBkMode(drawItem->hDC, TRANSPARENT);
+    ::SetTextColor(drawItem->hDC,
+                   disabled ? ::GetSysColor(COLOR_GRAYTEXT)
+                            : (selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT)
+                                        : ::GetSysColor(COLOR_MENUTEXT)));
+
+    HGDIOBJ oldFont = ::SelectObject(drawItem->hDC, m_hUiFont);
+    ::DrawTextW(drawItem->hDC, data->text.c_str(), -1, &textRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    ::SelectObject(drawItem->hDC, oldFont);
 }
 
 void MainWindow::ShowPropertiesForSelection()
@@ -1657,6 +1837,9 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
         return;
     }
 
+    // 菜单里要不要画图标（设置窗口里那个开关）
+    const bool showIcons = core::Settings::Instance().MenuIcons();
+
     // ---- 这里零 IO：只读配置里已经加载好的账本 ----
     const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
 
@@ -1694,9 +1877,26 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
                 text += L"（默认）";
             }
 
-            ::AppendMenuW(subMenu, MF_STRING,
-                          static_cast<UINT>(kCommandOpenWithBase + static_cast<int>(i)),
-                          text.c_str());
+            const UINT commandId =
+                static_cast<UINT>(kCommandOpenWithBase + static_cast<int>(i));
+
+            if (showIcons)
+            {
+                // 自绘菜单项：图标从内存缓存里拿（没有就留空，绝不在这里探测）
+                auto drawItem = std::make_unique<MenuDrawItem>();
+                drawItem->text = text;
+                drawItem->icon = m_menuIcons.Get(MenuIconCache::KeyForProgram(item));
+
+                MenuDrawItem* raw = drawItem.get();
+                m_menuDrawItems.push_back(std::move(drawItem));
+
+                ::AppendMenuW(subMenu, MF_OWNERDRAW, commandId,
+                              reinterpret_cast<LPCTSTR>(raw));
+            }
+            else
+            {
+                ::AppendMenuW(subMenu, MF_STRING, commandId, text.c_str());
+            }
 
             ++visibleCount;
         }
@@ -1712,6 +1912,216 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
 
     ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
                   reinterpret_cast<UINT_PTR>(subMenu), L"打开方式");
+}
+
+// ============================================================================
+// 「新建」二级菜单
+//
+// 内容和系统资源管理器一样：文件夹 + 这台机器上注册过「新建」模板的文件类型。
+// 清单是启动时后台枚举好的快照（m_shellNewItems），这里只读内存，零成本。
+// 开关打开时每一项都按自绘菜单画（前面带 16px 图标）。
+// ============================================================================
+void MainWindow::FillNewMenu(HMENU parentMenu)
+{
+    if (parentMenu == nullptr)
+    {
+        return;
+    }
+
+    HMENU subMenu = ::CreatePopupMenu();
+    if (subMenu == nullptr)
+    {
+        return;
+    }
+
+    std::vector<shell::ShellNewItem> items;
+
+    {
+        std::lock_guard<std::mutex> lock(m_shellNewMutex);
+        items = m_shellNewItems;
+    }
+
+    const bool showIcons = core::Settings::Instance().MenuIcons();
+
+    // 虚拟文件夹（此电脑、控制面板这类）里不能建文件，全部变灰（和资源管理器一致）
+    const std::wstring currentPath = m_history.Current();
+    const bool canCreate = !currentPath.empty() &&
+                           currentPath.compare(0, 2, L"::") != 0 &&
+                           currentPath.compare(0, 6, L"shell:") != 0;
+
+    for (size_t i = 0; i < items.size() && i < 100; ++i)
+    {
+        const shell::ShellNewItem& item = items[i];
+        const UINT commandId = static_cast<UINT>(kCommandNewBase + static_cast<int>(i));
+
+        if (showIcons)
+        {
+            auto drawItem = std::make_unique<MenuDrawItem>();
+            drawItem->text = item.displayName;
+            drawItem->icon = m_menuIcons.Get(MenuIconCache::KeyForNewItem(item));
+
+            MenuDrawItem* raw = drawItem.get();
+            m_menuDrawItems.push_back(std::move(drawItem));
+
+            ::AppendMenuW(subMenu, MF_OWNERDRAW | (canCreate ? 0 : MF_GRAYED), commandId,
+                          reinterpret_cast<LPCTSTR>(raw));
+        }
+        else
+        {
+            ::AppendMenuW(subMenu, MF_STRING | (canCreate ? 0 : MF_GRAYED), commandId,
+                          item.displayName.c_str());
+        }
+    }
+
+    // 快照还没准备好（启动那一刻就点了右键）：至少给个「新建文件夹」占位，
+    // 别让菜单是空的
+    if (items.empty())
+    {
+        ::AppendMenuW(subMenu, MF_STRING, kCommandNewFolder, L"文件夹");
+    }
+
+    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(subMenu), L"新建(&W)");
+}
+
+// ============================================================================
+// 按「新建」快照里第 index 项真的建一个出来
+//
+// 和资源管理器一致：建完立刻选中它、直接进入改名状态，
+// 用户不用再点一下 F2。
+// ============================================================================
+void MainWindow::DoNewItem(size_t index)
+{
+    std::vector<shell::ShellNewItem> items;
+
+    {
+        std::lock_guard<std::mutex> lock(m_shellNewMutex);
+        items = m_shellNewItems;
+    }
+
+    if (index >= items.size())
+    {
+        return;
+    }
+
+    const std::wstring current = m_history.Current();
+    if (current.empty())
+    {
+        return;
+    }
+
+    // 虚拟文件夹（此电脑、控制面板）里不能建文件
+    if (current.compare(0, 2, L"::") == 0 || current.compare(0, 6, L"shell:") == 0)
+    {
+        return;
+    }
+
+    std::wstring created;
+    std::wstring error;
+
+    if (!shell::CreateShellNewItem(items[index], current, created, error))
+    {
+        if (!error.empty())
+        {
+            ::MessageBoxW(m_hWnd, error.c_str(), L"新建", MB_OK | MB_ICONWARNING);
+        }
+        return;
+    }
+
+    Logger::Info(L"新建项：" + items[index].displayName +
+                 L"，结果=" + (created.empty() ? std::wstring(L"（向导）") : created));
+
+    if (created.empty())
+    {
+        // 快捷方式向导：它自己会建，建完目录监视会触发刷新；
+        // 这里仍然主动刷一次，免得监视消息来得慢
+        RefreshCurrentFolder();
+        return;
+    }
+
+    // ---- 局部插入一行（不重扫整个目录）----
+    std::wstring name = created;
+    const size_t slash = name.find_last_of(L"\\/");
+    if (slash != std::wstring::npos)
+    {
+        name = name.substr(slash + 1);
+    }
+
+    shell::ShellEntry entry;
+    entry.name     = name;
+    entry.fullPath = created;
+    entry.isFolder = (items[index].kind == shell::ShellNewKind::Folder);
+
+    WIN32_FILE_ATTRIBUTE_DATA attributeData = {};
+    if (::GetFileAttributesExW(created.c_str(), GetFileExInfoStandard, &attributeData))
+    {
+        entry.modified = attributeData.ftLastWriteTime;
+        entry.size     = attributeData.nFileSizeLow;
+    }
+    else
+    {
+        ::GetSystemTimeAsFileTime(&entry.modified);
+        entry.size = 0;
+    }
+
+    m_fileListView.InsertEntry(entry);
+    UpdateTitle();
+    UpdateStatusBar();
+
+    // 选中并进入改名（名字是「新建 文本文档」，用户多半要改）
+    m_fileListView.SelectPaths({ created });
+    m_fileListView.BeginRenameSelected();
+}
+
+// ============================================================================
+// 启动后准备菜单数据（全部在后台，不占启动时间，弹菜单时零成本）
+//   · 「新建」项清单：读一次注册表（ShellNew）
+//   · 菜单小图标：程序图标 + 新建项图标
+// ============================================================================
+void MainWindow::StartBackgroundMenuData()
+{
+    // ---- 1. 已有账本里的程序图标先取一遍（主线程拿快照，后台去取）----
+    {
+        std::vector<core::OpenWithItem> programs;
+
+        for (const core::OpenWithEntry& entry : core::Settings::Instance().OpenWithEntries())
+        {
+            for (const core::OpenWithItem& item : entry.items)
+            {
+                programs.push_back(item);
+            }
+        }
+
+        m_menuIcons.PrefetchPrograms(programs);
+    }
+
+    // ---- 2. 「新建」项清单（后台线程读注册表）----
+    if (m_shellNewThread.joinable())
+    {
+        return;
+    }
+
+    HWND hwnd = m_hWnd;
+
+    m_shellNewThread = std::thread([this, hwnd]()
+    {
+        // 后台线程里 SHGetFileInfo 读类型名要用 COM
+        ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        std::vector<shell::ShellNewItem> items = shell::EnumerateShellNew();
+
+        {
+            std::lock_guard<std::mutex> lock(m_shellNewMutex);
+            m_shellNewItems = items;
+        }
+
+        if (::IsWindow(hwnd))
+        {
+            ::PostMessageW(hwnd, WM_APP_SHELLNEW_READY, 0, 0);
+        }
+
+        ::CoUninitialize();
+    });
 }
 
 void MainWindow::SetOpenWithProgramAlive(const std::wstring& extension,
@@ -1742,6 +2152,21 @@ void MainWindow::ShowOpenWithSettings(const std::wstring& extension, bool firstT
 {
     ui::OpenWithDialog dialog(m_hWnd, &m_iconCache);
     dialog.ShowModal(extension, firstTime, filePath);
+
+    // 用户在窗口里可能加了新程序：后台补一次图标，下次右键菜单就有它的图标了
+    {
+        std::vector<core::OpenWithItem> programs;
+
+        for (const core::OpenWithEntry& entry : core::Settings::Instance().OpenWithEntries())
+        {
+            for (const core::OpenWithItem& item : entry.items)
+            {
+                programs.push_back(item);
+            }
+        }
+
+        m_menuIcons.PrefetchPrograms(programs);
+    }
 
     // 用户点了「打开」→ 用刚设好的默认程序把这个文件打开
     if (!dialog.OpenRequested() || filePath.empty())
@@ -3140,12 +3565,16 @@ void MainWindow::LayoutChildren()
     cursorX += computerWidth;
 
     // ---- 地址栏 ----
-    int addressWidth = clientWidth - cursorX - margin;
+    // 地址栏右端留出齿轮按钮的位置；齿轮贴在地址栏右边、白色底连成一片
+    int settingsWidth = Scale(28);
+    int addressWidth = clientWidth - cursorX - margin - settingsWidth;
     if (addressWidth < Scale(150))
     {
         addressWidth = Scale(150);
     }
     m_addressBar.Resize(cursorX, addressY, addressWidth, addressHeight);
+
+    m_settingsButton.Resize(cursorX + addressWidth, addressY, settingsWidth, addressHeight);
 
     // ---- 地址栏下面那条横线 ----
     // 整条窗口宽，把上方"路径 + 按钮"的工具条和下面的内容区隔开
