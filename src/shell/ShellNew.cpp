@@ -452,27 +452,163 @@ bool CommandProgramExists(const std::wstring& command)
     return ::GetFileAttributesW(program.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-// 弹系统的「创建快捷方式」向导（和资源管理器「新建 → 快捷方式」一模一样）
+// ---------------------------------------------------------------------------
+// 在菜单（含各级子菜单）里按文字找「快捷方式」那一项，返回它的命令 ID
+//
+// 系统背景菜单里的「新建」子菜单是"延迟填充"的：QueryContextMenu 之后它是空的，
+// 必须让 IContextMenu2 处理一次 WM_INITMENUPOPUP 才会把文件夹/快捷方式/各种
+// 文件类型填进去。所以这里每遇到一个子菜单都先喂一次 HandleMenuMsg。
+// ---------------------------------------------------------------------------
+UINT FindShortcutCommandId(HMENU menu, IContextMenu2* contextMenu2)
+{
+    const int count = ::GetMenuItemCount(menu);
+
+    for (int index = 0; index < count; ++index)
+    {
+        MENUITEMINFOW itemInfo = {};
+
+        wchar_t text[256] = {};
+        itemInfo.cbSize     = sizeof(itemInfo);
+        itemInfo.fMask      = MIIM_SUBMENU | MIIM_ID | MIIM_STRING;
+        itemInfo.dwTypeData = text;
+        itemInfo.cch        = static_cast<UINT>(std::size(text));
+
+        if (!::GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &itemInfo))
+        {
+            continue;
+        }
+
+        if (itemInfo.hSubMenu != nullptr)
+        {
+            // 先让系统把这一级子菜单填满
+            if (contextMenu2 != nullptr)
+            {
+                contextMenu2->HandleMenuMsg(WM_INITMENUPOPUP,
+                                            reinterpret_cast<WPARAM>(itemInfo.hSubMenu),
+                                            MAKELPARAM(index, 0));
+            }
+
+            const UINT nested = FindShortcutCommandId(itemInfo.hSubMenu, contextMenu2);
+            if (nested != 0)
+            {
+                return nested;
+            }
+            continue;
+        }
+
+        // 去掉 & 快捷键标记再比较（系统菜单里写的是「快捷方式(&S)」）
+        std::wstring clean;
+        for (const wchar_t* ch = text; *ch != L'\0'; ++ch)
+        {
+            if (*ch != L'&')
+            {
+                clean.push_back(*ch);
+            }
+        }
+
+        if (clean.find(L"快捷方式") != std::wstring::npos ||
+            clean.find(L"Shortcut") != std::wstring::npos)
+        {
+            return itemInfo.wID;
+        }
+    }
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 弹系统的「创建快捷方式」向导
+//
+// Win10/11 上老的 rundll32.exe appwiz.cpl,NewLinkHere 已经不弹任何东西了
+// （实测进程启动后立刻退出）。可靠做法是执行资源管理器自己的
+// 「新建 → 快捷方式」那一项：拿目录的背景右键菜单，找到那一项并 Invoke。
+// 这样向导、默认名字、保存位置都是系统行为，和资源管理器完全一致。
+// ---------------------------------------------------------------------------
 bool LaunchShortcutWizard(const std::wstring& directory, std::wstring& error)
 {
-    std::wstring commandLine = L"rundll32.exe appwiz.cpl,NewLinkHere ";
-    commandLine += L"\"" + directory + L"\"";
+    constexpr UINT kCommandIdFirst = 1;
+    constexpr UINT kCommandIdLast  = 0x7FFF;
 
-    STARTUPINFOW startup = {};
-    startup.cb = sizeof(startup);
-
-    PROCESS_INFORMATION process = {};
-
-    if (!::CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
-                          0, nullptr, directory.c_str(), &startup, &process))
+    LPITEMIDLIST folderPidl = nullptr;
+    if (FAILED(::SHParseDisplayName(directory.c_str(), nullptr, &folderPidl, 0, nullptr)) ||
+        folderPidl == nullptr)
     {
-        error = L"打开「创建快捷方式」向导失败。";
-        Logger::Error(L"新建快捷方式失败：无法启动向导");
+        error = L"打开「创建快捷方式」向导失败（路径解析不出来）。";
         return false;
     }
 
-    ::CloseHandle(process.hThread);
-    ::CloseHandle(process.hProcess);
+    IShellFolder*      desktopFolder = nullptr;
+    IShellFolder*      targetFolder  = nullptr;
+    IContextMenu*      contextMenu   = nullptr;
+    IContextMenu2*     contextMenu2  = nullptr;
+    HMENU              menu          = nullptr;
+    bool               started       = false;
+
+    if (SUCCEEDED(::SHGetDesktopFolder(&desktopFolder)) && desktopFolder != nullptr &&
+        SUCCEEDED(desktopFolder->BindToObject(folderPidl, nullptr, IID_IShellFolder,
+                                              reinterpret_cast<void**>(&targetFolder))) &&
+        targetFolder != nullptr &&
+        SUCCEEDED(targetFolder->CreateViewObject(nullptr, IID_IContextMenu,
+                                                 reinterpret_cast<void**>(&contextMenu))) &&
+        contextMenu != nullptr)
+    {
+        menu = ::CreatePopupMenu();
+
+        if (menu != nullptr &&
+            SUCCEEDED(contextMenu->QueryContextMenu(menu, 0, kCommandIdFirst, kCommandIdLast,
+                                                    CMF_NORMAL)))
+        {
+            // 「新建」子菜单要 IContextMenu2 处理 WM_INITMENUPOPUP 才有内容
+            contextMenu->QueryInterface(IID_IContextMenu2,
+                                        reinterpret_cast<void**>(&contextMenu2));
+
+            const UINT commandId = FindShortcutCommandId(menu, contextMenu2);
+
+            if (commandId != 0)
+            {
+                CMINVOKECOMMANDINFOEX invoke = {};
+                invoke.cbSize = sizeof(invoke);
+                invoke.fMask  = CMIC_MASK_UNICODE;
+                invoke.hwnd   = ::GetForegroundWindow();
+                invoke.lpVerb  = MAKEINTRESOURCEA(commandId - kCommandIdFirst);
+                invoke.lpVerbW = MAKEINTRESOURCEW(commandId - kCommandIdFirst);
+                invoke.nShow   = SW_SHOWNORMAL;
+
+                started = SUCCEEDED(contextMenu->InvokeCommand(
+                    reinterpret_cast<LPCMINVOKECOMMANDINFO>(&invoke)));
+            }
+        }
+    }
+
+    if (menu != nullptr)
+    {
+        ::DestroyMenu(menu);
+    }
+    if (contextMenu2 != nullptr)
+    {
+        contextMenu2->Release();
+    }
+    if (contextMenu != nullptr)
+    {
+        contextMenu->Release();
+    }
+    if (targetFolder != nullptr)
+    {
+        targetFolder->Release();
+    }
+    if (desktopFolder != nullptr)
+    {
+        desktopFolder->Release();
+    }
+    ::CoTaskMemFree(folderPidl);
+
+    if (!started)
+    {
+        error = L"没能启动系统的「创建快捷方式」向导。";
+        Logger::Error(L"新建快捷方式失败：系统菜单里没找到「快捷方式」项");
+        return false;
+    }
+
     return true;
 }
 

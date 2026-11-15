@@ -270,9 +270,10 @@ MainWindow::~MainWindow()
 // 创建与消息循环
 // ============================================================================
 
-bool MainWindow::Create(HINSTANCE hInstance)
+bool MainWindow::Create(HINSTANCE hInstance, const std::wstring& initialPath)
 {
-    m_hInstance = hInstance;
+    m_hInstance   = hInstance;
+    m_startupPath = initialPath;
 
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
@@ -662,15 +663,31 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         LayoutChildren();
 
         // 上次停在哪个目录就直接打开哪个（目录已经不在了就回 C:\）
-        std::wstring startPath = core::Settings::Instance().LastFolder();
+        std::wstring startPath;
 
-        if (startPath.empty() || !IsStartPathUsable(startPath))
+        // 「在新窗口中打开」等带命令行参数启动时，优先用参数里的目录
+        if (!m_startupPath.empty() && IsStartPathUsable(m_startupPath))
         {
-            if (!startPath.empty())
+            startPath = m_startupPath;
+            Logger::Info(L"按命令行参数启动：" + startPath);
+        }
+        else
+        {
+            if (!m_startupPath.empty())
             {
-                Logger::Warn(L"上次的目录已经不在了，改回默认目录：" + startPath);
+                Logger::Warn(L"命令行给的目录不可用：" + m_startupPath);
             }
-            startPath = kInitialPath;
+
+            startPath = core::Settings::Instance().LastFolder();
+
+            if (startPath.empty() || !IsStartPathUsable(startPath))
+            {
+                if (!startPath.empty())
+                {
+                    Logger::Warn(L"上次的目录已经不在了，改回默认目录：" + startPath);
+                }
+                startPath = kInitialPath;
+            }
         }
 
         Logger::Info(L"启动目录：" + startPath);
@@ -847,6 +864,21 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandOpen:
             OpenSelection();
             return 0;
+        case kCommandOpenInNewWindow:
+        {
+            // 「在新窗口中打开」：文件夹 / 盘符 用自身进程新开一个窗口
+            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+            if (!selected.empty())
+            {
+                OpenFolderInNewWindow(selected.front());
+            }
+            else
+            {
+                OpenFolderInNewWindow(m_history.Current());
+            }
+            return 0;
+        }
         case kCommandOpenWithManage:
         {
             // 「添加或管理程序…」：管的是当前选中文件那个扩展名
@@ -1597,16 +1629,86 @@ void MainWindow::RunFileOperationAsync(std::function<HRESULT()> operation)
 
 // ============================================================================
 // 右键菜单
+//
+// 资源管理器的右键菜单是按"点在什么上"重新组合的，不是一套菜单加灰。
+// 这里同样分场景：
+//
+//   Background    文件夹空白处：查看 / 粘贴 / 新建文件夹 / 新建 / 刷新 / 属性
+//   SingleFile    单选一个文件：打开 / 打开方式 / 剪切 / 复制 / 删除 / 重命名 / 属性
+//   SingleFolder  单选一个文件夹：打开 / 在新窗口中打开 / 剪切 / 复制 / 删除 / 重命名 / 属性
+//   Multiple      选中多个：打开 / 剪切 / 复制 / 删除 / 属性
+//   ShellItem     盘符 / 此电脑 / 控制面板：打开 / 在新窗口中打开 / 属性
+//   None          组标题 / 分隔行：不弹菜单
+//
+// 场景判定只用已经加载在内存里的条目数据（isFolder / 路径前缀 / 选中数量），
+// 不读注册表、不调 COM、不探测文件 —— 右键菜单依然是零成本。
 // ============================================================================
 
 void MainWindow::ShowContextMenu(POINT screenPoint)
 {
-    std::vector<std::wstring> selected     = m_fileListView.GetSelectedPaths();
-    bool                      hasSelection = !selected.empty();
-    bool                      hasClipboard = shellclip::HasFiles();   // 系统剪贴板里有没有文件
-
     // 每次弹菜单前把上一次的自绘项数据清掉（下面的 owner-draw 项要用到它们）
     m_menuDrawItems.clear();
+
+    const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+    // ---- 1. 判定场景 ----
+    ContextScene scene         = ContextScene::Background;
+    std::wstring primaryPath;       // 单选时的那一项
+    bool         primaryIsFolder = false;
+
+    if (!selected.empty())
+    {
+        primaryPath = selected.front();
+
+        const bool isShellNamespace = (primaryPath.compare(0, 2, L"::") == 0) ||
+                                      (primaryPath.compare(0, 6, L"shell:") == 0);
+
+        // 条目的元数据（是不是文件夹、是不是组标题）都从当前枚举结果里取
+        std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+
+        bool isGroupHeader = false;
+        bool isFolder      = false;
+
+        if (result != nullptr)
+        {
+            const int index = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+            if (index >= 0 && index < static_cast<int>(result->entries.size()))
+            {
+                const shell::ShellEntry& entry = result->entries[index];
+                isGroupHeader = entry.isGroupHeader || entry.isSpacer;
+                isFolder      = entry.isFolder;
+            }
+        }
+
+        primaryIsFolder = isFolder;
+
+        if (isGroupHeader)
+        {
+            scene = ContextScene::None;            // 组标题、分隔行：不弹菜单
+        }
+        else if (selected.size() >= 2)
+        {
+            scene = ContextScene::Multiple;
+        }
+        else if (isShellNamespace || (isFolder && ::PathIsRootW(primaryPath.c_str())))
+        {
+            // 盘符、此电脑、控制面板这些：不给删除/重命名（删盘符是灾难）
+            scene = ContextScene::ShellItem;
+        }
+        else if (isFolder)
+        {
+            scene = ContextScene::SingleFolder;
+        }
+        else
+        {
+            scene = ContextScene::SingleFile;
+        }
+    }
+
+    if (scene == ContextScene::None)
+    {
+        return;
+    }
 
     HMENU menu = ::CreatePopupMenu();
     if (menu == nullptr)
@@ -1614,96 +1716,32 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
         return;
     }
 
-    // 没选中东西时，"打开/复制/剪切/删除"变灰；剪贴板空时"粘贴"变灰
-    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandOpen, L"打开(&O)");
-
-    // ---- 打开方式（子菜单）----
-    // 只给"普通文件"才出这项：文件夹、控制面板那类命名空间项都跳过。
-    // 注意：这里绝对不能去读注册表 / 探测程序在不在——右键菜单必须零成本，
-    // 菜单内容全部来自已经加载在内存里的配置。
+    // ---- 2. 按场景拼菜单 ----
+    switch (scene)
     {
-        std::wstring openWithTarget;
+    case ContextScene::Background:
+        BuildBackgroundMenu(menu);
+        break;
 
-        std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
-        if (result != nullptr)
-        {
-            const int index = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
-            if (index >= 0 && index < static_cast<int>(result->entries.size()))
-            {
-                const shell::ShellEntry& entry = result->entries[index];
+    case ContextScene::SingleFile:
+        BuildSingleFileMenu(menu, primaryPath);
+        break;
 
-                const bool isShellNamespace = (entry.fullPath.compare(0, 2, L"::") == 0) ||
-                                              (entry.fullPath.compare(0, 6, L"shell:") == 0);
+    case ContextScene::SingleFolder:
+        BuildSingleFolderMenu(menu, primaryPath);
+        break;
 
-                if (!entry.isFolder && !entry.isGroupHeader && !entry.isSpacer &&
-                    !entry.fullPath.empty() && !isShellNamespace)
-                {
-                    openWithTarget = entry.fullPath;
-                }
-            }
-        }
+    case ContextScene::Multiple:
+        BuildMultipleMenu(menu);
+        break;
 
-        if (!openWithTarget.empty())
-        {
-            const std::wstring extension = shell::ExtensionKeyForPath(openWithTarget);
-            if (shell::IsExtensionHandled(extension))
-            {
-                FillOpenWithMenu(menu, extension);
-            }
-        }
+    case ContextScene::ShellItem:
+        BuildShellItemMenu(menu, primaryPath);
+        break;
+
+    default:
+        break;
     }
-
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCopy, L"复制(&C)");
-    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandCut, L"剪切(&T)");
-    ::AppendMenuW(menu, (hasClipboard ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandPaste, L"粘贴(&P)");
-    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandDelete, L"删除(&D)");
-    ::AppendMenuW(menu, (hasSelection ? MF_STRING : (MF_STRING | MF_GRAYED)), kCommandRename, L"重命名(&M)");
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-
-    // ---- 新建（子菜单：文件夹 + 系统里登记的各种"新建"模板）----
-    FillNewMenu(menu);
-
-    // 一级菜单里再保留一个「新建文件夹」（原来就有，用户要求保留；Ctrl+Shift+N 同效）
-    {
-        const std::wstring currentPath = m_history.Current();
-        const bool canCreate = !currentPath.empty() &&
-                               currentPath.compare(0, 2, L"::") != 0 &&
-                               currentPath.compare(0, 6, L"shell:") != 0;
-
-        ::AppendMenuW(menu, MF_STRING | (canCreate ? 0 : MF_GRAYED),
-                      kCommandNewFolder, L"新建文件夹(&N)");
-    }
-
-    ::AppendMenuW(menu, MF_STRING, kCommandRefresh,   L"刷新(&R)");
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-
-    // ---- 查看（子菜单，和资源管理器右键的「查看」一样，当前视图打勾）----
-    {
-        HMENU viewMenu = ::CreatePopupMenu();
-
-        if (viewMenu != nullptr)
-        {
-            const FileListView::ViewMode current = m_fileListView.CurrentViewMode();
-
-            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::LargeIcon) ? MF_CHECKED : 0),
-                          kCommandViewLarge, L"大图标(&L)");
-            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::SmallIcon) ? MF_CHECKED : 0),
-                          kCommandViewSmall, L"小图标(&S)");
-            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::List) ? MF_CHECKED : 0),
-                          kCommandViewList, L"列表(&T)");
-            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Details) ? MF_CHECKED : 0),
-                          kCommandViewDetails, L"详细信息(&D)");
-            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Tiles) ? MF_CHECKED : 0),
-                          kCommandViewTiles, L"平铺(&I)");
-
-            ::AppendMenuW(menu, MF_STRING | MF_POPUP,
-                          reinterpret_cast<UINT_PTR>(viewMenu), L"查看(&V)");
-        }
-    }
-
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
 
     // TPM_RETURNCMD：菜单自己跑完并返回点了哪一项，省去额外的一层消息往返
     int command = ::TrackPopupMenu(menu,
@@ -1720,6 +1758,209 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     {
         ::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(static_cast<WORD>(command), 0), 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 文件夹空白处
+//
+// 分组照资源管理器：
+//   查看 >
+//   ─────
+//   粘贴            （剪贴板里有文件才出现）
+//   ─────
+//   新建文件夹
+//   新建 >
+//   ─────
+//   刷新
+//   ─────
+//   属性
+// ---------------------------------------------------------------------------
+void MainWindow::BuildBackgroundMenu(HMENU menu)
+{
+    FillViewMenu(menu);
+
+    if (shellclip::HasFiles())
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kCommandPaste, L"粘贴(&P)");
+    }
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    FillNewFolderAndNewMenu(menu);
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+}
+
+// ---------------------------------------------------------------------------
+// 单选一个文件
+//
+//   打开
+//   打开方式 >      （这个扩展名在账本里有程序时才出现）
+//   ─────
+//   剪切
+//   复制
+//   ─────
+//   删除
+//   ─────
+//   重命名
+//   ─────
+//   属性
+// ---------------------------------------------------------------------------
+void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
+{
+    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+
+    // 打开方式：只给"普通文件"；菜单内容全部来自内存里的账本，零成本
+    {
+        const std::wstring extension = shell::ExtensionKeyForPath(filePath);
+
+        if (!extension.empty() && shell::IsExtensionHandled(extension))
+        {
+            FillOpenWithMenu(menu, extension);
+        }
+    }
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+}
+
+// ---------------------------------------------------------------------------
+// 单选一个文件夹
+//
+//   打开
+//   在新窗口中打开
+//   ─────
+//   剪切
+//   复制
+//   ─────
+//   删除
+//   ─────
+//   重命名
+//   ─────
+//   属性
+// ---------------------------------------------------------------------------
+void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderPath*/)
+{
+    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+    ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+}
+
+// ---------------------------------------------------------------------------
+// 选中多个
+//
+//   打开
+//   ─────
+//   剪切
+//   复制
+//   ─────
+//   删除
+//   ─────
+//   属性
+//
+// 没有重命名（系统也不给多选重命名），没有新建，没有打开方式。
+// ---------------------------------------------------------------------------
+void MainWindow::BuildMultipleMenu(HMENU menu)
+{
+    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+}
+
+// ---------------------------------------------------------------------------
+// 盘符 / 此电脑 / 控制面板 这类命名空间项
+//
+//   打开
+//   在新窗口中打开
+//   ─────
+//   属性
+// ---------------------------------------------------------------------------
+void MainWindow::BuildShellItemMenu(HMENU menu, const std::wstring& /*itemPath*/)
+{
+    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+    ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+}
+
+// ---------------------------------------------------------------------------
+// 「查看」子菜单（和资源管理器一样，当前视图打勾）
+// ---------------------------------------------------------------------------
+void MainWindow::FillViewMenu(HMENU parentMenu)
+{
+    HMENU viewMenu = ::CreatePopupMenu();
+    if (viewMenu == nullptr)
+    {
+        return;
+    }
+
+    const FileListView::ViewMode current = m_fileListView.CurrentViewMode();
+
+    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::LargeIcon) ? MF_CHECKED : 0),
+                  kCommandViewLarge, L"大图标(&L)");
+    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::SmallIcon) ? MF_CHECKED : 0),
+                  kCommandViewSmall, L"小图标(&S)");
+    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::List) ? MF_CHECKED : 0),
+                  kCommandViewList, L"列表(&T)");
+    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Details) ? MF_CHECKED : 0),
+                  kCommandViewDetails, L"详细信息(&D)");
+    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Tiles) ? MF_CHECKED : 0),
+                  kCommandViewTiles, L"平铺(&I)");
+
+    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(viewMenu), L"查看(&V)");
+}
+
+// ---------------------------------------------------------------------------
+// 「新建文件夹」+「新建」子菜单（两者相邻，新建文件夹在上面）
+// ---------------------------------------------------------------------------
+void MainWindow::FillNewFolderAndNewMenu(HMENU menu)
+{
+    const std::wstring currentPath = m_history.Current();
+    const bool canCreate = !currentPath.empty() &&
+                           currentPath.compare(0, 2, L"::") != 0 &&
+                           currentPath.compare(0, 6, L"shell:") != 0;
+
+    ::AppendMenuW(menu, MF_STRING | (canCreate ? 0 : MF_GRAYED),
+                  kCommandNewFolder, L"新建文件夹(&N)");
+
+    FillNewMenu(menu);
 }
 
 // ============================================================================
@@ -1777,12 +2018,100 @@ void MainWindow::DrawMenuItem(const DRAWITEMSTRUCT* drawItem)
     ::SelectObject(drawItem->hDC, oldFont);
 }
 
+// ---------------------------------------------------------------------------
+// 弹一个"多项目属性"窗口（系统的「多个项目属性」对话框）
+//
+// 系统的做法是：把选中的多个对象装进一个 IDataObject，再交给
+// SHMultiFileProperties() 弹出合并后的属性窗口（顶部会显示"N 个文件"、
+// 有"计算大小"按钮、第二页能改只读/隐藏这些公共属性）。
+//
+// 这里照做：先把每个路径解析成 PIDL，再用同一父目录的 PIDL 组一个
+// IDataObject。解析失败（比如虚拟项）就直接返回 false，交给调用方兜底。
+// ---------------------------------------------------------------------------
+static bool ShowMultiPropertiesForPaths(const std::vector<std::wstring>& paths)
+{
+    if (paths.size() < 2)
+    {
+        return false;
+    }
+
+    // ---- 1. 取第一个文件的父目录 PIDL（多选都在同一个目录里）----
+    std::wstring parentPath = paths.front();
+    {
+        size_t slash = parentPath.find_last_of(L"\\/");
+        if (slash == std::wstring::npos)
+        {
+            return false;
+        }
+        parentPath = parentPath.substr(0, slash);
+        if (parentPath.size() == 2 && parentPath[1] == L':')
+        {
+            parentPath += L"\\";        // "C:" 要补成 "C:\"
+        }
+    }
+
+    PIDLIST_ABSOLUTE folderPidl = nullptr;
+    if (FAILED(::SHParseDisplayName(parentPath.c_str(), nullptr, &folderPidl, 0, nullptr)) ||
+        folderPidl == nullptr)
+    {
+        return false;
+    }
+
+    // ---- 2. 每个文件解析成完整 PIDL，只取最后一段（相对父目录的子项 ID）----
+    std::vector<PIDLIST_ABSOLUTE> fullPidls;        // 负责释放
+    std::vector<PCUITEMID_CHILD>  children;         // 传给 SHCreateDataObject
+
+    for (const std::wstring& path : paths)
+    {
+        PIDLIST_ABSOLUTE fullPidl = nullptr;
+        if (SUCCEEDED(::SHParseDisplayName(path.c_str(), nullptr, &fullPidl, 0, nullptr)) &&
+            fullPidl != nullptr)
+        {
+            fullPidls.push_back(fullPidl);
+            children.push_back(::ILFindLastID(fullPidl));
+        }
+    }
+
+    IDataObject* dataObject = nullptr;
+    HRESULT      hr         = E_FAIL;
+
+    if (children.size() >= 2)
+    {
+        hr = ::SHCreateDataObject(folderPidl,
+                                  static_cast<UINT>(children.size()),
+                                  children.data(),
+                                  nullptr,
+                                  IID_IDataObject,
+                                  reinterpret_cast<void**>(&dataObject));
+    }
+
+    if (SUCCEEDED(hr) && dataObject != nullptr)
+    {
+        ::SHMultiFileProperties(dataObject, 0);      // 模态，用户关掉才返回
+        dataObject->Release();
+    }
+
+    for (PIDLIST_ABSOLUTE pidl : fullPidls)
+    {
+        ::CoTaskMemFree(pidl);
+    }
+    ::CoTaskMemFree(folderPidl);
+
+    return SUCCEEDED(hr);
+}
+
 void MainWindow::ShowPropertiesForSelection()
 {
-    std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+    const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
 
-    // 选中多个时只显示第一个的属性（系统的属性窗口一次只能显示一个对象）
-    std::wstring target = selected.empty() ? m_history.Current() : selected.front();
+    // ---- 多选：弹系统的「多个项目属性」窗口（和资源管理器一样）----
+    if (selected.size() >= 2 && ShowMultiPropertiesForPaths(selected))
+    {
+        return;
+    }
+
+    // ---- 单选 / 没选中：显示一个对象的属性（没选中就是当前目录）----
+    const std::wstring target = selected.empty() ? m_history.Current() : selected.front();
     if (target.empty())
     {
         return;
@@ -1799,6 +2128,39 @@ void MainWindow::ShowPropertiesForSelection()
     if (!::ShellExecuteExW(&info))
     {
         Logger::Warn(L"打开属性窗口失败：" + target);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 在新窗口中打开：再启动一个自己（带目录参数），两个窗口各看各的
+// ---------------------------------------------------------------------------
+void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath)
+{
+    if (folderPath.empty())
+    {
+        return;
+    }
+
+    wchar_t exePath[MAX_PATH * 2] = {};
+    if (::GetModuleFileNameW(nullptr, exePath, ARRAYSIZE(exePath)) == 0)
+    {
+        Logger::Warn(L"取自身路径失败，无法在新窗口中打开");
+        return;
+    }
+
+    const std::wstring parameters = L"\"" + folderPath + L"\"";
+
+    HINSTANCE result = ::ShellExecuteW(m_hWnd, L"open", exePath, parameters.c_str(),
+                                       nullptr, SW_SHOWNORMAL);
+
+    // ShellExecuteW 返回值 > 32 才算成功
+    if (reinterpret_cast<INT_PTR>(result) <= 32)
+    {
+        Logger::Warn(L"在新窗口中打开失败：" + folderPath);
+    }
+    else
+    {
+        Logger::Info(L"已在新窗口中打开：" + folderPath);
     }
 }
 
@@ -3109,6 +3471,10 @@ void MainWindow::DoNewFolder()
         m_fileListView.InsertEntry(entry);
         UpdateTitle();
         UpdateStatusBar();
+
+        // 和「新建」子菜单一样：建完立刻选中并进入改名，用户不用再按 F2
+        m_fileListView.SelectPaths({ created });
+        m_fileListView.BeginRenameSelected();
 
         Logger::Info(L"新建后局部插入 1 行（未重扫目录）：" + created);
     }

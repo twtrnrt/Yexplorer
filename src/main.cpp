@@ -82,12 +82,60 @@ static void EnableDpiAwareness()
     ::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 }
 
+// ----------------------------------------------------------------------------
+// 从命令行里取出"启动目录"
+//
+// 用途：右键「在新窗口中打开」时，本程序会带着一个目录参数重新启动自己。
+// lpCmdLine 不含程序名，可能长这样：
+//     "C:\Users\kf168\Desktop\owtest"
+//      C:\Windows
+// 这里把首尾空白和成对的引号去掉，剩下的当一个目录用。
+// ----------------------------------------------------------------------------
+static std::wstring ExtractStartupPath(LPWSTR cmdLine)
+{
+    if (cmdLine == nullptr)
+    {
+        return std::wstring();
+    }
+
+    std::wstring text(cmdLine);
+
+    // 去首尾空白
+    while (!text.empty() && (text.front() == L' ' || text.front() == L'\t'))
+    {
+        text.erase(text.begin());
+    }
+    while (!text.empty() && (text.back() == L' ' || text.back() == L'\t'))
+    {
+        text.pop_back();
+    }
+
+    if (text.empty())
+    {
+        return std::wstring();
+    }
+
+    // 被引号包着 → 取引号里面的内容
+    if (text.front() == L'"')
+    {
+        text.erase(text.begin());
+
+        size_t closing = text.find(L'"');
+        if (closing != std::wstring::npos)
+        {
+            text = text.substr(0, closing);
+        }
+    }
+
+    return text;
+}
+
 // ============================================================================
 // 程序入口
 // ============================================================================
 int WINAPI wWinMain(HINSTANCE hInstance,
                     HINSTANCE /*hPrevInstance*/,
-                    LPWSTR    /*lpCmdLine*/,
+                    LPWSTR    lpCmdLine,
                     int       /*nCmdShow*/)
 {
     // ---------- 步骤 1：日志 ----------
@@ -125,8 +173,15 @@ int WINAPI wWinMain(HINSTANCE hInstance,
 
     // ---------- 步骤 4：主窗口与消息循环 ----------
     {
+        // 命令行里带了目录就用它开机（「在新窗口中打开」就是这么传进来的）
+        const std::wstring startupPath = ExtractStartupPath(lpCmdLine);
+        if (!startupPath.empty())
+        {
+            Logger::Info(L"命令行参数：" + startupPath);
+        }
+
         MainWindow mainWindow;
-        if (mainWindow.Create(hInstance))
+        if (mainWindow.Create(hInstance, startupPath))
         {
             mainWindow.Show(SW_SHOW);
             exitCode = mainWindow.RunMessageLoop();

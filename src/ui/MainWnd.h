@@ -70,6 +70,7 @@ static const int kCommandGoUp      = 3108;   // Backspace
 // 右键菜单里的命令
 static const int kCommandOpen       = 3201;  // 打开
 static const int kCommandProperties = 3202;  // 属性
+static const int kCommandOpenInNewWindow = 3203;  // 在新窗口中打开
 
 // 「打开方式」子菜单里的命令
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
@@ -99,7 +100,7 @@ public:
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
-    bool Create(HINSTANCE hInstance);
+    bool Create(HINSTANCE hInstance, const std::wstring& initialPath = std::wstring());
     void Show(int nCmdShow);
     int  RunMessageLoop();
 
@@ -170,7 +171,42 @@ private:
                                 bool                             createShortcut);
 
     // ---- 右键菜单 ----
+    //
+    // 资源管理器的右键菜单不是一套，而是按"点到什么"重新组合的。
+    // 这里同样分场景构建，不同场景只出现该有的项：
+    //
+    //   Background     文件夹空白处：查看 / 粘贴 / 新建文件夹 / 新建 / 刷新 / 属性
+    //   SingleFile     单选一个文件：打开 / 打开方式 / 剪切 / 复制 / 删除 / 重命名 / 属性
+    //   SingleFolder   单选一个文件夹：打开 / 在新窗口中打开 / 剪切 / 复制 / 删除 / 重命名 / 属性
+    //   Multiple       选中多个：打开 / 剪切 / 复制 / 删除 / 属性
+    //   ShellItem      盘符、此电脑、控制面板这类：打开 / 在新窗口中打开 / 属性
+    //   None           组标题、分隔行：不弹菜单
+    enum class ContextScene
+    {
+        None,
+        Background,
+        SingleFile,
+        SingleFolder,
+        Multiple,
+        ShellItem,
+    };
+
     void ShowContextMenu(POINT screenPoint);
+
+    // 按场景拼菜单（都是零成本：只用已经加载在内存里的条目数据）
+    void BuildBackgroundMenu(HMENU menu);
+    void BuildSingleFileMenu(HMENU menu, const std::wstring& filePath);
+    void BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath);
+    void BuildMultipleMenu(HMENU menu);
+    void BuildShellItemMenu(HMENU menu, const std::wstring& itemPath);
+
+    // 查看 / 新建文件夹 + 新建 这两块公共片段
+    void FillViewMenu(HMENU parentMenu);
+    void FillNewFolderAndNewMenu(HMENU menu);
+
+    // 用另一个自身进程打开这个目录（「在新窗口中打开」）
+    void OpenFolderInNewWindow(const std::wstring& folderPath);
+
     void ShowPropertiesForSelection();
 
     // 「新建」菜单（二级菜单：文件夹 + 系统 ShellNew 里登记的各类新文件模板）
@@ -284,6 +320,10 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
 private:
     HWND      m_hWnd      = nullptr;
     HINSTANCE m_hInstance = nullptr;
+
+    // 启动时命令行指定的目录（「在新窗口中打开」用它开新窗口）。
+    // 空表示没指定，按上次停的目录启动。
+    std::wstring m_startupPath;
 
     // ---- 视图模式 ----
     // 当前列表视图（大图标/小图标/列表/详细信息）。
