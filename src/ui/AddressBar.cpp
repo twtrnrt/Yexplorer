@@ -92,17 +92,11 @@ AddressBar::~AddressBar()
 // ============================================================================
 void AddressBar::EnsureSeparatorBitmap()
 {
-    // 箭头的几何尺寸（100% DPI 下原尺寸：宽 2*3+2 = 8，高 2*5+2 = 12）
-    //
-    // zoom = 整体缩放：1.0 是原尺寸，0.9 = 缩小到现在的九成（用户嫌大了一点）。
-    // 想再调大小只改这一个数就行。
-    const double zoom = 0.9;
-
-    const int baseWidth  = Scale(3) * 2 + 2;
-    const int baseHeight = Scale(5) * 2 + 2;
-
-    const int width  = (std::max)(5, static_cast<int>(std::lround(baseWidth  * zoom)));
-    const int height = (std::max)(7, static_cast<int>(std::lround(baseHeight * zoom)));
+    // 箭头的目标尺寸（100% DPI 下的像素），实际按 DPI 放大。
+    // 现在是 6 x 11（早期是 8*12，先缩到 7*11，再把宽度收到 6，看起来更瘦一些）。
+    // 想再调形状只改这两个数就行。
+    const int width  = (std::max)(5, Scale(6));
+    const int height = (std::max)(7, Scale(11));
 
     if (m_separatorBitmap != nullptr &&
         m_separatorBmpWidth == width && m_separatorBmpHeight == height)
@@ -143,7 +137,7 @@ void AddressBar::EnsureSeparatorBitmap()
     const double upperY = 1.0;
     const double lowerY  = static_cast<double>(height - 2);
 
-    const double halfLineWidth = 0.55 * zoom;   // 线宽约 1.1 像素（同样按比例缩）
+    const double halfLineWidth = 0.5;   // 线宽约 1 像素
 
     // 直接按位取 COLORREF 的三通道（不用 GetXValue 宏：那些宏里有 (WORD) 强转，
     // 传常量颜色进去会触发"截断常量值"的编译警告）
