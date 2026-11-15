@@ -84,6 +84,12 @@ FileListView::~FileListView()
         ::DeleteObject(m_hFont);
         m_hFont = nullptr;
     }
+
+    if (m_hHeaderFont != nullptr)
+    {
+        ::DeleteObject(m_hHeaderFont);
+        m_hHeaderFont = nullptr;
+    }
 }
 
 // ============================================================================
@@ -141,6 +147,112 @@ void FileListView::SetIconCache(shell::IconCache* iconCache)
 
     // 把小图标图像列表挂到列表控件上
     ListView_SetImageList(m_hWnd, iconCache->ImageList(), LVSIL_SMALL);
+
+    // 大图标列表挂到 LVSIL_NORMAL 上（「大图标」视图用这张）
+    if (iconCache->ImageList(shell::IconCache::IconSize::Large) != nullptr)
+    {
+        ListView_SetImageList(m_hWnd,
+                              iconCache->ImageList(shell::IconCache::IconSize::Large),
+                              LVSIL_NORMAL);
+    }
+}
+
+// ============================================================================
+// 切换视图模式
+//
+// ListView 的四种视图只是样式位不同（LVS_TYPEMASK 那两位），
+// 换样式用 SetWindowLongPtr 改 GWL_STYLE —— 但控件只在创建时读一次，
+// 改完必须让它重新应用一次样式，所以这里配合 SetWindowPos 触发布局。
+// ============================================================================
+
+void FileListView::SetViewMode(ViewMode mode)
+{
+    if (m_hWnd == nullptr || mode == m_viewMode)
+    {
+        return;
+    }
+
+    m_viewMode = mode;
+
+    // 先算出新的样式位
+    DWORD viewStyle = LVS_REPORT;
+
+    switch (mode)
+    {
+    case ViewMode::LargeIcon: viewStyle = LVS_ICON;      break;
+    case ViewMode::Tiles:     viewStyle = LVS_ICON;      break;   // 平铺也用图标布局，只是格子画法不同
+    case ViewMode::SmallIcon: viewStyle = LVS_SMALLICON; break;
+    case ViewMode::List:      viewStyle = LVS_LIST;      break;
+    case ViewMode::Details:
+    default:                  viewStyle = LVS_REPORT;    break;
+    }
+
+    const LONG_PTR oldStyle = ::GetWindowLongPtrW(m_hWnd, GWL_STYLE);
+    const LONG_PTR newStyle = (oldStyle & ~static_cast<LONG_PTR>(LVS_TYPEMASK)) |
+                              static_cast<LONG_PTR>(viewStyle);
+    ::SetWindowLongPtrW(m_hWnd, GWL_STYLE, newStyle);
+
+    // 图标按视图换尺寸：大图标视图用 48px，其余用 16px。
+    // 控件在「大图标」视图里画的是 LVSIL_NORMAL 这张列表，
+    // 所以切到大图标时把大图列表挂到 NORMAL，切回来时把小图列表挂回 NORMAL，
+    // 避免控件拿 16px 图标去撑 48px 的格子（会糊）。
+    if (m_iconCache != nullptr)
+    {
+        const auto smallList = m_iconCache->ImageList(shell::IconCache::IconSize::Small);
+        const auto largeList = m_iconCache->ImageList(shell::IconCache::IconSize::Large);
+
+        if ((mode == ViewMode::LargeIcon || mode == ViewMode::Tiles) && largeList != nullptr)
+        {
+            ListView_SetImageList(m_hWnd, largeList, LVSIL_NORMAL);
+        }
+        else if (smallList != nullptr)
+        {
+            ListView_SetImageList(m_hWnd, smallList, LVSIL_NORMAL);
+        }
+
+        if (smallList != nullptr)
+        {
+            ListView_SetImageList(m_hWnd, smallList, LVSIL_SMALL);
+        }
+    }
+
+    // 大图标/小图标视图要指定格子大小，否则控件按默认 75x75 摆，
+    // 48px 图标会挤在一起、16px 图标会散得太开。
+    if (mode == ViewMode::LargeIcon)
+    {
+        // 宽 130：48px 图标下面能放下两行名字（系统大图标视图也是这样换行的）
+        // 高 100：图标 48 + 上下留白 + 两行文字
+        ListView_SetIconSpacing(m_hWnd, 130, 100);
+    }
+    else if (mode == ViewMode::Tiles)
+    {
+        // 平铺：每个磁盘是一块固定宽度的小卡片（和系统此电脑一样，一行并排几个），
+        // 卡片高 68。组标题那行由主窗口插入"占位格"把它顶成独占一行。
+        ListView_SetIconSpacing(m_hWnd, 300, 68);
+    }
+    else if (mode == ViewMode::SmallIcon)
+    {
+        ListView_SetIconSpacing(m_hWnd, 200, 24);   // 一行一个名字的宽度，行距 24
+    }
+
+    // 触发控件按新样式重排（不改尺寸，只让它重算布局）
+    RECT clientRect = {};
+    ::GetClientRect(m_hWnd, &clientRect);
+    ::SetWindowPos(m_hWnd, nullptr, 0, 0,
+                   clientRect.right - clientRect.left,
+                   clientRect.bottom - clientRect.top,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    // 虚拟列表换视图以后，控件内部还留着旧布局算好的项位置，
+    // 只 Invalidate 的话它按旧位置重画，看起来就是"没变、要鼠标划过去才一个个刷"。
+    // 重新报一次条目数，逼它丢弃缓存、按新样式重排，然后整窗立即重画一遍。
+    if (m_result != nullptr)
+    {
+        ListView_SetItemCount(m_hWnd, static_cast<int>(m_result->entries.size()));
+    }
+
+    ::RedrawWindow(m_hWnd, nullptr, nullptr,
+                   RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 // ============================================================================
@@ -160,6 +272,25 @@ void FileListView::ApplyFont()
     if (m_hFont == nullptr)
     {
         m_hFont = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+    }
+
+    // 分组标题行用的字体：和系统一样是"小一号的灰字"（不是粗体）
+    // 单独造一份，是为了不让正文的字号跟着变
+    if (m_hHeaderFont != nullptr)
+    {
+        ::DeleteObject(m_hHeaderFont);
+        m_hHeaderFont = nullptr;
+    }
+
+    NONCLIENTMETRICSW headerMetrics = {};
+    headerMetrics.cbSize = sizeof(headerMetrics);
+
+    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(headerMetrics), &headerMetrics, 0))
+    {
+        LOGFONTW logFont = headerMetrics.lfMessageFont;
+        logFont.lfHeight = logFont.lfHeight - 1;   // 比正文小一号
+        logFont.lfWeight = FW_NORMAL;
+        m_hHeaderFont    = ::CreateFontIndirectW(&logFont);
     }
 
     if (m_hFont != nullptr)
@@ -225,8 +356,221 @@ void FileListView::LayoutColumns()
 }
 
 // ============================================================================
+// 平铺视图（此电脑专用）
+//
+// 系统在「此电脑」里显示的是平铺：左边 48px 图标，右边磁盘名，
+// 磁盘名下面一行「97.7 GB 可用，共 234 GB」，再下面一条容量进度条。
+//
+// Windows 列表控件自己也有平铺视图（LVIF_TILEINFO），但它在虚拟模式
+// （LVS_OWNERDATA）下不生效，所以这里改成「大图标布局 + 自己把整格画出来」。
+// 控件只负责排队和命中，画什么由 DrawTile 全权决定。
+// ============================================================================
+
+namespace
+{
+    // 「97.7 GB 可用，共 234 GB」——和资源管理器一样的说法
+    std::wstring DiskSpaceText(uint64_t freeBytes, uint64_t totalBytes)
+    {
+        const double gb = 1024.0 * 1024.0 * 1024.0;
+
+        wchar_t buffer[128] = {};
+        ::swprintf_s(buffer,
+                     L"%.1f GB 可用，共 %.1f GB",
+                     static_cast<double>(freeBytes) / gb,
+                     static_cast<double>(totalBytes) / gb);
+        return buffer;
+    }
+}
+
+int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
+{
+    if (m_iconCache == nullptr)
+    {
+        return 0;
+    }
+
+    // 图标尺寸跟着视图走：大图标/平铺要 48px 那套索引，其余用 16px 那套
+    const auto iconSize = CurrentIconSize();
+    int        iconIndex = 0;
+
+    // 系统命名空间里的项（枚举时手里有它的绝对 PIDL）：直接按 PIDL 问图标。
+    // 这类项很多解析成字符串之后 Shell 就认不回来了（控制面板那种
+    // `::{GUID}\0\显示名`），按字符串取只会得到 0 —— 也就是"图标不显示"。
+    if (!entry.pidl.empty())
+    {
+        iconIndex = m_iconCache->GetIconIndexByPidl(entry.pidl, iconSize);
+    }
+
+    // 按 PIDL 没拿到（或本来就没有 PIDL）才走下面的兜底逻辑
+    if (iconIndex <= 0)
+    {
+        if (entry.isFolder)
+        {
+            // 驱动器 / 虚拟文件夹（此电脑里的各个盘、网络位置等）：
+            // 按路径问系统，才能显示硬盘、光驱、网络盘各自的图标；普通文件夹走统一图标
+            const bool isDriveLetter = entry.fullPath.size() >= 2 &&
+                                       entry.fullPath.size() <= 3 &&
+                                       entry.fullPath[1] == L':';
+            const bool isShellItem  = entry.fullPath.compare(0, 2, L"::") == 0;
+
+            if (isDriveLetter || isShellItem)
+            {
+                iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize);
+                if (iconIndex <= 0)
+                {
+                    iconIndex = m_iconCache->GetIconIndex(entry.name, true, iconSize);
+                }
+            }
+            else
+            {
+                iconIndex = m_iconCache->GetIconIndex(entry.name, true, iconSize);
+            }
+        }
+        else if (NeedsOwnIcon(entry.name))
+        {
+            iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize);
+            if (iconIndex <= 0)
+            {
+                // 读不出图标（被占用、权限不足等）时退回按扩展名
+                iconIndex = m_iconCache->GetIconIndex(entry.name, false, iconSize);
+            }
+        }
+        else
+        {
+            iconIndex = m_iconCache->GetIconIndex(entry.name, false, iconSize);
+        }
+    }
+
+    // 被剪切（Ctrl+X）的项目：图标换成半透明版本
+    if (IsCutPath(entry.fullPath))
+    {
+        iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex, iconSize);
+    }
+
+    return iconIndex;
+}
+
+void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool selected)
+{
+    if (m_result == nullptr || index >= m_result->entries.size())
+    {
+        return;
+    }
+
+    const shell::ShellEntry& entry = m_result->entries[index];
+
+    // ---- 整格背景（选中是系统高亮色，否则白底）----
+    const COLORREF backColor   = selected ? ::GetSysColor(COLOR_HIGHLIGHT)
+                                          : ::GetSysColor(COLOR_WINDOW);
+    const COLORREF nameColor   = selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT)
+                                          : ::GetSysColor(COLOR_WINDOWTEXT);
+    const COLORREF infoColor   = selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT)
+                                          : RGB(96, 96, 96);
+
+    HBRUSH backBrush = ::CreateSolidBrush(backColor);
+    if (backBrush != nullptr)
+    {
+        ::FillRect(dc, &tileRect, backBrush);
+        ::DeleteObject(backBrush);
+    }
+
+    // ---- 左边 48px 图标 ----
+    HIMAGELIST imageList = ListView_GetImageList(m_hWnd, LVSIL_NORMAL);
+    if (imageList != nullptr)
+    {
+        ::ImageList_Draw(imageList, IconIndexForEntry(entry), dc,
+                         tileRect.left + 4, tileRect.top + 9, ILD_TRANSPARENT);
+    }
+
+    const int textLeft = tileRect.left + 62;
+
+    ::SetBkMode(dc, TRANSPARENT);
+
+    HGDIOBJ oldFont = ::SelectObject(dc, m_hFont);
+
+    // ---- 第一行：名字 ----
+    RECT nameRect = { textLeft, tileRect.top + 8, tileRect.right - 6, tileRect.top + 28 };
+    ::SetTextColor(dc, nameColor);
+    ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
+                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    // ---- 第二行 + 进度条：只有查得到容量时才画（网络盘、空光驱没有）----
+    if (entry.diskTotal > 0)
+    {
+        RECT infoRect = { textLeft, tileRect.top + 29, tileRect.right - 6, tileRect.top + 49 };
+        ::SetTextColor(dc, infoColor);
+
+        const std::wstring info = DiskSpaceText(entry.diskFree, entry.diskTotal);
+        ::DrawTextW(dc, info.c_str(), -1, &infoRect,
+                    DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        // 进度条：轨道浅灰，已用部分蓝（快满了变红，跟系统一样）
+        const int barLeft   = textLeft;
+        const int barTop    = tileRect.top + 52;
+        const int barHeight = 9;
+
+        int barWidth = tileRect.right - 10 - barLeft;
+        if (barWidth > 220)
+        {
+            barWidth = 220;   // 太宽的格子里进度条也别拉太长，跟系统比例接近
+        }
+
+        if (barWidth > 24)
+        {
+            RECT trackRect = { barLeft, barTop, barLeft + barWidth, barTop + barHeight };
+
+            HBRUSH trackBrush = ::CreateSolidBrush(RGB(229, 229, 229));
+            if (trackBrush != nullptr)
+            {
+                ::FillRect(dc, &trackRect, trackBrush);
+                ::DeleteObject(trackBrush);
+            }
+
+            // 已用比例 = 1 - 可用/总量
+            double usedRatio = 1.0 - (static_cast<double>(entry.diskFree) /
+                                      static_cast<double>(entry.diskTotal));
+            if (usedRatio < 0.0) { usedRatio = 0.0; }
+            if (usedRatio > 1.0) { usedRatio = 1.0; }
+
+            const int usedWidth = static_cast<int>(barWidth * usedRatio);
+
+            if (usedWidth > 0)
+            {
+                RECT usedRect = { barLeft, barTop, barLeft + usedWidth, barTop + barHeight };
+
+                const COLORREF usedColor = (usedRatio >= 0.9) ? RGB(209, 52, 56)
+                                                              : RGB(38, 120, 214);
+
+                HBRUSH usedBrush = ::CreateSolidBrush(usedColor);
+                if (usedBrush != nullptr)
+                {
+                    ::FillRect(dc, &usedRect, usedBrush);
+                    ::DeleteObject(usedBrush);
+                }
+            }
+
+            // 1px 灰边框，让它看起来像系统的那条
+            HPEN borderPen = ::CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+            if (borderPen != nullptr)
+            {
+                HGDIOBJ oldPen   = ::SelectObject(dc, borderPen);
+                HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+                ::Rectangle(dc, trackRect.left, trackRect.top, trackRect.right, trackRect.bottom);
+                ::SelectObject(dc, oldBrush);
+                ::SelectObject(dc, oldPen);
+                ::DeleteObject(borderPen);
+            }
+        }
+    }
+
+    ::SelectObject(dc, oldFont);
+}
+
+// ============================================================================
 // 布局与数据
 // ============================================================================
+
+
 
 void FileListView::Resize(int x, int y, int width, int height)
 {
@@ -239,6 +583,8 @@ void FileListView::Resize(int x, int y, int width, int height)
                    SWP_NOZORDER | SWP_NOACTIVATE);
 
     LayoutColumns();
+
+    // 平铺视图下格子宽度是固定的 300，这里不用跟着窗口改
 }
 
 void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
@@ -831,65 +1177,41 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
         const shell::ShellEntry& entry = m_result->entries[index];
 
+        // ---- 占位格（平铺视图里用来把组标题顶成独占一行的空档）----
+        // 什么都不给：没有名字、没有图标，就是一块空白
+        if (entry.isSpacer)
+        {
+            if ((displayInfo->item.mask & LVIF_IMAGE) != 0)
+            {
+                displayInfo->item.iImage = I_IMAGENONE;
+            }
+            if ((displayInfo->item.mask & LVIF_TEXT) != 0)
+            {
+                displayInfo->item.pszText = const_cast<wchar_t*>(L"");
+            }
+            return 0;
+        }
+
+        // ---- 分组标题行（如「此电脑」里的「设备和驱动器」）----
+        // 这种行只有名字，不要图标、不要日期/类型/大小
+        if (entry.isGroupHeader)
+        {
+            if ((displayInfo->item.mask & LVIF_IMAGE) != 0)
+            {
+                displayInfo->item.iImage = I_IMAGENONE;   // 不画图标，名字从最左边开始
+            }
+
+            if ((displayInfo->item.mask & LVIF_TEXT) != 0 && displayInfo->item.iSubItem == 0)
+            {
+                displayInfo->item.pszText = const_cast<wchar_t*>(entry.name.c_str());
+            }
+            return 0;
+        }
+
         // ---- 图标（只对整行生效，与具体列无关）----
         if ((displayInfo->item.mask & LVIF_IMAGE) != 0)
         {
-            if (m_iconCache != nullptr)
-            {
-                // 文件夹：走统一的文件夹图标（最快）
-                // exe / 快捷方式这类：必须按完整路径问系统，才能拿到它自己的图标
-                // 其余文件：按扩展名走高速缓存
-                int iconIndex = 0;
-
-                if (entry.isFolder)
-                {
-                    // 驱动器 / 虚拟文件夹（「此电脑」里的各个盘、网络位置等）：
-                    // 按路径问系统，才能显示硬盘、光驱、网络盘各自的图标；
-                    // 普通文件夹走统一图标（最快）。
-                    const bool isDriveLetter = entry.fullPath.size() >= 2 &&
-                                               entry.fullPath.size() <= 3 &&
-                                               entry.fullPath[1] == L':';
-                    const bool isShellItem  = entry.fullPath.compare(0, 2, L"::") == 0;
-
-                    if (isDriveLetter || isShellItem)
-                    {
-                        iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath);
-                        if (iconIndex <= 0)
-                        {
-                            iconIndex = m_iconCache->GetIconIndex(entry.name, true);
-                        }
-                    }
-                    else
-                    {
-                        iconIndex = m_iconCache->GetIconIndex(entry.name, true);
-                    }
-                }
-                else if (NeedsOwnIcon(entry.name))
-                {
-                    iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath);
-                    if (iconIndex <= 0)
-                    {
-                        // 万一这个文件读不出图标（被占用、权限不足等），退回按扩展名
-                        iconIndex = m_iconCache->GetIconIndex(entry.name, false);
-                    }
-                }
-                else
-                {
-                    iconIndex = m_iconCache->GetIconIndex(entry.name, false);
-                }
-
-                // 被剪切（Ctrl+X）的项目：图标换成半透明版本，和资源管理器一样"变淡"
-                if (IsCutPath(entry.fullPath))
-                {
-                    iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex);
-                }
-
-                displayInfo->item.iImage = iconIndex;
-            }
-            else
-            {
-                displayInfo->item.iImage = 0;
-            }
+            displayInfo->item.iImage = IconIndexForEntry(entry);
         }
 
         // ---- 文本 ----
@@ -1000,6 +1322,72 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
             size_t index = static_cast<size_t>(customDraw->nmcd.dwItemSpec);
 
+            // ---- 占位格：就是一块空白，什么都不画（挡住控件默认的背景）----
+            if (m_result != nullptr && index < m_result->entries.size() &&
+                m_result->entries[index].isSpacer)
+            {
+                RECT spacerRect = {};
+                if (ListView_GetItemRect(m_hWnd, static_cast<int>(index), &spacerRect, LVIR_BOUNDS))
+                {
+                    ::FillRect(customDraw->nmcd.hdc, &spacerRect,
+                               ::GetSysColorBrush(COLOR_WINDOW));
+                }
+                return CDRF_SKIPDEFAULT;
+            }
+
+            // ---- 分组标题行：整行自己画 ----
+            // 样子对齐系统：白底、深灰粗体字、左边缩进一点点、没有选中效果、没有图标
+            if (m_result != nullptr && index < m_result->entries.size() &&
+                m_result->entries[index].isGroupHeader)
+            {
+                RECT rowRect = {};
+                if (ListView_GetItemRect(m_hWnd, static_cast<int>(index), &rowRect, LVIR_BOUNDS))
+                {
+                    // 平铺视图里一格只有 300 宽，但标题要像系统那样铺满一整行，
+                    // 所以右边一直画到列表右边缘（后面的占位格也是白的，看不出接缝）
+                    RECT clientRect = {};
+                    ::GetClientRect(m_hWnd, &clientRect);
+                    rowRect.right = clientRect.right;
+
+                    ::FillRect(customDraw->nmcd.hdc, &rowRect, ::GetSysColorBrush(COLOR_WINDOW));
+
+                    HGDIOBJ oldFont  = ::SelectObject(customDraw->nmcd.hdc,
+                                                      (m_hHeaderFont != nullptr) ? m_hHeaderFont : m_hFont);
+                    int     oldMode  = ::SetBkMode(customDraw->nmcd.hdc, TRANSPARENT);
+                    COLORREF oldColor = ::SetTextColor(customDraw->nmcd.hdc, RGB(96, 96, 96));
+
+                    rowRect.left += 6;   // 左边留一点缩进，看起来像小标题
+
+                    ::DrawTextW(customDraw->nmcd.hdc,
+                                m_result->entries[index].name.c_str(), -1,
+                                &rowRect,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                    ::SetTextColor(customDraw->nmcd.hdc, oldColor);
+                    ::SetBkMode(customDraw->nmcd.hdc, oldMode);
+                    ::SelectObject(customDraw->nmcd.hdc, oldFont);
+                }
+
+                return CDRF_SKIPDEFAULT;   // 这一行已经画完了，别再让控件画
+            }
+
+            // ---- 平铺视图：每个格子整块自己画（图标 + 名称 + 容量 + 进度条）----
+            if (m_viewMode == ViewMode::Tiles)
+            {
+                RECT tileRect = {};
+                if (ListView_GetItemRect(m_hWnd, static_cast<int>(index), &tileRect, LVIR_BOUNDS))
+                {
+                    // 选中状态必须问控件（owner-data 下 uItemState 里的位不可靠，
+                    // 之前直接读 CDIS_SELECTED 导致每格都被当成"选中"的画成蓝底）
+                    const bool selected =
+                        (ListView_GetItemState(m_hWnd, static_cast<int>(index), LVIS_SELECTED) &
+                         LVIS_SELECTED) != 0;
+
+                    DrawTile(customDraw->nmcd.hdc, tileRect, index, selected);
+                }
+                return CDRF_SKIPDEFAULT;
+            }
+
             if (m_result != nullptr && index < m_result->entries.size() &&
                 IsCutPath(m_result->entries[index].fullPath))
             {
@@ -1014,6 +1402,38 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             break;
         }
         return CDRF_DODEFAULT;
+    }
+
+    // --------------------------------------------------------------
+    // 选中状态即将改变：分组标题行不许选中
+    //
+    // 返回 TRUE 就是"拒绝这次改变"，控件会把这一行保持原样。
+    // 这样单击它、Ctrl+A 全选都选不上它，和系统的组标题行为一致。
+    // --------------------------------------------------------------
+    case LVN_ITEMCHANGING:
+    {
+        const NMLISTVIEW* changeInfo = reinterpret_cast<const NMLISTVIEW*>(lParam);
+
+        if (m_result != nullptr &&
+            changeInfo->iItem >= 0 &&
+            static_cast<size_t>(changeInfo->iItem) < m_result->entries.size() &&
+            m_result->entries[static_cast<size_t>(changeInfo->iItem)].isGroupHeader &&
+            (changeInfo->uNewState & LVIS_SELECTED) != 0)
+        {
+            return TRUE;
+        }
+
+        // 占位格同样不许选中（否则 Ctrl+A 会选中一片空白，看着像 bug）
+        if (m_result != nullptr &&
+            changeInfo->iItem >= 0 &&
+            static_cast<size_t>(changeInfo->iItem) < m_result->entries.size() &&
+            m_result->entries[static_cast<size_t>(changeInfo->iItem)].isSpacer &&
+            (changeInfo->uNewState & LVIS_SELECTED) != 0)
+        {
+            return TRUE;
+        }
+
+        return FALSE;
     }
 
     // --------------------------------------------------------------
@@ -1038,9 +1458,11 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         NMLVDISPINFOW* info = reinterpret_cast<NMLVDISPINFOW*>(lParam);
 
         int index = info->item.iItem;
-        if (m_result == nullptr || index < 0 || index >= static_cast<int>(m_result->entries.size()))
+        if (m_result == nullptr || index < 0 || index >= static_cast<int>(m_result->entries.size()) ||
+            m_result->entries[static_cast<size_t>(index)].isGroupHeader ||
+            m_result->entries[static_cast<size_t>(index)].isSpacer)
         {
-            return TRUE;   // 返回真 = 不允许编辑
+            return TRUE;   // 返回真 = 不允许编辑（分组标题、占位格都不能改名）
         }
 
         info->item.mask |= LVIF_TEXT;

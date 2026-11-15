@@ -36,6 +36,31 @@
 class FileListView
 {
 public:
+    // ------------------------------------------------------------------
+    // 视图模式（对应资源管理器「查看」菜单里的四项）
+    //
+    //   LargeIcon —— 大图标（48px 图标 + 名字在下面，横向铺开）
+    //   SmallIcon —— 小图标（16px 图标 + 名字在右边，纵向多列）
+    //   List     —— 列表（16px 图标 + 名字，单列从上往下）
+    //   Details  —— 详细信息（带列头，名称/日期/类型/大小）
+    //   Tiles    —— 平铺（48px 图标 + 右侧名称和容量文字 + 容量进度条）
+    //
+    // 前四个都是同一个 ListView 控件换样式（LVS_ICON / LVS_SMALLICON / LVS_LIST / LVS_REPORT），
+    // 虚拟模式 LVS_OWNERDATA 在任何视图下都成立，所以十万级条目照样不卡。
+    //
+    // Tiles（平铺）是「此电脑」专用的：系统在列表控件的平铺视图里能画容量进度条，
+    // 但那种平铺（LVIF_TILEINFO）在虚拟模式（LVS_OWNERDATA）下不生效，
+    // 所以这里用「大图标布局 + 自己把每个格子整块画出来」来实现，效果一样。
+    // ------------------------------------------------------------------
+    enum class ViewMode
+    {
+        LargeIcon,
+        SmallIcon,
+        List,
+        Details,
+        Tiles
+    };
+
     using ActivateCallback    = std::function<void(size_t index)>;
     using ContextMenuCallback = std::function<void(POINT screenPoint)>;
     using ColumnClickCallback = std::function<void(int column)>;
@@ -57,6 +82,15 @@ public:
 
     // 设置图标缓存（必须在 SetResult 之前设置，否则列表没有图标）
     void SetIconCache(shell::IconCache* iconCache);
+
+    // ------------------------------------------------------------------
+    // 切换视图模式（对应「查看」菜单）
+    //
+    // 换了视图要重挂图像列表：大图标视图用 48px 那张，其余用 16px 那张，
+    // 否则图标会被控件拉伸出马赛克。
+    // ------------------------------------------------------------------
+    void SetViewMode(ViewMode mode);
+    ViewMode CurrentViewMode() const { return m_viewMode; }
 
     void Resize(int x, int y, int width, int height);
 
@@ -140,6 +174,20 @@ private:
     void LayoutColumns();
     void ApplyFont();
 
+    // 按当前视图决定这项该用小图标还是大图标索引
+    shell::IconCache::IconSize CurrentIconSize() const
+    {
+        return (m_viewMode == ViewMode::LargeIcon || m_viewMode == ViewMode::Tiles)
+                   ? shell::IconCache::IconSize::Large
+                   : shell::IconCache::IconSize::Small;
+    }
+
+    // 算某一项该用哪个图标索引（绘图和回调共用一套逻辑）
+    int IconIndexForEntry(const shell::ShellEntry& entry) const;
+
+    // 平铺视图：把一个格子（图标 + 名称 + 容量 + 进度条）整块画出来
+    void DrawTile(HDC dc, const RECT& tileRect, size_t index, bool selected);
+
     // 在表头上去掉所有排序箭头
     void ClearSortArrows();
 
@@ -160,6 +208,7 @@ private:
     DragCompletedCallback                         m_onDragCompleted;
     Comparator                                    m_comparator;
     HFONT                                         m_hFont     = nullptr;
+    HFONT                                         m_hHeaderFont = nullptr;   // 分组标题用的粗体字
 
     // 图标缓存不归本控件所有（由主窗口持有并保证生命周期），这里只借指针
     shell::IconCache*                             m_iconCache = nullptr;
@@ -177,4 +226,7 @@ private:
 
     // 是否正在原地改名（LVN_BEGINLABELEDIT 到 LVN_ENDLABELEDIT 之间）
     bool                      m_editingLabel = false;
+
+    // 当前视图模式（默认详细信息，和资源管理器打开普通文件夹时一致）
+    ViewMode                  m_viewMode = ViewMode::Details;
 };

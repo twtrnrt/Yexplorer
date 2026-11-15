@@ -30,6 +30,7 @@
 #include <vector>
 #include <atomic>
 #include <functional>
+#include <map>
 
 #include "core/AsyncTask.h"
 #include "core/FolderWatcher.h"
@@ -64,6 +65,13 @@ static const int kCommandGoUp      = 3108;   // Backspace
 static const int kCommandOpen       = 3201;  // 打开
 static const int kCommandProperties = 3202;  // 属性
 
+// 右键菜单「查看」子菜单（和资源管理器一样，几种视图里挑一个）
+static const int kCommandViewLarge   = 3301;  // 大图标
+static const int kCommandViewSmall   = 3302;  // 小图标
+static const int kCommandViewList    = 3303;  // 列表
+static const int kCommandViewDetails = 3304;  // 详细信息
+static const int kCommandViewTiles   = 3305;  // 平铺（此电脑那种带容量进度条的）
+
 // 重命名快捷键
 static const int kCommandRename     = 3109;  // F2
 
@@ -91,6 +99,30 @@ private:
 
     // 用户主动导航（会记入历史）
     void NavigateToPath(const std::wstring& path);
+
+    // ----------------------------------------------------------------
+    // 导航来源（决定"地址栏上写什么名字"和"向上按钮去哪儿"）
+    //
+    // 从「主文件夹」双击「文档」进去以后：
+    //   地址栏显示「文档」，而不是 C:\Users\kf168\Documents；
+    //   向上按钮回「主文件夹」，而不是它的真实父目录 C:\Users\kf168。
+    // 这就是系统资源管理器的表现——它记住的是"从哪儿点进来的"。
+    // 所以我们给每个"从列表里双击进去的目录"记一条来源。
+    // ----------------------------------------------------------------
+    struct NavigationOrigin
+    {
+        std::wstring displayName;   // 地址栏/标题上显示的名字（如「文档」）
+        std::wstring parentPath;    // 向上按钮要去的地方（如「主文件夹」）
+    };
+
+    // parentPath 留空表示"上一级就是进来之前待着的那个目录"（列表双击走这条）；
+    // 传了具体路径就用它（左栏"常用位置"那几项固定回「主文件夹」）。
+    void RecordNavigationOrigin(const std::wstring& path,
+                                const std::wstring& displayName,
+                                const std::wstring& parentPath = L"");
+
+    // 当前目录给人看的名字：有来源记录就用记录的名字，否则按路径推导
+    std::wstring DisplayNameFor(const std::wstring& path);
 
     // 后退 / 前进 / 向上
     void GoBack();
@@ -173,9 +205,25 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     void UpdateNavigationState();
     void UpdateStatusBar();
 
+    // 当前目录里「真正有多少项」——分组标题行不算（标题、状态栏都按它显示）
+    size_t RealItemCount();
+
+    // 切换视图模式（modeIsUserChoice 为真表示是用户从菜单选的，之后不再自动改）
+    void ApplyViewMode(FileListView::ViewMode mode, bool modeIsUserChoice);
+
+    // 按"当前目录是什么类型"给出该用的默认视图
+    FileListView::ViewMode DefaultViewModeForCurrentPath() const;
+
 private:
     HWND      m_hWnd      = nullptr;
     HINSTANCE m_hInstance = nullptr;
+
+    // ---- 视图模式 ----
+    // 当前列表视图（大图标/小图标/列表/详细信息）。
+    // 进入新目录时按"这个目录该用哪种视图"重新定一次（系统文件夹默认小图标，
+    // 普通磁盘目录默认详细信息），用户从「查看」菜单手动选过之后就一直用他选的。
+    FileListView::ViewMode m_viewMode        = FileListView::ViewMode::Details;
+    bool                   m_viewModeManual  = false;   // 用户是否手动指定过视图
 
     // ---- 子控件 ----
     FileListView m_fileListView;
@@ -204,6 +252,11 @@ private:
     // ---- 数据 ----
     shell::IconCache   m_iconCache;
     NavigationHistory  m_history;
+
+    // 导航来源表：key 是小写路径，value 是"从哪儿进来的、叫什么名字"。
+    // 见上面 NavigationOrigin 的说明。只在列表里双击进入时写入，
+    // 后退/前进/地址栏跳转都沿用它，所以来回切也还是显示「文档」。
+    std::map<std::wstring, NavigationOrigin> m_navOrigins;
 
     // ---- 后台枚举状态 ----
     std::thread                                  m_enumThread;

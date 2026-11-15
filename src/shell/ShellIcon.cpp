@@ -23,7 +23,7 @@ namespace
 //       只按传入的文件名（扩展名）和属性去图标表里匹配。
 //       这是最快的方式，一次几微秒。
 // ----------------------------------------------------------------------------
-int QueryIconIndexByExtension(const std::wstring& extension)
+int QueryIconIndexByExtension(const std::wstring& extension, bool large)
 {
     // 构造一个假文件名，例如 ".dll" → "file.dll"
     std::wstring fakeName = L"file";
@@ -35,7 +35,7 @@ int QueryIconIndexByExtension(const std::wstring& extension)
         FILE_ATTRIBUTE_NORMAL,
         &fileInfo,
         sizeof(fileInfo),
-        SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+        SHGFI_SYSICONINDEX | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON) | SHGFI_USEFILEATTRIBUTES);
 
     if (result == 0)
     {
@@ -53,7 +53,7 @@ int QueryIconIndexByExtension(const std::wstring& extension)
 //   正确做法是传一个普通名字（如 "folder"）：配合 SHGFI_USEFILEATTRIBUTES，
 //   系统不会去访问它，只按「这是一个目录」来给图标 —— 得到的就是标准黄色文件夹。
 // ----------------------------------------------------------------------------
-int QueryFolderIconIndex()
+int QueryFolderIconIndex(bool large)
 {
     SHFILEINFOW fileInfo = {};
     DWORD_PTR result = ::SHGetFileInfoW(
@@ -61,7 +61,7 @@ int QueryFolderIconIndex()
         FILE_ATTRIBUTE_DIRECTORY,
         &fileInfo,
         sizeof(fileInfo),
-        SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+        SHGFI_SYSICONINDEX | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON) | SHGFI_USEFILEATTRIBUTES);
 
     if (result == 0)
     {
@@ -79,8 +79,9 @@ IconCache::IconCache() = default;
 
 IconCache::~IconCache()
 {
-    // m_systemImageList 由 wil::com_ptr 自动释放
-    m_hImageList = nullptr;
+    // m_systemImageList / m_largeSystemImageList 由 wil::com_ptr 自动释放
+    m_hImageList      = nullptr;
+    m_hLargeImageList = nullptr;
 }
 
 bool IconCache::Initialize()
@@ -90,7 +91,8 @@ bool IconCache::Initialize()
         return true;
     }
 
-    // SHIL_SMALL：系统小图标列表（列表视图用这个尺寸）
+    // SHIL_SMALL     ：系统小图标列表（16px，列表/详细信息视图用这个）
+    // SHIL_EXTRALARGE：系统大图标列表（48px，「大图标」视图用这个）
     // 直接把 IImageList 当 HIMAGELIST 用是官方支持的用法
     HRESULT hr = ::SHGetImageList(SHIL_SMALL, IID_PPV_ARGS(m_systemImageList.put()));
     if (FAILED(hr))
@@ -100,8 +102,15 @@ bool IconCache::Initialize()
 
     m_hImageList = reinterpret_cast<HIMAGELIST>(m_systemImageList.get());
 
+    // 大图标列表拿不到不算失败：界面照样能用，只是「大图标」视图会没有图标
+    if (SUCCEEDED(::SHGetImageList(SHIL_EXTRALARGE, IID_PPV_ARGS(m_largeSystemImageList.put()))))
+    {
+        m_hLargeImageList = reinterpret_cast<HIMAGELIST>(m_largeSystemImageList.get());
+    }
+
     // 文件夹图标只查一次，之后所有文件夹共用
-    m_folderIconIndex = QueryFolderIconIndex();
+    m_folderIconIndex      = QueryFolderIconIndex(false);
+    m_largeFolderIconIndex = QueryFolderIconIndex(true);
 
     m_initialized = true;
     return true;
@@ -123,39 +132,44 @@ std::wstring IconCache::ExtractExtension(const std::wstring& name)
     return extension;
 }
 
-int IconCache::GetIconIndex(const std::wstring& name, bool isFolder)
+int IconCache::GetIconIndex(const std::wstring& name, bool isFolder, IconSize size)
 {
     if (!m_initialized)
     {
         return 0;
     }
 
+    const bool large = (size == IconSize::Large);
+
     // 文件夹：统一图标，零查询
     if (isFolder)
     {
-        return m_folderIconIndex;
+        return large ? m_largeFolderIconIndex : m_folderIconIndex;
     }
 
-    // 文件：按扩展名查缓存
+    // 文件：按扩展名查缓存（大小图标各一套缓存，不能混用）
     std::wstring extension = ExtractExtension(name);
+    auto&        cache     = large ? m_largeExtensionIconCache : m_extensionIconCache;
 
-    auto iterator = m_extensionIconCache.find(extension);
-    if (iterator != m_extensionIconCache.end())
+    auto iterator = cache.find(extension);
+    if (iterator != cache.end())
     {
         return iterator->second;
     }
 
-    int iconIndex = QueryIconIndexByExtension(extension);
-    m_extensionIconCache[extension] = iconIndex;
+    int iconIndex = QueryIconIndexByExtension(extension, large);
+    cache[extension] = iconIndex;
     return iconIndex;
 }
 
-int IconCache::GetIconIndexByPath(const std::wstring& path)
+int IconCache::GetIconIndexByPath(const std::wstring& path, IconSize size)
 {
     if (!m_initialized || path.empty())
     {
         return 0;
     }
+
+    const bool large = (size == IconSize::Large);
 
     SHFILEINFOW fileInfo = {};
     DWORD_PTR result = ::SHGetFileInfoW(
@@ -163,11 +177,11 @@ int IconCache::GetIconIndexByPath(const std::wstring& path)
         FILE_ATTRIBUTE_DIRECTORY,
         &fileInfo,
         sizeof(fileInfo),
-        SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        SHGFI_SYSICONINDEX | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON));
 
     if (result == 0)
     {
-        return m_folderIconIndex;
+        return large ? m_largeFolderIconIndex : m_folderIconIndex;
     }
     return fileInfo.iIcon;
 }
@@ -181,12 +195,14 @@ int IconCache::GetIconIndexByPath(const std::wstring& path)
 // 结果按路径缓存，同一个文件只问一次。
 // ============================================================================
 
-int IconCache::GetIconIndexByFullPath(const std::wstring& path)
+int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size)
 {
     if (!m_initialized || path.empty())
     {
         return 0;
     }
+
+    const bool large = (size == IconSize::Large);
 
     // 「C:」这种光秃秃的盘符要补成「C:\」：不补的话系统会把它当成"当前目录"，
     // 取回来的不是驱动器图标
@@ -196,13 +212,16 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path)
         normalized += L'\\';
     }
 
-    auto cached = m_pathIconCache.find(normalized);
-    if (cached != m_pathIconCache.end())
+    auto& cache = large ? m_largePathIconCache : m_pathIconCache;
+
+    auto cached = cache.find(normalized);
+    if (cached != cache.end())
     {
         return cached->second;
     }
 
     int iconIndex = 0;
+    const DWORD sizeFlag = large ? SHGFI_LARGEICON : SHGFI_SMALLICON;
 
     // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」这种解析名）
     // 千万不能直接把字符串丢给 SHGetFileInfo：实测它一律返回 0，
@@ -223,7 +242,7 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path)
                 0,
                 &fileInfo,
                 sizeof(fileInfo),
-                SHGFI_PIDL | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+                SHGFI_PIDL | SHGFI_SYSICONINDEX | sizeFlag);
 
             if (result != 0)
             {
@@ -240,7 +259,7 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path)
             0,                                   // 0：让系统自己去取真实属性
             &fileInfo,
             sizeof(fileInfo),
-            SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+            SHGFI_SYSICONINDEX | sizeFlag);
 
         // 取不到就给 0（列表会显示系统默认文件图标），不要太在意
         if (result != 0)
@@ -249,8 +268,35 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path)
         }
     }
 
-    m_pathIconCache[normalized] = iconIndex;
+    cache[normalized] = iconIndex;
     return iconIndex;
+}
+
+// ============================================================================
+// 按绝对 PIDL 取图标（控制面板那类「字符串解析不回来」的项专用）
+// ============================================================================
+
+int IconCache::GetIconIndexByPidl(const std::vector<unsigned char>& pidl, IconSize size)
+{
+    if (!m_initialized || pidl.empty())
+    {
+        return 0;
+    }
+
+    const bool  large    = (size == IconSize::Large);
+    const DWORD sizeFlag = large ? SHGFI_LARGEICON : SHGFI_SMALLICON;
+
+    SHFILEINFOW fileInfo = {};
+
+    // pidl 的字节就是绝对 PIDL 本身，SHGetFileInfo 收的就是这根指针
+    DWORD_PTR result = ::SHGetFileInfoW(
+        reinterpret_cast<LPCWSTR>(pidl.data()),
+        0,
+        &fileInfo,
+        sizeof(fileInfo),
+        SHGFI_PIDL | SHGFI_SYSICONINDEX | sizeFlag);
+
+    return (result != 0) ? fileInfo.iIcon : 0;
 }
 
 // ============================================================================
@@ -337,26 +383,34 @@ HICON IconCache::CreateDimmedIcon(HICON source, int size)
     return result;
 }
 
-int IconCache::GetDimmedIconIndex(int originalIndex)
+int IconCache::GetDimmedIconIndex(int originalIndex, IconSize size)
 {
-    if (!m_initialized || m_systemImageList == nullptr || originalIndex < 0)
+    const bool large = (size == IconSize::Large);
+
+    // 大图标列表没拿到时，不能往空句柄里加图标，直接原样返回
+    HIMAGELIST     targetList  = large ? m_hLargeImageList : m_hImageList;
+    IImageList*    sourceList  = large ? m_largeSystemImageList.get() : m_systemImageList.get();
+    auto&          dimmedCache = large ? m_largeDimmedIconCache : m_dimmedIconCache;
+
+    if (!m_initialized || targetList == nullptr || sourceList == nullptr || originalIndex < 0)
     {
         return originalIndex;
     }
 
-    auto cached = m_dimmedIconCache.find(originalIndex);
-    if (cached != m_dimmedIconCache.end())
+    auto cached = dimmedCache.find(originalIndex);
+    if (cached != dimmedCache.end())
     {
         return cached->second;
     }
 
-    int sizeX = 16;
-    int sizeY = 16;
-    ::ImageList_GetIconSize(m_hImageList, &sizeX, &sizeY);
+    int sizeX = large ? 48 : 16;
+    int sizeY = sizeX;
+    ::ImageList_GetIconSize(targetList, &sizeX, &sizeY);
 
     HICON original = nullptr;
-    if (FAILED(m_systemImageList->GetIcon(originalIndex, ILD_TRANSPARENT, &original)) ||
-        original == nullptr)
+    sourceList->GetIcon(originalIndex, ILD_TRANSPARENT, &original);
+
+    if (original == nullptr)
     {
         return originalIndex;
     }
@@ -373,7 +427,7 @@ int IconCache::GetDimmedIconIndex(int originalIndex)
     // ImageList_ReplaceIcon 传 -1 表示"不替换，直接加一个"，
     // 返回新图标的索引；失败返回 -1。
     // （IImageList::Add 只收位图不收图标，所以这里用 comctl32 的 C 接口）
-    int newIndex = ::ImageList_ReplaceIcon(m_hImageList, -1, dimmed);
+    int newIndex = ::ImageList_ReplaceIcon(targetList, -1, dimmed);
     ::DestroyIcon(dimmed);
 
     if (newIndex < 0)
@@ -381,7 +435,7 @@ int IconCache::GetDimmedIconIndex(int originalIndex)
         return originalIndex;
     }
 
-    m_dimmedIconCache[originalIndex] = newIndex;
+    dimmedCache[originalIndex] = newIndex;
     return newIndex;
 }
 

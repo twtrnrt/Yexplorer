@@ -152,8 +152,11 @@ void AddressBar::SetPath(const std::wstring& path)
 {
     m_path = path;
 
-    // 普通磁盘路径：清掉虚拟文件夹的显示名，避免串味
-    if (m_path.compare(0, 2, L"::") != 0 && m_path.compare(0, 6, L"shell:") != 0)
+    // 普通磁盘路径：清掉虚拟文件夹的显示名，避免串味。
+    // 例外是"整条显示 label"模式（从主文件夹点进文档这种）：
+    // 那种情况本来就是「真实路径 + 一个给人看的名字」，名字不能清掉。
+    if (!m_wholeLabel &&
+        m_path.compare(0, 2, L"::") != 0 && m_path.compare(0, 6, L"shell:") != 0)
     {
         m_label.clear();
     }
@@ -171,9 +174,12 @@ void AddressBar::SetPath(const std::wstring& path)
     }
 }
 
-void AddressBar::SetPathWithLabel(const std::wstring& path, const std::wstring& label)
+void AddressBar::SetPathWithLabel(const std::wstring& path,
+                                  const std::wstring& label,
+                                  bool              wholeLabel)
 {
-    m_label = label;
+    m_label      = label;
+    m_wholeLabel = wholeLabel;
     SetPath(path);
 }
 
@@ -190,8 +196,11 @@ void AddressBar::RebuildSegments()
 
     // 虚拟文件夹（「此电脑」这类）：路径是 ::{GUID}，没法切段，
     // 整条显示系统给的名字，点它就是回它自己
+    //
+    // 另一种是"整条显示 label"模式（m_wholeLabel）：从「主文件夹」双击进去的
+    // 系统目录（文档、图片、下载…），地址栏就显示「文档」，不切路径。
     if (!m_label.empty() &&
-        (p.compare(0, 2, L"::") == 0 || p.compare(0, 6, L"shell:") == 0))
+        (m_wholeLabel || p.compare(0, 2, L"::") == 0 || p.compare(0, 6, L"shell:") == 0))
     {
         Segment segment;
         segment.text     = m_label;

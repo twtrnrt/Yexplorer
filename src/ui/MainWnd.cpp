@@ -18,9 +18,12 @@
 
 #include <shellapi.h>   // ShellExecuteW
 #include <shlobj.h>     // SHCreateItemFromParsingName / SHGetKnownFolderPath
+#include <shlwapi.h>    // StrCmpLogicalW（资源管理器同款的本地化自然排序）
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
+
+#pragma comment(lib, "shlwapi.lib")
 
 #include "../res/resource.h"   // IDI_APPICON 等资源 ID
 
@@ -63,10 +66,11 @@ static const size_t kMaxLogItems = 100;
 //   这里问系统要它的显示名（「此电脑」「回收站」）。
 static std::wstring DisplayNameForPath(const std::wstring& path)
 {
-    // 命名空间最顶层那个「桌面」不是真实文件夹，没有解析名，固定显示成「桌面」
+    // 命名空间最顶层那个容器不是真实文件夹，没有解析名，名字由我们自己定。
+    // 用户要求叫「主文件夹」（系统里它叫「桌面」，容易和物理桌面目录混起来）。
     if (shell::IsTopDesktopPath(path))
     {
-        return L"桌面";
+        return L"主文件夹";
     }
 
     const bool isShellNamespace = (path.compare(0, 2, L"::") == 0) ||
@@ -103,6 +107,8 @@ static uint64_t FileTimeValue(const FILETIME& time)
 }
 
 // 排序规则
+//   系统项永远排前面（「主文件夹」里先排此电脑/桌面/文档这些系统入口，
+//   再排桌面上的文件，跟资源管理器一致）
 //   文件夹永远排前面（和资源管理器一致，不受点哪一列影响）
 //   column：0 名称 / 1 修改日期 / 2 类型 / 3 大小
 //   ascending：true 从小到大
@@ -111,6 +117,12 @@ static bool CompareEntries(const shell::ShellEntry& left,
                            int  column,
                            bool ascending)
 {
+    // 系统项优先：这一条不受"点哪一列"影响，也不管是文件夹还是文件
+    if (left.isSystemItem != right.isSystemItem)
+    {
+        return left.isSystemItem;
+    }
+
     if (left.isFolder != right.isFolder)
     {
         return left.isFolder;
@@ -132,8 +144,8 @@ static bool CompareEntries(const shell::ShellEntry& left,
     }
 
     case 2:   // 类型
-        result = _wcsicmp(format::TypeText(left.name, left.isFolder).c_str(),
-                          format::TypeText(right.name, right.isFolder).c_str());
+        result = ::StrCmpLogicalW(format::TypeText(left.name, left.isFolder).c_str(),
+                                  format::TypeText(right.name, right.isFolder).c_str());
         break;
 
     case 3:   // 大小
@@ -144,14 +156,14 @@ static bool CompareEntries(const shell::ShellEntry& left,
         break;
 
     default:  // 名称
-        result = _wcsicmp(left.name.c_str(), right.name.c_str());
+        result = ::StrCmpLogicalW(left.name.c_str(), right.name.c_str());
         break;
     }
 
     // 比出来一样大时再按名字排，保证每次排出来顺序都稳定
     if (result == 0)
     {
-        result = _wcsicmp(left.name.c_str(), right.name.c_str());
+        result = ::StrCmpLogicalW(left.name.c_str(), right.name.c_str());
     }
 
     return ascending ? (result < 0) : (result > 0);
@@ -696,6 +708,21 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandRename:
             m_fileListView.BeginRenameSelected();
             return 0;
+        case kCommandViewLarge:
+            ApplyViewMode(FileListView::ViewMode::LargeIcon, true);
+            return 0;
+        case kCommandViewSmall:
+            ApplyViewMode(FileListView::ViewMode::SmallIcon, true);
+            return 0;
+        case kCommandViewList:
+            ApplyViewMode(FileListView::ViewMode::List, true);
+            return 0;
+        case kCommandViewDetails:
+            ApplyViewMode(FileListView::ViewMode::Details, true);
+            return 0;
+        case kCommandViewTiles:
+            ApplyViewMode(FileListView::ViewMode::Tiles, true);
+            return 0;
         default:
             break;
         }
@@ -926,6 +953,65 @@ void MainWindow::NavigateToPath(const std::wstring& path)
     StartEnumeration(path);
 }
 
+// ----------------------------------------------------------------------------
+// 记下"这个目录是从哪儿点进来的、叫什么名字"
+// 只由列表里的双击调用。地址栏、后退、前进、左栏都不记，
+// 这样"从主文件夹点进文档"和"从 C:\Users\kf168 点进 Documents"互不干扰。
+// ----------------------------------------------------------------------------
+void MainWindow::RecordNavigationOrigin(const std::wstring& path,
+                                        const std::wstring& displayName,
+                                        const std::wstring& parentPath)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    // 表别无限长大：超过 300 条就清空重记（都是导航缓存，丢了也不影响功能）
+    if (m_navOrigins.size() > 300)
+    {
+        m_navOrigins.clear();
+    }
+
+    // key 用统一小写，避免同一个目录因大小写不同记成两条
+    std::wstring key = path;
+    for (wchar_t& ch : key)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+
+    NavigationOrigin origin;
+    origin.displayName = displayName;
+
+    // 没有明确指定"上一级"时（从列表里双击进来的那种），
+    // 就用进来之前待着的那个目录。
+    origin.parentPath = parentPath.empty() ? m_history.Current() : parentPath;
+
+    m_navOrigins[key] = origin;
+}
+
+// ----------------------------------------------------------------------------
+// 当前目录给人看的名字
+//   有来源记录（从列表里双击进来的）→ 用记录的名字，」文档」就显示「文档」
+//   没有记录（地址栏输入、左栏点击、后退到更早的目录…）→ 按路径推导
+// ----------------------------------------------------------------------------
+std::wstring MainWindow::DisplayNameFor(const std::wstring& path)
+{
+    std::wstring key = path;
+    for (wchar_t& ch : key)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+
+    auto it = m_navOrigins.find(key);
+    if (it != m_navOrigins.end() && !it->second.displayName.empty())
+    {
+        return it->second.displayName;
+    }
+
+    return DisplayNameForPath(path);
+}
+
 void MainWindow::GoBack()
 {
     if (!m_history.CanGoBack())
@@ -952,7 +1038,26 @@ void MainWindow::GoUp()
         return;
     }
 
-    // 上一级交给 Shell 命名空间自己算（和资源管理器那个「向上」按钮同一套逻辑）：
+    // 先看"这个目录是从哪儿进来的"：
+    //   从「主文件夹」双击进「文档」，向上就回「主文件夹」，
+    //   而不是它的真实父目录 C:\Users\kf168（系统资源管理器就是这么走的）。
+    {
+        std::wstring key = current;
+        for (wchar_t& ch : key)
+        {
+            ch = static_cast<wchar_t>(::towlower(ch));
+        }
+
+        auto it = m_navOrigins.find(key);
+        if (it != m_navOrigins.end() && !it->second.parentPath.empty())
+        {
+            Logger::Info(L"向上（按来源）：" + current + L" → " + it->second.parentPath);
+            NavigateToPath(it->second.parentPath);
+            return;
+        }
+    }
+
+    // 没有来源记录时，上一级交给 Shell 命名空间自己算（和资源管理器那个「向上」按钮同一套逻辑）：
     //   下载 → kf168（用户主文件夹）→ 用户 → 本地磁盘 (C:) → 此电脑
     //   此电脑 → 顶层「桌面」（里面含此电脑、主文件夹、音乐、图片等）→ 再向上就没有了
     // 这里不能用 NavigationHistory::ParentPath 那种字符串截断：
@@ -1006,8 +1111,14 @@ void MainWindow::StartEnumeration(const std::wstring& path)
     }
 
     // 地址栏立即反映新路径
-    std::wstring displayPath = DisplayNameForPath(path);
-    m_addressBar.SetPathWithLabel(path, displayPath);
+    // 名字优先用"导航来源"里记的：从主文件夹点进「文档」，地址栏就写「文档」，
+    // 而不是 C:\Users\kf168\Documents。
+    std::wstring displayPath = DisplayNameFor(path);
+
+    // 名字和路径不一样时，地址栏整条只显示这个名字（不切 C:\ > Users > … 那样一段段）
+    const bool wholeLabel = (_wcsicmp(displayPath.c_str(), path.c_str()) != 0);
+
+    m_addressBar.SetPathWithLabel(path, displayPath, wholeLabel);
 
     // 标题只在"真的换了目录"时改一次，而且这一次先不带项数：
     //   换目录 → 「文件管理器 - C:\」，等结果回来再补成「（14 项）」
@@ -1266,6 +1377,32 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     ::AppendMenuW(menu, MF_STRING, kCommandNewFolder, L"新建文件夹(&N)");
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh,   L"刷新(&R)");
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    // ---- 查看（子菜单，和资源管理器右键的「查看」一样，当前视图打勾）----
+    {
+        HMENU viewMenu = ::CreatePopupMenu();
+
+        if (viewMenu != nullptr)
+        {
+            const FileListView::ViewMode current = m_fileListView.CurrentViewMode();
+
+            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::LargeIcon) ? MF_CHECKED : 0),
+                          kCommandViewLarge, L"大图标(&L)");
+            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::SmallIcon) ? MF_CHECKED : 0),
+                          kCommandViewSmall, L"小图标(&S)");
+            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::List) ? MF_CHECKED : 0),
+                          kCommandViewList, L"列表(&T)");
+            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Details) ? MF_CHECKED : 0),
+                          kCommandViewDetails, L"详细信息(&D)");
+            ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Tiles) ? MF_CHECKED : 0),
+                          kCommandViewTiles, L"平铺(&I)");
+
+            ::AppendMenuW(menu, MF_STRING | MF_POPUP,
+                          reinterpret_cast<UINT_PTR>(viewMenu), L"查看(&V)");
+        }
+    }
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
 
     // TPM_RETURNCMD：菜单自己跑完并返回点了哪一项，省去额外的一层消息往返
@@ -1328,12 +1465,35 @@ std::shared_ptr<shell::EnumerateResult> MainWindow::CurrentResult()
     return m_result;
 }
 
+// 当前目录里「真正有多少项」：分组标题行只是画出来的一行字，不算一个项目
+size_t MainWindow::RealItemCount()
+{
+    std::lock_guard<std::mutex> lock(m_resultMutex);
+
+    if (!m_resultReady || m_result == nullptr)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+    for (const auto& entry : m_result->entries)
+    {
+        // 分组标题行和占位格都不是真项目，不计数
+        if (!entry.isGroupHeader && !entry.isSpacer)
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
 void MainWindow::UpdateTitle()
 {
-    std::wstring path = DisplayNameForPath(m_history.Current());
+    std::wstring path = DisplayNameFor(m_history.Current());
 
     std::wstring title = std::wstring(kWindowTitleBase) + L" - " + path +
-                         L"（" + std::to_wstring(m_fileListView.ItemCount()) + L" 项）";
+                         L"（" + std::to_wstring(RealItemCount()) + L" 项）";
 
     // 标题没变就不要重设：频繁改窗口标题会让任务栏按钮重新生成，
     // 视觉上就是窗口"闪一下"，像失去了焦点
@@ -1352,7 +1512,16 @@ void MainWindow::SortEntries()
         return;
     }
 
-    std::sort(result->entries.begin(), result->entries.end(),
+    // 分组标题行要留在最前面，不参加排序：
+    // 把开头那段标题行先切出来，只排后面真正的条目，排完再接回去。
+    size_t headerCount = 0;
+    while (headerCount < result->entries.size() && result->entries[headerCount].isGroupHeader)
+    {
+        ++headerCount;
+    }
+
+    std::sort(result->entries.begin() + static_cast<std::ptrdiff_t>(headerCount),
+              result->entries.end(),
               [this](const shell::ShellEntry& left, const shell::ShellEntry& right)
               {
                   return CompareEntries(left, right, m_sortColumn, m_sortAscending);
@@ -1361,6 +1530,15 @@ void MainWindow::SortEntries()
 
 void MainWindow::OnColumnClick(int column)
 {
+    // 「此电脑」是分组显示的（上面有一行「设备和驱动器」标题）。
+    // 一排序，那一行标题就会被当成普通条目排到中间去，分组就散了。
+    // 系统的此电脑本来也不让按列排序，所以这里直接不响应。
+    if (_wcsicmp(m_history.Current().c_str(), shell::kThisPcPath) == 0)
+    {
+        Logger::Info(L"「此电脑」是分组视图，忽略按列排序");
+        return;
+    }
+
     // 点同一列就换个方向，点别的列从升序开始（资源管理器就是这么做的）
     if (column == m_sortColumn)
     {
@@ -1397,6 +1575,54 @@ void MainWindow::OnColumnClick(int column)
         Logger::Info(L"按「" + columnName + L"」排序（" +
                      std::wstring(m_sortAscending ? L"升序" : L"降序") +
                      L"），前 5 项：" + sample);
+    }
+}
+
+// ============================================================================
+// 视图模式
+//
+// 三件事：
+//   1. 普通磁盘目录 → 详细信息（和资源管理器打开文件夹时一样）
+//   2. 此电脑 / 控制面板 / 网络 / 回收站 / 主文件夹这些「系统文件夹」→ 小图标
+//   3. 用户从右键「查看」里选过的，就不再自动改，一直按他选的来
+// ============================================================================
+
+FileListView::ViewMode MainWindow::DefaultViewModeForCurrentPath() const
+{
+    const std::wstring path = m_history.Current();
+
+    // 「此电脑」用平铺：显示磁盘名、容量文字和占用进度条（和系统自带的此电脑一致）
+    if (_wcsicmp(path.c_str(), shell::kThisPcPath) == 0)
+    {
+        return FileListView::ViewMode::Tiles;
+    }
+
+    // 其它 Shell 命名空间里的东西（"::" 开头的解析名、shell:xxx、以及那个顶层桌面）
+    // 都算「系统文件夹」——这些地方系统默认是小图标视图。
+    const bool isShellNamespace = shell::IsTopDesktopPath(path) ||
+                                  path.compare(0, 2, L"::") == 0 ||
+                                  path.compare(0, 6, L"shell:") == 0;
+
+    return isShellNamespace ? FileListView::ViewMode::SmallIcon
+                            : FileListView::ViewMode::Details;
+}
+
+void MainWindow::ApplyViewMode(FileListView::ViewMode mode, bool modeIsUserChoice)
+{
+    m_viewMode = mode;
+
+    if (modeIsUserChoice)
+    {
+        // 用户亲自选的：以后进出目录都保持这个视图
+        m_viewModeManual = true;
+    }
+
+    m_fileListView.SetViewMode(mode);
+
+    // 详细信息视图带列头，其它视图没有列头——状态栏和布局要跟着变
+    if (m_hWnd != nullptr)
+    {
+        LayoutChildren();
     }
 }
 
@@ -1587,6 +1813,17 @@ void MainWindow::OpenPinnedOrFolder(const std::wstring& path)
 
     if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
     {
+        // 左栏最上面那几个「常用位置」（桌面/下载/文档/图片/音乐）：
+        // 点它们进去以后，地址栏显示名字（「文档」）、向上回「主文件夹」，
+        // 和从主文件夹里双击进去的表现一致。
+        // 其它目录（硬盘、固定区里的文件夹）不受影响，向上还是走真实父目录。
+        std::wstring displayName;
+
+        if (shell::KnownFolderDisplayName(path, displayName))
+        {
+            RecordNavigationOrigin(path, displayName, shell::kTopDesktopPath);
+        }
+
         NavigateToPath(path);
         return;
     }
@@ -1872,6 +2109,136 @@ void MainWindow::OnEnumerationDone()
     m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
 
     // ------------------------------------------------------------
+    // 「此电脑」加分组标题（两组：设备和驱动器 / 网络位置）
+    //
+    // 系统里此电脑是这样分组的。我们用不了列表控件的原生分组（虚拟模式
+    // 不支持），所以改成在数据里插"假标题行"，由列表控件把这种行画成标题。
+    //
+    // 分组依据是驱动器类型：DRIVE_REMOTE(4) 是网络盘，其余本地盘/光驱/U 盘
+    // 都归「设备和驱动器」。网络位置为空时就不插第二个标题，免得出现空组。
+    //
+    // 插在这里（排序之后、SetResult 之前）最合适：
+    //   · 排序不会把标题行挪到中间去
+    //   · 换目录、刷新都会重新走一遍这里，标题不会丢也不会重复
+    //
+    // 前面先判一下第 0 行是不是已经有标题行了：万一同一份结果被处理两次
+    // （比如刷新和"操作完成"挨着来），也不会插出两行标题。
+    // ------------------------------------------------------------
+    if (_wcsicmp(result->path.c_str(), shell::kThisPcPath) == 0 &&
+        (result->entries.empty() || !result->entries.front().isGroupHeader))
+    {
+        std::vector<shell::ShellEntry> localDrives;    // 设备和驱动器
+        std::vector<shell::ShellEntry> networkDrives;  // 网络位置
+
+        for (auto& entry : result->entries)
+        {
+            if (entry.driveType == DRIVE_REMOTE)
+            {
+                networkDrives.push_back(std::move(entry));
+            }
+            else
+            {
+                localDrives.push_back(std::move(entry));
+            }
+        }
+
+        std::vector<shell::ShellEntry> grouped;
+        grouped.reserve(result->entries.size() + 8);
+
+        // 平铺视图里一行能并排几块卡片（卡片固定 300 宽）：
+        // 组标题后面要补这么多"空占位格"，把这一行剩下的位置填掉，
+        // 标题才能像系统那样独占一行。别的视图下一行放几个无所谓（不需要占位）。
+        int perRow = 1;
+
+        // 注意：视图是在这段之后才 ApplyViewMode 的，所以这里不能只看 m_viewMode，
+        // 还要按"当前目录默认该用哪种视图"算一遍，否则首次进此电脑会按详细信息算，
+        // 占位格就补错了。
+        bool tilesView = (m_viewMode == FileListView::ViewMode::Tiles);
+        if (!m_viewModeManual && DefaultViewModeForCurrentPath() == FileListView::ViewMode::Tiles)
+        {
+            tilesView = true;
+        }
+
+        if (tilesView)
+        {
+            RECT clientRect = {};
+            if (::GetClientRect(m_fileListView.Handle(), &clientRect))
+            {
+                perRow = (clientRect.right - clientRect.left) / 300;
+                if (perRow < 1)
+                {
+                    perRow = 1;
+                }
+            }
+        }
+
+        // 插一个组标题；平铺视图下再补上占位格
+        auto pushHeader = [&grouped, perRow](const wchar_t* text)
+        {
+            shell::ShellEntry header;
+            header.name          = text;
+            header.isGroupHeader = true;
+            grouped.push_back(std::move(header));
+
+            for (int i = 1; i < perRow; ++i)
+            {
+                shell::ShellEntry spacer;
+                spacer.isSpacer = true;
+                grouped.push_back(std::move(spacer));
+            }
+        };
+
+        if (!localDrives.empty())
+        {
+            pushHeader(L"设备和驱动器");
+
+            for (auto& entry : localDrives)
+            {
+                grouped.push_back(std::move(entry));
+            }
+
+            // 这一组如果没把最后一行填满，后面的组标题就会挤到这一行的空位上。
+            // 补几个占位格把行尾填满，下一组的标题才能从新的一行开始。
+            const int remainder = static_cast<int>(localDrives.size()) % perRow;
+            if (remainder != 0)
+            {
+                for (int i = remainder; i < perRow; ++i)
+                {
+                    shell::ShellEntry spacer;
+                    spacer.isSpacer = true;
+                    grouped.push_back(std::move(spacer));
+                }
+            }
+        }
+
+        if (!networkDrives.empty())
+        {
+            pushHeader(L"网络位置");
+
+            for (auto& entry : networkDrives)
+            {
+                grouped.push_back(std::move(entry));
+            }
+        }
+
+        // 顺手记一笔，方便核对"到底枚举出几项、分了几组"
+        Logger::Info(L"此电脑分组完成：设备 " + std::to_wstring(localDrives.size()) +
+                     L" 个、网络 " + std::to_wstring(networkDrives.size()) +
+                     L" 个、一行 " + std::to_wstring(perRow) + L" 格、总行数 " +
+                     std::to_wstring(grouped.size()));
+
+        result->entries = std::move(grouped);
+    }
+
+    // 进入/刷新目录时定一次视图：本机磁盘目录用详细信息，
+    // 此电脑和各种系统文件夹用小图标（和系统默认一致）。
+    // 用户从「查看」菜单手动选过之后就不再自动改，一直按他选的来。
+    if (!m_viewModeManual)
+    {
+        ApplyViewMode(DefaultViewModeForCurrentPath(), false);
+    }
+
+    // ------------------------------------------------------------
     // 如果是"粘贴完成后的那次刷新"，把新出现的项选中（和资源管理器一致）
     // 必须在 MergeResult 之前抓旧路径表，之后就没得比了
     // ------------------------------------------------------------
@@ -1918,8 +2285,9 @@ void MainWindow::OnEnumerationDone()
 
     // 标题也只在内容真的变了才重设（道理同 UpdateTitle：避免任务栏闪）
     {
-        std::wstring title = std::wstring(kWindowTitleBase) + L" - " + DisplayNameForPath(result->path) +
-                             L"（" + std::to_wstring(result->entries.size()) + L" 项）";
+        // 项目数一律走 RealItemCount：分组标题行和占位格都不算（口径只有一处，免得对不上）
+        std::wstring title = std::wstring(kWindowTitleBase) + L" - " + DisplayNameFor(result->path) +
+                             L"（" + std::to_wstring(RealItemCount()) + L" 项）";
 
         if (title != m_lastTitle)
         {
@@ -1987,6 +2355,18 @@ void MainWindow::OnItemActivated(size_t index)
 
     const shell::ShellEntry& entry = result->entries[index];
 
+    // 分组标题行（如「此电脑」的「设备和驱动器」）不是真文件，双击它什么都不做
+    if (entry.isGroupHeader)
+    {
+        return;
+    }
+
+    // 平铺视图里的占位格同理，双击没有任何反应
+    if (entry.isSpacer)
+    {
+        return;
+    }
+
     if (entry.isFolder && !entry.fullPath.empty())
     {
         // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」）不一定真能"进去"：
@@ -2000,14 +2380,39 @@ void MainWindow::OnItemActivated(size_t index)
 
         if (isShellNamespace && !shell::ShellItemIsContainer(entry.fullPath))
         {
-            HINSTANCE openResult = ::ShellExecuteW(m_hWnd, L"open", entry.fullPath.c_str(),
-                                                   nullptr, nullptr, SW_SHOWNORMAL);
-            if (reinterpret_cast<INT_PTR>(openResult) <= 32)
+            // 交给系统按"默认动词"打开：和资源管理器双击走同一套路径，
+            // 控制面板 applet、设备和打印机里的打印机都能正确打开。
+            //
+            // 顺序很重要：
+            //   1) 先按 PIDL 打开 —— 控制面板里「字体」「恢复」「设备管理器」这些项
+            //      的解析名是 "::{26EE0668-…}\0\字体"（末尾是显示名，不是 GUID），
+            //      Shell 拿这个字符串根本解析不回来（实测 NameSpace 返回 null），
+            //      所以字符串那条路对它们必然失败，只有 PIDL 管用。
+            //   2) 再按路径字符串打开 —— 兼容"路径本身可解析"的项。
+            //   3) 最后退 ShellExecuteW。
+            bool opened = shell::OpenShellItemByPidl(m_hWnd, entry.pidl);
+
+            if (!opened)
             {
-                Logger::Error(L"打开虚拟项失败，路径=" + entry.fullPath);
+                opened = shell::OpenShellItem(m_hWnd, entry.fullPath);
+            }
+
+            if (!opened)
+            {
+                HINSTANCE openResult = ::ShellExecuteW(m_hWnd, L"open", entry.fullPath.c_str(),
+                                                       nullptr, nullptr, SW_SHOWNORMAL);
+                if (reinterpret_cast<INT_PTR>(openResult) <= 32)
+                {
+                    Logger::Error(L"打开虚拟项失败，路径=" + entry.fullPath);
+                }
             }
             return;
         }
+
+        // 记下"这个目录是从哪儿点进来的、叫什么名字"：
+        // 地址栏会写这一项的名字（「文档」），向上按钮回我们进来之前的那个目录
+        // （「主文件夹」），跟系统资源管理器一致。
+        RecordNavigationOrigin(entry.fullPath, entry.name);
 
         NavigateToPath(entry.fullPath);
         return;
@@ -2015,11 +2420,24 @@ void MainWindow::OnItemActivated(size_t index)
 
     if (!entry.isFolder && !entry.fullPath.empty())
     {
-        HINSTANCE openResult = ::ShellExecuteW(m_hWnd, L"open", entry.fullPath.c_str(),
-                                               nullptr, nullptr, SW_SHOWNORMAL);
-        if (reinterpret_cast<INT_PTR>(openResult) <= 32)
+        // 普通文件也走系统默认动词：这样"设备和打印机"里的打印机、
+        // 带特殊外壳扩展的文档等非常规项也能打开（ShellExecute 对它们会失败）。
+        // 同样先试 PIDL（命名空间目录里的项才带 PIDL），再退路径字符串。
+        bool opened = shell::OpenShellItemByPidl(m_hWnd, entry.pidl);
+
+        if (!opened)
         {
-            Logger::Error(L"打开文件失败，路径=" + entry.fullPath);
+            opened = shell::OpenShellItem(m_hWnd, entry.fullPath);
+        }
+
+        if (!opened)
+        {
+            HINSTANCE openResult = ::ShellExecuteW(m_hWnd, L"open", entry.fullPath.c_str(),
+                                                   nullptr, nullptr, SW_SHOWNORMAL);
+            if (reinterpret_cast<INT_PTR>(openResult) <= 32)
+            {
+                Logger::Error(L"打开文件失败，路径=" + entry.fullPath);
+            }
         }
         return;
     }
@@ -2243,7 +2661,18 @@ void MainWindow::UpdateStatusBar()
         std::lock_guard<std::mutex> lock(m_resultMutex);
         if (m_resultReady && m_result != nullptr)
         {
-            text = std::to_wstring(m_result->entries.size()) + L" 个项目";
+            // 分组标题行、占位格都不是真项目，计数时要去掉
+            // （否则「此电脑」会显示成 11 项）
+            size_t realCount = 0;
+            for (const auto& entry : m_result->entries)
+            {
+                if (!entry.isGroupHeader && !entry.isSpacer)
+                {
+                    ++realCount;
+                }
+            }
+
+            text = std::to_wstring(realCount) + L" 个项目";
         }
         else
         {

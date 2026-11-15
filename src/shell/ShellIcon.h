@@ -46,18 +46,41 @@ public:
     // ------------------------------------------------------------------
     bool Initialize();
 
-    // 系统小图标图像列表句柄（可直接塞给 ListView_SetImageList）
-    HIMAGELIST ImageList() const { return m_hImageList; }
+    // ------------------------------------------------------------------
+    // 图标尺寸
+    //
+    //   Small —— 16px，详细信息/列表/小图标视图、左栏导航都用这个
+    //   Large —— 48px，只有「大图标」视图用
+    //
+    // 两个尺寸都是系统现成的图像列表（SHIL_SMALL / SHIL_EXTRALARGE），
+    // 我们只是引用它们、并不自己画图标，所以两条列表的内存都不额外占。
+    // ------------------------------------------------------------------
+    enum class IconSize
+    {
+        Small,
+        Large
+    };
+
+    // 系统图标图像列表句柄（可直接塞给 ListView_SetImageList）
+    HIMAGELIST ImageList(IconSize size = IconSize::Small) const
+    {
+        return (size == IconSize::Large) ? m_hLargeImageList : m_hImageList;
+    }
 
     // 统一的文件夹图标索引（导航栏「快速访问」这类分组标题用）
-    int FolderIconIndex() const { return m_folderIconIndex; }
+    int FolderIconIndex(IconSize size = IconSize::Small) const
+    {
+        return (size == IconSize::Large) ? m_largeFolderIconIndex : m_folderIconIndex;
+    }
 
     // ------------------------------------------------------------------
     // 取某个条目的图标索引
     //   name     —— 文件/文件夹名称（不是完整路径，只用来取扩展名）
     //   isFolder —— 是否文件夹
+    //   size     —— 要小图标还是大图标
     // ------------------------------------------------------------------
-    int GetIconIndex(const std::wstring& name, bool isFolder);
+    int GetIconIndex(const std::wstring& name, bool isFolder,
+                     IconSize size = IconSize::Small);
 
     // ------------------------------------------------------------------
     // 按「完整路径」取图标（左侧导航栏用）
@@ -66,7 +89,7 @@ public:
     // 所以桌面、下载、各个硬盘都能拿到各自的正确图标。
     // 只用于导航栏那十几个固定项，一次性查询，不影响列表性能。
     // ------------------------------------------------------------------
-    int GetIconIndexByPath(const std::wstring& path);
+    int GetIconIndexByPath(const std::wstring& path, IconSize size = IconSize::Small);
 
     // ------------------------------------------------------------------
     // 按「完整路径」取图标并缓存（exe / lnk 这类"每个文件有自己的图标"的条目用）
@@ -78,7 +101,18 @@ public:
     // 代价：每个条目一次 shell 查询（系统有图标缓存，通常零点几毫秒），
     //       所以只在"可见行需要画图标"时才会调用，并且结果按路径缓存。
     // ------------------------------------------------------------------
-    int GetIconIndexByFullPath(const std::wstring& path);
+    int GetIconIndexByFullPath(const std::wstring& path, IconSize size = IconSize::Small);
+
+    // ------------------------------------------------------------------
+    // 按「绝对 PIDL」取图标
+    //
+    // 为什么需要它：控制面板里那些项（「字体」「恢复」「程序和功能」…）的
+    // 解析名是 `::{26EE0668-…}\0\显示名` 这种形式，Shell 根本解析不回 PIDL
+    // （实测 SHParseDisplayName 一律失败），所以按字符串取图标必然拿到 0，
+    // 结果就是这些项全都显示成空白。枚举时我们手里已经有每项的绝对 PIDL，
+    // 直接拿它问系统就准了。
+    // ------------------------------------------------------------------
+    int GetIconIndexByPidl(const std::vector<unsigned char>& pidl, IconSize size = IconSize::Small);
 
     // ------------------------------------------------------------------
     // 取「半透明版」图标索引（被剪切的项目要看起来淡一点，和资源管理器一致）
@@ -87,7 +121,7 @@ public:
     // 同一个原索引只生成一次，之后走缓存。
     // 生成失败时返回原始索引（宁可不变淡，也不能显示不出来）
     // ------------------------------------------------------------------
-    int GetDimmedIconIndex(int originalIndex);
+    int GetDimmedIconIndex(int originalIndex, IconSize size = IconSize::Small);
 
 private:
     // 从名称里提取扩展名（小写，含点号，如 ".dll"；没有扩展名返回空串）
@@ -97,15 +131,22 @@ private:
     HICON CreateDimmedIcon(HICON source, int size);
 
 private:
-    wil::com_ptr<IImageList> m_systemImageList;   // 系统图像列表（持有引用保证存活）
-    HIMAGELIST               m_hImageList = nullptr;
+    wil::com_ptr<IImageList> m_systemImageList;       // 系统小图标图像列表（16px）
+    wil::com_ptr<IImageList> m_largeSystemImageList;  // 系统大图标图像列表（48px）
+    HIMAGELIST               m_hImageList      = nullptr;
+    HIMAGELIST               m_hLargeImageList = nullptr;
 
-    std::unordered_map<std::wstring, int> m_extensionIconCache;  // 扩展名 → 图标索引
-    std::unordered_map<std::wstring, int> m_pathIconCache;       // 完整路径 → 图标索引
-    std::unordered_map<int, int>          m_dimmedIconCache;     // 原索引 → 半透明索引
+    // 缓存分两套：小图标一套、大图标一套（两种尺寸的索引彼此不通用）
+    std::unordered_map<std::wstring, int> m_extensionIconCache;       // 扩展名 → 小图标索引
+    std::unordered_map<std::wstring, int> m_largeExtensionIconCache;  // 扩展名 → 大图标索引
+    std::unordered_map<std::wstring, int> m_pathIconCache;            // 完整路径 → 小图标索引
+    std::unordered_map<std::wstring, int> m_largePathIconCache;       // 完整路径 → 大图标索引
+    std::unordered_map<int, int>          m_dimmedIconCache;          // 小图标原索引 → 半透明索引
+    std::unordered_map<int, int>          m_largeDimmedIconCache;     // 大图标原索引 → 半透明索引
 
-    int  m_folderIconIndex  = 0;   // 文件夹统一图标
-    bool m_initialized      = false;
+    int  m_folderIconIndex      = 0;   // 文件夹统一小图标
+    int  m_largeFolderIconIndex = 0;   // 文件夹统一大图标
+    bool m_initialized          = false;
 };
 
 } // namespace shell

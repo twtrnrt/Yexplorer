@@ -27,6 +27,7 @@
 
 #include <shlobj.h>       // SHCreateItemFromParsingName 等
 #include <shobjidl.h>     // IShellItem2 / IEnumIDList / IShellFolder
+#include <shellapi.h>     // ShellExecuteExW / SHELLEXECUTEINFOW（按 PIDL 打开要用）
 #include <shlwapi.h>      // StrRetToBufW
 #include <propkey.h>      // PKEY_Size / PKEY_DateModified
 #include <knownfolders.h> // FOLDERID_Desktop
@@ -177,6 +178,106 @@ bool IsFolder(IShellFolder* folder, LPCITEMIDLIST childPidl)
 }
 
 // ----------------------------------------------------------------------------
+// 判断「主文件夹」（顶层桌面）里的某一项，是"系统项"还是"桌面上的东西"
+//
+// 顶层桌面会把两类东西混在一起枚举出来：
+//   系统项：此电脑、回收站、控制面板、库、图库、网络、主文件夹，
+//           还有音乐、下载、图片、视频、文档、桌面这些"系统给的目录入口"，
+//           以及各个驱动器、用户目录、OneDrive；
+//   桌面项：桌面目录（含公用桌面）里真实的文件、文件夹、快捷方式。
+//
+// 用户在「主文件夹」里要的是「系统项排前面、桌面上的东西排后面」，
+// 所以这里按"是不是落在桌面目录下"来分：
+//   落在桌面目录之下（但不等于目录本身）→ 桌面项；
+//   其余（虚拟项、系统目录入口、驱动器…）→ 系统项。
+// 桌面目录用 KnownFolder 现查，用户把桌面搬到别处也能正确判定。
+// ----------------------------------------------------------------------------
+static bool StartsWithNoCase(const std::wstring& text, const std::wstring& prefix)
+{
+    if (text.size() < prefix.size())
+    {
+        return false;
+    }
+
+    return ::_wcsnicmp(text.c_str(), prefix.c_str(), prefix.size()) == 0;
+}
+
+// 取桌面目录的全路径（只查一次，之后缓存；C++11 的静态局部变量初始化是线程安全的）
+static const std::wstring& DesktopDirectory()
+{
+    static const std::wstring cached = []
+    {
+        std::wstring result;
+
+        LPWSTR path = nullptr;
+
+        if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &path)) && path != nullptr)
+        {
+            result = path;
+            ::CoTaskMemFree(path);
+        }
+
+        return result;
+    }();
+
+    return cached;
+}
+
+static const std::wstring& PublicDesktopDirectory()
+{
+    static const std::wstring cached = []
+    {
+        std::wstring result;
+
+        LPWSTR path = nullptr;
+
+        if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_PublicDesktop, 0, nullptr, &path)) && path != nullptr)
+        {
+            result = path;
+            ::CoTaskMemFree(path);
+        }
+
+        return result;
+    }();
+
+    return cached;
+}
+
+bool IsDesktopSystemItem(const std::wstring& fullPath)
+{
+    // 没有路径的纯虚拟项，一定是系统项
+    if (fullPath.empty())
+    {
+        return true;
+    }
+
+    // "::{20D04FE0-…}" 这种桌面绝对解析名，是命名空间项
+    if (fullPath.rfind(L"::", 0) == 0)
+    {
+        return true;
+    }
+
+    // 落在桌面目录里的才算"桌面上的东西"；
+    // 注意"桌面"这个系统目录入口本身路径就等于桌面目录，要算系统项。
+    const std::wstring& desktop  = DesktopDirectory();
+    const std::wstring& pubDesk  = PublicDesktopDirectory();
+
+    if (!desktop.empty() && (fullPath == desktop || StartsWithNoCase(fullPath, desktop + L"\\")))
+    {
+        // 等于桌面目录本身 → 是"桌面"这个系统入口，算系统项；
+        // 桌面目录底下的东西 → 是桌面上的文件，不算系统项。
+        return (fullPath == desktop);
+    }
+
+    if (!pubDesk.empty() && (fullPath == pubDesk || StartsWithNoCase(fullPath, pubDesk + L"\\")))
+    {
+        return (fullPath == pubDesk);
+    }
+
+    return true;
+}
+
+// ----------------------------------------------------------------------------
 // 用 IShellItem2 补齐额外信息：绝对路径、大小、修改时间
 // 说明：这些属性不是所有项都有（虚拟项就没有文件系统路径），取不到就留空。
 // ----------------------------------------------------------------------------
@@ -228,6 +329,90 @@ void FillExtraInfo(IShellFolder* folder, LPCITEMIDLIST childPidl, shell::ShellEn
     }
 }
 
+// ----------------------------------------------------------------------------
+// 从「解析名」里抠出盘符
+//
+// 此电脑里的盘，fullPath 拿到的是解析名（如 "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\C:"），
+// 不是 "C:\"。这里把末尾那个 "C:" 找出来，好去查它的类型和容量。
+// 不是盘的项返回 0（'\0'）。
+// ----------------------------------------------------------------------------
+wchar_t DriveLetterFromParsingName(const std::wstring& parsingName)
+{
+    const size_t length = parsingName.size();
+    if (length < 2)
+    {
+        return 0;
+    }
+
+    // 形如 "…\C:" 或 "…\C:\" —— 从末尾往前看，允许结尾带一个反斜杠
+    size_t colonPos = length - 1;
+    if (parsingName[colonPos] == L'\\' && length >= 3)
+    {
+        --colonPos;
+    }
+
+    if (parsingName[colonPos] != L':')
+    {
+        return 0;
+    }
+
+    const size_t letterPos = colonPos - 1;
+    if (letterPos == 0 && length >= 3 && false)
+    {
+        return 0;
+    }
+
+    if (!::iswalpha(parsingName[letterPos]))
+    {
+        return 0;
+    }
+
+    // 盘符前必须是开头或者反斜杠，避免把文件名里冒号误判成盘
+    if (letterPos > 0 && parsingName[letterPos - 1] != L'\\')
+    {
+        return 0;
+    }
+
+    return static_cast<wchar_t>(::towupper(parsingName[letterPos]));
+}
+
+// ----------------------------------------------------------------------------
+// 给盘符项补上「驱动器类型 + 容量」
+//
+// 只在后台枚举线程里调用（查容量会碰磁盘，不能在界面线程做）。
+// 网络盘也查（系统自带的此电脑同样显示网络盘的容量和占用条），
+// 只有「无效根目录」和「光驱里没盘」这两种查了也没意义的情况才跳过。
+// ----------------------------------------------------------------------------
+void FillDriveInfo(shell::ShellEntry& entry)
+{
+    const wchar_t letter = DriveLetterFromParsingName(entry.fullPath);
+    if (letter == 0)
+    {
+        return;
+    }
+
+    const std::wstring rootPath = std::wstring(1, letter) + L":\\";
+
+    entry.driveType = static_cast<int>(::GetDriveTypeW(rootPath.c_str()));
+
+    // 无效的根目录：查容量没意义，跳过
+    // （网络盘照查——系统自带的此电脑就显示网络盘的容量和占用条）
+    if (entry.driveType == DRIVE_NO_ROOT_DIR)
+    {
+        return;
+    }
+
+    ULARGE_INTEGER freeBytes  = {};
+    ULARGE_INTEGER totalBytes = {};
+    ULARGE_INTEGER totalFree  = {};
+
+    if (::GetDiskFreeSpaceExW(rootPath.c_str(), &freeBytes, &totalBytes, &totalFree))
+    {
+        entry.diskFree  = freeBytes.QuadPart;
+        entry.diskTotal = totalBytes.QuadPart;
+    }
+}
+
 } // namespace
 
 namespace shell
@@ -259,15 +444,29 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
         return result;
     }
 
+    // 父目录的绝对 PIDL（子项拼绝对 PIDL 用）。
+    // 放在 try 外面是为了函数末尾统一释放——包括中途抛异常的情况。
+    PIDLIST_ABSOLUTE folderPidl = nullptr;
+
     try
     {
         // ---------------- 第 1-2 步：路径 → IShellFolder ----------------
         wil::com_ptr<IShellFolder> folder;
 
+        // 父文件夹自身的绝对 PIDL。命名空间目录里的子项要拿它拼出「绝对 PIDL」，
+        // 那个才是打开 applet（控制面板里的字体/恢复/设备管理器…）真正管用的东西，
+        // 详见 ShellFolder.h 里 ShellEntry::pidl 的注释。
+        // 所有权：函数返回前由下面的 ILFree 归还。
+        // 物理目录（C:\…）不必拼，保持为 nullptr。
+        bool pathIsNamespace = false;
         if (IsTopDesktopPath(path))
         {
             // 命名空间最顶层那个「桌面」：没有解析名，只能直接拿桌面根文件夹
             THROW_IF_FAILED(::SHGetDesktopFolder(folder.put()));
+
+            // 桌面根文件夹的 PIDL 就是「空 PIDL」，枚举出的子项本身就是绝对 PIDL，
+            // 所以这里不需要往外取一个父 PIDL 来拼。
+            pathIsNamespace = true;
         }
         else
         {
@@ -280,6 +479,18 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             // BHID_SFObject 就是「给我这个项对应的 IShellFolder」
             THROW_IF_FAILED(shellItem->BindToHandler(nullptr, BHID_SFObject,
                                                      IID_PPV_ARGS(folder.put())));
+
+            // 只有「当前目录是 Shell 命名空间」时才需要给子项存 PIDL；
+            // 普通磁盘目录里的条目用 fullPath 打开就够了，省掉每项一次 PIDL 拼接。
+            pathIsNamespace = (path.compare(0, 2, L"::") == 0) ||
+                              (path.compare(0, 6, L"shell:") == 0);
+
+            if (pathIsNamespace)
+            {
+                // 取这个目录自身的绝对 PIDL；取不到就退回「不拼」——
+                // 那说明这个目录路径本身能被字符串解析，子项也能用字符串打开。
+                ::SHGetIDListFromObject(static_cast<IUnknown*>(shellItem.get()), &folderPidl);
+            }
         }
 
         // ---------------- 第 3 步：拿枚举器 ----------------
@@ -311,6 +522,70 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             entry.name     = GetDisplayName(folder.get(), childPidl);
             FillExtraInfo(folder.get(), childPidl, entry);
 
+            // 「主文件夹」里要把"系统项"和"桌面上的东西"分开排，先把标记算出来。
+            // 其他目录里判断出来也都是 false，不影响原有排序。
+            entry.isSystemItem = IsDesktopSystemItem(entry.fullPath);
+
+            // ----------------------------------------------------------
+            // 丢掉那个"幽灵控制面板"
+            //
+            // 顶层桌面会枚举出一个也叫「控制面板」的项，解析名是
+            // ::{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}。
+            // 这个 GUID 连系统自己都打不开（Shell.Application.NameSpace 直接报
+            // "找不到元素 0x80070490"），它只是个没有图标、双击没反应的残项。
+            // 真正能用的「控制面板」是 ::{26EE0668-…}（9 项首页），我们保留那一个。
+            // 在枚举阶段就把它扔掉，列表里就不会出现两个「控制面板」。
+            // ----------------------------------------------------------
+            if (!entry.fullPath.empty() &&
+                ::_wcsicmp(entry.fullPath.c_str(),
+                           L"::{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}") == 0)
+            {
+                ::CoTaskMemFree(childPidl);
+                childPidl = nullptr;
+                fetched   = 0;
+                continue;
+            }
+
+            // ----------------------------------------------------------
+            // 把这一项的「绝对 PIDL」拷成一段纯字节存进快照
+            //
+            // 只在 Shell 命名空间目录里做（控制面板、此电脑这类）。
+            // 原因：这些目录里的项解析名是"…\0\显示名"，Shell 解析不回来，
+            // 打开时必须用 PIDL（详见 ShellFolder.h 里 ShellEntry::pidl 注释）。
+            //
+            // 注意必须在 CoTaskMemFree(childPidl) 之前拷，childPidl 是 COM 内存。
+            // ----------------------------------------------------------
+            if (pathIsNamespace)
+            {
+                // 顶层「桌面」的父就是根，子项 PIDL 已经绝对；其他命名空间要拼
+                PIDLIST_ABSOLUTE absolutePidl = childPidl;
+                PIDLIST_ABSOLUTE combinedPidl = nullptr;
+
+                if (folderPidl != nullptr)
+                {
+                    combinedPidl = ::ILCombine(folderPidl, childPidl);
+                    absolutePidl = combinedPidl;
+                }
+
+                if (absolutePidl != nullptr)
+                {
+                    const UINT cbSize = ::ILGetSize(absolutePidl);
+
+                    if (cbSize > 0)
+                    {
+                        const unsigned char* beginPtr =
+                            reinterpret_cast<const unsigned char*>(absolutePidl);
+                        entry.pidl.assign(beginPtr, beginPtr + cbSize);
+                    }
+                }
+
+                // 只释放刚拼出来的那个，childPidl 由下面统一释放
+                if (combinedPidl != nullptr)
+                {
+                    ::ILFree(combinedPidl);
+                }
+            }
+
             // PIDL 是 COM 分配的内存，必须用 CoTaskMemFree 释放
             ::CoTaskMemFree(childPidl);
             childPidl = nullptr;
@@ -320,6 +595,12 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             if (entry.name.empty())
             {
                 continue;
+            }
+
+            // 是盘符的话，顺手把「驱动器类型 + 容量」查出来（平铺视图要用）
+            if (entry.isFolder)
+            {
+                FillDriveInfo(entry);
             }
 
             if (entry.isFolder)
@@ -346,6 +627,13 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
         Logger::Error(L"枚举目录出现未知异常，路径=" + path);
     }
 
+    // 释放父目录 PIDL（SHGetIDListFromObject 分配，与 ILFree 配对）
+    if (folderPidl != nullptr)
+    {
+        ::ILFree(folderPidl);
+        folderPidl = nullptr;
+    }
+
     // 与 CoInitializeEx 配对
     if (needUninitialize)
     {
@@ -353,6 +641,68 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
     }
 
     return result;
+}
+
+// ============================================================================
+// 判断是不是"常用位置"那几个系统目录，并给出它的名字
+// ============================================================================
+
+bool KnownFolderDisplayName(const std::wstring& path, std::wstring& displayName)
+{
+    displayName.clear();
+
+    if (path.empty())
+    {
+        return false;
+    }
+
+    // 和左侧导航条最上面那组保持一致（视频也带上，将来别的地方用到同样认）
+    static const KNOWNFOLDERID* const ids[] =
+    {
+        &FOLDERID_Desktop,
+        &FOLDERID_Downloads,
+        &FOLDERID_Documents,
+        &FOLDERID_Pictures,
+        &FOLDERID_Music,
+        &FOLDERID_Videos,
+    };
+
+    for (const KNOWNFOLDERID* id : ids)
+    {
+        LPWSTR folderPath = nullptr;
+
+        if (FAILED(::SHGetKnownFolderPath(*id, 0, nullptr, &folderPath)) || folderPath == nullptr)
+        {
+            continue;
+        }
+
+        const bool matched = (::_wcsicmp(folderPath, path.c_str()) == 0);
+        ::CoTaskMemFree(folderPath);
+
+        if (!matched)
+        {
+            continue;
+        }
+
+        // 名字向系统要（SIGDN_NORMALDISPLAY），这样和资源管理器里显示的一致
+        wil::com_ptr<IShellItem> item;
+
+        if (SUCCEEDED(::SHGetKnownFolderItem(*id, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(item.put())) &&
+                      item != nullptr))
+        {
+            LPWSTR name = nullptr;
+
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name != nullptr)
+            {
+                displayName = name;
+                ::CoTaskMemFree(name);
+            }
+        }
+
+        return !displayName.empty();
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -491,6 +841,41 @@ std::wstring GetParentPath(const std::wstring& path)
 // 判断 Shell 项是不是容器（决定双击是"进去"还是"打开"）
 // ============================================================================
 
+// 这些顶层命名空间项"此刻可能是空的"，但双击必须能进去看到空列表，
+// 不能被当成 applet 弹一个系统窗口。这里精确匹配（不加前缀匹配），
+// 免得把它们下面那些真正的 applet 也一起放过。
+static bool IsKnownEmptyContainerRoot(const std::wstring& path)
+{
+    static const wchar_t* const kRoots[] = {
+        L"::TopDesktop",                                // 本程序自己的顶层桌面伪路径
+        L"::{645FF040-5081-101B-9F08-00AA002F954E}",    // 回收站
+        L"::{26EE0668-A00A-44D7-9371-BEB064C98683}",    // 控制面板
+        L"::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}",    // 网络
+        L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",    // 此电脑
+        L"::{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",    // 桌面
+        L"::{031E4825-7B94-4DC3-B131-E946B44C8DD5}",    // 库
+        L"::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}",    // 主文件夹
+        L"::{6D809377-6AF0-444B-8957-A3773F02200E}",    // 用户文件夹（另一个 CLSID）
+    };
+
+    // 比较时去掉末尾反斜杠，忽略大小写
+    std::wstring normalized = path;
+    while (!normalized.empty() && (normalized.back() == L'\\' || normalized.back() == L'/'))
+    {
+        normalized.pop_back();
+    }
+
+    for (const wchar_t* root : kRoots)
+    {
+        if (::_wcsicmp(normalized.c_str(), root) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool ShellItemIsContainer(const std::wstring& path)
 {
     if (path.empty())
@@ -500,6 +885,12 @@ bool ShellItemIsContainer(const std::wstring& path)
 
     // 普通文件系统目录：肯定能进去（空文件夹也一样，进去显示空列表）
     if (::PathIsDirectoryW(path.c_str()))
+    {
+        return true;
+    }
+
+    // 回收站等"可能为空"的顶层容器，直接算容器，不必探测
+    if (IsKnownEmptyContainerRoot(path))
     {
         return true;
     }
@@ -533,20 +924,37 @@ bool ShellItemIsContainer(const std::wstring& path)
         {
             wil::com_ptr<IShellFolder> folder;
 
-            // 能绑定出 IShellFolder 的才算容器；applet 这一步就会失败
+            // 能绑定出 IShellFolder 的才算候选容器；纯 applet 这一步就会失败
             if (SUCCEEDED(item->BindToHandler(nullptr, BHID_SFObject, IID_PPV_ARGS(&folder))) &&
                 folder != nullptr)
             {
                 wil::com_ptr<IEnumIDList> enumList;
                 const DWORD              flags = SHCONTF_FOLDERS | SHCONTF_NONFOLDERS;
 
-                // 枚举接口拿得到就算容器——注意这里不看"有没有子项"：
-                // 空回收站、空库都是"能进去但是空的"，必须让用户进去看到空列表，
-                // 而不是被当成 applet 弹一个系统窗口出来。
+                // 判据升级版：光"能拿到枚举接口"不够——控制面板里那些 applet
+                // （恢复、安全和维护、凭据管理器…）同样能拿到接口，只是枚举出来 0 项。
+                // 所以必须真的枚举出至少一项，才算"能进去看到东西的容器"。
+                //
+                // 例外：空回收站、空的库这种"确实是容器、只是现在空的"项，
+                // 枚举出来也是 0 项；它们由下面的精确白名单兜住，
+                // 否则双击空回收站会弹出系统窗口。
                 if (SUCCEEDED(folder->EnumObjects(nullptr, flags, enumList.put())) &&
                     enumList != nullptr)
                 {
-                    isContainer = true;
+                    LPITEMIDLIST child = nullptr;
+                    ULONG        fetched = 0;
+
+                    if (SUCCEEDED(enumList->Next(1, &child, &fetched)) && fetched > 0 && child != nullptr)
+                    {
+                        // 光"这个命名空间里有一项"还不够 —— 我们自己的枚举器未必能解析
+                        // 这种复合解析名（`::{26EE0668-…}\0\::{7B81BE6A-…}` 这种，
+                        // 比如「存储空间」），真导航过去只会得到空列表，看起来就是"打不开"。
+                        // 所以再用我们自己的枚举器试一次：它能不能列出东西，才是"能不能进去"。
+                        EnumerateResult probe = EnumerateFolder(path, nullptr);
+                        isContainer = (probe.entries.size() >= 1);
+
+                        ::CoTaskMemFree(child);
+                    }
                 }
             }
         }
@@ -568,6 +976,270 @@ bool ShellItemIsContainer(const std::wstring& path)
     }
 
     return isContainer;
+}
+
+// ============================================================================
+// 用系统默认动词"打开"一个 Shell 项（等价于资源管理器里双击）
+// ============================================================================
+
+bool OpenShellItem(HWND owner, const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return false;
+    }
+
+    HRESULT initHr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool    needUninitialize = SUCCEEDED(initHr);
+
+    bool opened = false;
+
+    try
+    {
+        wil::com_ptr<IShellItem> item;
+
+        // 先按解析名建 IShellItem；建不出来就用 PIDL 兜底
+        HRESULT hr = ::SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(item.put()));
+
+        if (FAILED(hr) || item == nullptr)
+        {
+            PIDLIST_ABSOLUTE pidl = nullptr;
+            SFGAOF           attrs = 0;
+
+            if (SUCCEEDED(::SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, &attrs)) &&
+                pidl != nullptr)
+            {
+                hr = ::SHCreateItemFromIDList(pidl, IID_PPV_ARGS(item.put()));
+                ::CoTaskMemFree(pidl);
+            }
+        }
+
+        if (SUCCEEDED(hr) && item != nullptr)
+        {
+            // BHID_SFUIObject 拿到的就是"这一项自己的右键菜单对象"，
+            // 它的默认动词和资源管理器双击时执行的是同一个
+            wil::com_ptr<IContextMenu> contextMenu;
+
+            if (SUCCEEDED(item->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(contextMenu.put()))) &&
+                contextMenu != nullptr)
+            {
+                CMINVOKECOMMANDINFOEX info = {};
+                info.cbSize  = sizeof(info);
+                // fMask 里两个位：
+                //   CMIC_MASK_UNICODE      = 0x00004000  按 lpVerbW 走宽字符
+                //   CMIC_MASK_FLAG_NO_UI   = 0x00000400  不让外壳扩展自己弹错误框
+                // 这里直接写字面值：项目定义了 WIN32_LEAN_AND_MEAN，
+                // 这两个宏（等价于 SEE_MASK_*）在头文件里被裁掉了，用名字编不过。
+                info.fMask   = 0x00004000 | 0x00000400;
+                info.hwnd    = owner;
+                info.lpVerb  = "open";
+                info.lpVerbW = L"open";
+                info.nShow   = SW_SHOWNORMAL;
+
+                HRESULT invokeHr = contextMenu->InvokeCommand(
+                    reinterpret_cast<LPCMINVOKECOMMANDINFO>(&info));
+                opened = SUCCEEDED(invokeHr);
+
+                if (!opened)
+                {
+                    // 退一步：用上下文菜单里的第一项（资源管理器里"打开"就是第一项）。
+                    // 有些 applet 的默认动词不叫 "open"（比如 cplopen），只认菜单项序号。
+                    HMENU menu = ::CreatePopupMenu();
+
+                    if (menu != nullptr)
+                    {
+                        int idMax = contextMenu->QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL);
+
+                        if (idMax > 0)
+                        {
+                            info.lpVerb  = MAKEINTRESOURCEA(0);
+                            info.lpVerbW = MAKEINTRESOURCEW(0);
+
+                            invokeHr = contextMenu->InvokeCommand(
+                                reinterpret_cast<LPCMINVOKECOMMANDINFO>(&info));
+                            opened = SUCCEEDED(invokeHr);
+                        }
+
+                        ::DestroyMenu(menu);
+                    }
+                }
+            }
+        }
+    }
+    catch (const wil::ResultException& e)
+    {
+        LogIfFailed(e.GetErrorCode(), L"打开 Shell 项", path);
+        opened = false;
+    }
+    catch (...)
+    {
+        Logger::Error(L"打开 Shell 项出现未知异常，路径=" + path);
+        opened = false;
+    }
+
+    if (needUninitialize)
+    {
+        ::CoUninitialize();
+    }
+
+    return opened;
+}
+
+// ============================================================================
+// 按 PIDL 打开 Shell 项
+//
+// 这是打开"控制面板 applet / 打印机 / 特殊命名空间项"唯一可靠的方式：
+// 那些项的解析名形如 "::{26EE0668-…}\0\字体"，Shell 自己解析不回来
+// （SHCreateItemFromParsingName 失败、Shell.Application.NameSpace 返回 null），
+// 所以拿字符串永远打不开。资源管理器不靠字符串——它手里一直握着枚举出来的
+// PIDL，我们这里就是把那份 PIDL 原样用上。
+// ============================================================================
+
+bool OpenShellItemByPidl(HWND owner, const std::vector<unsigned char>& pidlBytes)
+{
+    // 字节为空（或短到不成一个 PIDL）= 这条是普通文件/文件夹，
+    // 调用方应该改走路径那套逻辑，这里直接拒绝，别白开一次 COM
+    if (pidlBytes.size() < sizeof(USHORT) * 2)
+    {
+        return false;
+    }
+
+    HRESULT initHr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool    needUninitialize = SUCCEEDED(initHr);
+
+    bool opened = false;
+
+    try
+    {
+        // 这段字节就是当初枚举出来的绝对 PIDL 原样拷贝，这里还原成指针。
+        // PIDL 内部只有偏移量、没有指针，所以跨线程搬运字节是安全的。
+        PCIDLIST_ABSOLUTE pidl =
+            reinterpret_cast<PCIDLIST_ABSOLUTE>(const_cast<unsigned char*>(pidlBytes.data()));
+
+        // --------------------------------------------------------------
+        // 首选：ShellExecuteEx + 绝对 PIDL
+        //
+        // 这是系统官方认可的"按 IDList 执行默认动词"，就是资源管理器双击走的路。
+        // lpVerb/lpIDList 在 SHELLEXECUTEINFO 里是同一个 union 成员，
+        // 给了 lpIDList 就等于"用这一项的默认动词"，也就是双击。
+        //
+        // 为什么优先用它而不是 IContextMenu：
+        //   IContextMenu 那条路在控制面板 applet 上会回 E_INVALIDARG(0x80070057)，
+        //   实测「字体」的菜单能查出 45 项，但不论用 "open" 还是用第一项序号调用
+        //   InvokeCommand 都被拒（部分 cpl 外壳扩展对 CMINVOKECOMMANDINFO 很挑）。
+        //   ShellExecuteEx 没有这些参数讲究，兼容性反而更好。
+        // --------------------------------------------------------------
+        SHELLEXECUTEINFOW execInfo = {};
+        execInfo.cbSize   = sizeof(execInfo);
+        // fMask 三个位（WIN32_LEAN_AND_MEAN 下宏名编不过，直接写字面值）：
+        //   SEE_MASK_IDLIST         = 0x00000004  这次执行用下面的 lpIDList 定位目标
+        //   SEE_MASK_INVOKEIDLIST   = 0x0000000C  用 IDList 的默认动词（双击行为）
+        //   SEE_MASK_FLAG_NO_UI     = 0x00000400  不让外壳扩展自己弹错误框
+        execInfo.fMask    = 0x00000004 | 0x0000000C | 0x00000400;
+        execInfo.hwnd     = owner;
+        execInfo.lpIDList = const_cast<ITEMIDLIST*>(pidl);
+        execInfo.nShow    = SW_SHOWNORMAL;
+
+        if (::ShellExecuteExW(&execInfo) != FALSE)
+        {
+            opened = true;
+            Logger::Info(L"按 PIDL 打开成功（ShellExecuteEx）");
+        }
+        else
+        {
+            Logger::Warn(L"ShellExecuteEx 按 PIDL 打开失败，HRESULT=" +
+                         Logger::FormatHresult(static_cast<HRESULT>(::GetLastError())));
+        }
+
+        // --------------------------------------------------------------
+        // 备用：IShellItem → IContextMenu → InvokeCommand
+        // ------------------------------------------------------------------
+        if (!opened)
+        {
+            wil::com_ptr<IShellItem> item;
+            THROW_IF_FAILED(::SHCreateItemFromIDList(pidl, IID_PPV_ARGS(item.put())));
+
+
+        // BHID_SFUIObject = "这一项自己的交互对象"，拿到的 IContextMenu
+        // 和资源管理器双击时用的是同一个
+        wil::com_ptr<IContextMenu> contextMenu;
+        THROW_IF_FAILED(item->BindToHandler(nullptr, BHID_SFUIObject,
+                                            IID_PPV_ARGS(contextMenu.put())));
+
+        CMINVOKECOMMANDINFOEX info = {};
+        info.cbSize = sizeof(info);
+        // fMask 只留 CMIC_MASK_FLAG_NO_UI(0x0400)：不让外壳扩展自己弹错误框。
+        // 之前这里还带了 CMIC_MASK_UNICODE(0x4000)，结果 InvokeCommand 直接回
+        // E_INVALIDARG(0x80070057)—— 部分控制面板的外壳扩展不认 EX 结构里的
+        // 宽字符标志，所以这里退回纯 ANSI（动词 "open" 本身就是 ASCII，够用）。
+        // 写字面值是因为 WIN32_LEAN_AND_MEAN 下这两个宏名编不过。
+        info.fMask  = 0x00000400;
+        info.hwnd   = owner;
+        info.nShow  = SW_SHOWNORMAL;
+
+        // 先按 "open" 试：绝大多数项（含"设备和打印机"里的打印机）认这个动词
+        info.lpVerb  = "open";
+        info.lpVerbW = nullptr;
+
+        HRESULT invokeHr = contextMenu->InvokeCommand(
+            reinterpret_cast<LPCMINVOKECOMMANDINFO>(&info));
+        opened = SUCCEEDED(invokeHr);
+
+        if (!opened)
+        {
+            // 退一步：用上下文菜单里的第一项。
+            // 控制面板 applet 的默认动词常常不叫 "open"（例如 cplopen），
+            // 只认菜单项序号。QueryContextMenu 的 idCmdFirst 传 1，
+            // 则 MAKEINTRESOURCEA(0) 表示"第一项"，也就是双击时的默认动作。
+            HMENU menu = ::CreatePopupMenu();
+
+            if (menu != nullptr)
+            {
+                const int idMax = contextMenu->QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL);
+
+                // 菜单项数记进日志：0 或负值说明这个 PIDL 拿到的菜单是空的，
+                // 那就是 PIDL 本身不对，得往前查枚举时的拼接。
+                Logger::Info(L"按 PIDL 打开：字节数=" + std::to_wstring(pidlBytes.size()) +
+                             L"，菜单项数=" + std::to_wstring(idMax));
+
+                if (idMax > 0)
+                {
+                    info.lpVerb  = MAKEINTRESOURCEA(0);
+                    info.lpVerbW = nullptr;
+
+                    invokeHr = contextMenu->InvokeCommand(
+                        reinterpret_cast<LPCMINVOKECOMMANDINFO>(&info));
+                    opened = SUCCEEDED(invokeHr);
+                }
+
+                ::DestroyMenu(menu);
+            }
+        }
+
+        // 两种动词都没成功：把真实 HRESULT 记下来，方便对着日志查是哪一步不认
+            if (!opened)
+            {
+                Logger::Error(L"按 PIDL 打开失败，HRESULT=" + Logger::FormatHresult(invokeHr));
+            }
+        }
+    }
+    catch (const wil::ResultException& e)
+    {
+        LogIfFailed(e.GetErrorCode(), L"按 PIDL 打开 Shell 项", L"");
+        opened = false;
+    }
+    catch (...)
+    {
+        Logger::Error(L"按 PIDL 打开 Shell 项出现未知异常");
+        opened = false;
+    }
+
+    if (needUninitialize)
+    {
+        ::CoUninitialize();
+    }
+
+    return opened;
 }
 
 } // namespace shell
