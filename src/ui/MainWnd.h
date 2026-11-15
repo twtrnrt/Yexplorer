@@ -237,10 +237,13 @@ private:
     std::vector<UndoRecord> m_redoStack;   // 重做栈（撤销过的步骤按顺序排在这里）
 
     void PushUndoRecord(const UndoRecord& record);   // 操作成功后压栈（同时清空重做栈）
-    void FillUndoItem(HMENU menu);                   // 有可撤销的步骤才往菜单里加一项
+    void FillUndoItem(HMENU menu);                   // 有可撤销/可恢复的步骤才往菜单里加
     void PerformUndo();                              // Ctrl+Z / 右键「撤销」
-    void PerformRedo();                              // Ctrl+Y
+    void PerformRedo();                              // Ctrl+Y / 右键「恢复」
     void ClearUndoHistory();                         // 清空两栈
+
+    // 把操作的动词转成文案（「撤销 删除」里的"删除"）
+    static const wchar_t* UndoVerbText(UndoKind kind);
 
     // 用另一个自身进程打开这个目录（「在新窗口中打开」）
     void OpenFolderInNewWindow(const std::wstring& folderPath);

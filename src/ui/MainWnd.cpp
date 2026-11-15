@@ -2220,29 +2220,54 @@ void MainWindow::ClearUndoHistory()
     m_redoStack.clear();
 }
 
+// 把一步操作的动词转成菜单文案里的字（新建 / 重命名 / 移动 / 复制 / 删除）
+const wchar_t* MainWindow::UndoVerbText(UndoKind kind)
+{
+    switch (kind)
+    {
+    case UndoKind::Create: return L"新建";
+    case UndoKind::Rename: return L"重命名";
+    case UndoKind::Move:   return L"移动";
+    case UndoKind::Copy:   return L"复制";
+    case UndoKind::Delete: return L"删除";
+    default:               return nullptr;
+    }
+}
+
 void MainWindow::FillUndoItem(HMENU menu)
 {
-    if (m_undoStack.empty())
+    bool anyItem = false;
+
+    // 「撤销 删除」：撤销栈顶那一步
+    if (!m_undoStack.empty())
     {
-        return;     // 没有可撤销的步骤：这一项整条不出现
+        const wchar_t* verb = UndoVerbText(m_undoStack.back().kind);
+
+        if (verb != nullptr)
+        {
+            const std::wstring text = std::wstring(L"撤销 ") + verb + L"(&U)";
+            ::AppendMenuW(menu, MF_STRING, kCommandUndo, text.c_str());
+            anyItem = true;
+        }
     }
 
-    const wchar_t* verb = nullptr;
-
-    switch (m_undoStack.back().kind)
+    // 「恢复 删除」：重做栈顶那一步（撤销过、还没被新操作冲掉的那些）
+    if (!m_redoStack.empty())
     {
-    case UndoKind::Create: verb = L"新建";   break;
-    case UndoKind::Rename: verb = L"重命名"; break;
-    case UndoKind::Move:   verb = L"移动";   break;
-    case UndoKind::Copy:   verb = L"复制";   break;
-    case UndoKind::Delete: verb = L"删除";   break;
-    default:               return;
+        const wchar_t* verb = UndoVerbText(m_redoStack.back().kind);
+
+        if (verb != nullptr)
+        {
+            const std::wstring text = std::wstring(L"恢复 ") + verb + L"(&E)";
+            ::AppendMenuW(menu, MF_STRING, kCommandRedo, text.c_str());
+            anyItem = true;
+        }
     }
 
-    const std::wstring text = std::wstring(L"撤销 ") + verb + L"(&U)";
-
-    ::AppendMenuW(menu, MF_STRING, kCommandUndo, text.c_str());
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (anyItem)
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
 }
 
 void MainWindow::PerformUndo()
