@@ -11,8 +11,13 @@
 #include "FileListView.h"
 
 #include "shell/ShellDragDrop.h"
+#include "core/Logger.h"
 
+#include <uxtheme.h>   // SetWindowTheme
 #include <algorithm>
+#include <cwctype>   // towlower
+
+#pragma comment(lib, "uxtheme.lib")
 
 // ============================================================================
 // 列定义
@@ -22,6 +27,51 @@ static const int kTimeColumnWidth  = 160;   // 修改日期
 static const int kTypeColumnWidth  = 120;   // 类型
 static const int kSizeColumnWidth  = 110;   // 大小
 static const int kNameColumnMin    = 260;   // 名称列保底宽度
+
+// ============================================================================
+// 哪些文件必须按「完整路径」取图标
+//
+// 背景：日常取图标走的是"按扩展名"的高速通道（不碰硬盘，几微秒一次），
+//       但 exe、快捷方式这类文件的图标是打包在文件自己身上的，
+//       按扩展名只能拿到系统那个"通用程序"的空白图标。
+//       所以这些类型必须拿真实路径去问系统。
+// ============================================================================
+
+static bool NeedsOwnIcon(const std::wstring& name)
+{
+    static const wchar_t* const kOwnIconExtensions[] = {
+        L".exe",       // 可执行程序：图标内嵌在 exe 里
+        L".lnk",       // 快捷方式：图标来自指向的目标
+        L".ico",       // 图标文件：本身就是一个图标
+        L".scr",       // 屏幕保护程序
+        L".cpl",       // 控制面板小程序
+        L".url",       // 网址快捷方式
+        L".msi",       // 安装包
+        L".appref-ms", // ClickOnce 快捷方式
+    };
+
+    const size_t dotPos = name.find_last_of(L'.');
+    if (dotPos == std::wstring::npos)
+    {
+        return false;
+    }
+
+    std::wstring extension = name.substr(dotPos);
+    for (auto& ch : extension)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+
+    for (auto candidate : kOwnIconExtensions)
+    {
+        if (extension == candidate)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 // ============================================================================
 // 构造 / 析构
@@ -72,6 +122,10 @@ bool FileListView::Create(HWND parent, HINSTANCE hInstance)
 
     ApplyFont();
     ApplyColumns();
+
+    // 用资源管理器自己的主题：选中行的样式（浅蓝底 + 细边）就和左栏导航一致了，
+    // 这也是资源管理器列表本来的样子
+    ::SetWindowTheme(m_hWnd, L"Explorer", nullptr);
 
     return true;
 }
@@ -782,7 +836,47 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         {
             if (m_iconCache != nullptr)
             {
-                int iconIndex = m_iconCache->GetIconIndex(entry.name, entry.isFolder);
+                // 文件夹：走统一的文件夹图标（最快）
+                // exe / 快捷方式这类：必须按完整路径问系统，才能拿到它自己的图标
+                // 其余文件：按扩展名走高速缓存
+                int iconIndex = 0;
+
+                if (entry.isFolder)
+                {
+                    // 驱动器 / 虚拟文件夹（「此电脑」里的各个盘、网络位置等）：
+                    // 按路径问系统，才能显示硬盘、光驱、网络盘各自的图标；
+                    // 普通文件夹走统一图标（最快）。
+                    const bool isDriveLetter = entry.fullPath.size() >= 2 &&
+                                               entry.fullPath.size() <= 3 &&
+                                               entry.fullPath[1] == L':';
+                    const bool isShellItem  = entry.fullPath.compare(0, 2, L"::") == 0;
+
+                    if (isDriveLetter || isShellItem)
+                    {
+                        iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath);
+                        if (iconIndex <= 0)
+                        {
+                            iconIndex = m_iconCache->GetIconIndex(entry.name, true);
+                        }
+                    }
+                    else
+                    {
+                        iconIndex = m_iconCache->GetIconIndex(entry.name, true);
+                    }
+                }
+                else if (NeedsOwnIcon(entry.name))
+                {
+                    iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath);
+                    if (iconIndex <= 0)
+                    {
+                        // 万一这个文件读不出图标（被占用、权限不足等），退回按扩展名
+                        iconIndex = m_iconCache->GetIconIndex(entry.name, false);
+                    }
+                }
+                else
+                {
+                    iconIndex = m_iconCache->GetIconIndex(entry.name, false);
+                }
 
                 // 被剪切（Ctrl+X）的项目：图标换成半透明版本，和资源管理器一样"变淡"
                 if (IsCutPath(entry.fullPath))
@@ -899,6 +993,11 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
         case CDDS_ITEMPREPAINT:
         {
+            // 去掉选中行/当前项外面那圈点状虚线。
+            // 那圈虚线是 Windows 列表控件的"键盘焦点提示框"（告诉你按键会作用在这一行），
+            // 资源管理器在主题风格下不画它，所以这里把焦点位清掉，让主题只画选中背景。
+            customDraw->nmcd.uItemState &= ~CDIS_FOCUS;
+
             size_t index = static_cast<size_t>(customDraw->nmcd.dwItemSpec);
 
             if (m_result != nullptr && index < m_result->entries.size() &&

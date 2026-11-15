@@ -11,14 +11,18 @@
 #include "MainWnd.h"
 #include "core/Format.h"
 #include "core/Logger.h"
+#include "core/Settings.h"
 #include "shell/ShellClipboard.h"
 #include "shell/ShellDragDrop.h"
 #include "shell/ShellOperations.h"
 
 #include <shellapi.h>   // ShellExecuteW
+#include <shlobj.h>     // SHCreateItemFromParsingName / SHGetKnownFolderPath
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
+
+#include "../res/resource.h"   // IDI_APPICON 等资源 ID
 
 // ============================================================================
 // 常量
@@ -52,6 +56,45 @@ static const size_t kMaxLogItems = 100;
 // ============================================================================
 // 内部辅助函数
 // ============================================================================
+
+// 把路径换成"给人看的名字"。
+//   普通磁盘路径（C:\Windows）原样返回，零开销；
+//   虚拟文件夹（此电脑这类）的路径是 ::{GUID}，直接显示很难看，
+//   这里问系统要它的显示名（「此电脑」「回收站」）。
+static std::wstring DisplayNameForPath(const std::wstring& path)
+{
+    // 命名空间最顶层那个「桌面」不是真实文件夹，没有解析名，固定显示成「桌面」
+    if (shell::IsTopDesktopPath(path))
+    {
+        return L"桌面";
+    }
+
+    const bool isShellNamespace = (path.compare(0, 2, L"::") == 0) ||
+                                  (path.compare(0, 6, L"shell:") == 0);
+    if (!isShellNamespace)
+    {
+        return path;
+    }
+
+    IShellItem* item = nullptr;
+    if (FAILED(::SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item)) ||
+               item == nullptr))
+    {
+        return path;
+    }
+
+    std::wstring result = path;
+
+    PWSTR displayName = nullptr;
+    if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &displayName)) && displayName != nullptr)
+    {
+        result.assign(displayName);
+        ::CoTaskMemFree(displayName);
+    }
+
+    item->Release();
+    return result;
+}
 
 // FILETIME 转成 64 位整数，方便比大小
 static uint64_t FileTimeValue(const FILETIME& time)
@@ -171,8 +214,24 @@ bool MainWindow::Create(HINSTANCE hInstance)
     wc.hCursor       = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = kWindowClassName;
-    wc.hIcon         = ::LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hIconSm       = ::LoadIconW(nullptr, IDI_APPLICATION);
+
+    // 主窗口图标（标题栏左上角 + 任务栏）：用 exe 自己带的图标，
+    // 取不到（比如资源没编进去）就退回系统默认的空白程序图标
+    wc.hIcon = ::LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    if (wc.hIcon == nullptr)
+    {
+        wc.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+    }
+
+    // 小图标（16x16，标题栏和 Alt+Tab 用）
+    int smallIconSize = ::GetSystemMetrics(SM_CXSMICON);
+    wc.hIconSm = static_cast<HICON>(::LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
+                                                IMAGE_ICON, smallIconSize, smallIconSize,
+                                                LR_DEFAULTCOLOR));
+    if (wc.hIconSm == nullptr)
+    {
+        wc.hIconSm = ::LoadIconW(nullptr, IDI_APPLICATION);
+    }
 
     if (!::RegisterClassExW(&wc))
     {
@@ -261,6 +320,9 @@ int MainWindow::Scale(int value) const
 
 void MainWindow::CreateChildControls()
 {
+    // 配置文件先读进来（固定区要靠它显示，窗口大小那些以后也用它）
+    core::Settings::Instance().Load();
+
     // ---------------- 1. 字体 ----------------
     NONCLIENTMETRICSW metrics = {};
     metrics.cbSize = sizeof(metrics);
@@ -302,17 +364,54 @@ void MainWindow::CreateChildControls()
     }
     else
     {
-        // 点导航栏里的「桌面」「下载」「C:」直接跳过去
+        // 点导航栏里的「桌面」「下载」「C:」→ 进目录；点固定区里的程序 → 启动它
         m_navigationPane.SetNavigateCallback([this](const std::wstring& path)
         {
-            NavigateToPath(path);
+            OpenPinnedOrFolder(path);
+        });
+
+        // 固定区：先把配置文件里记着的那些显示出来（第一次运行时是空的，显示提示行）
+        m_navigationPane.SetPinnedItems(core::Settings::Instance().PinnedItems());
+
+        // 在固定项上点右键 →「取消固定」：从配置里删掉，存盘，再把左栏刷新一遍
+        m_navigationPane.SetUnpinCallback([this](const std::wstring& path)
+        {
+            if (!core::Settings::Instance().RemovePinned(path))
+            {
+                return;
+            }
+
+            core::Settings::Instance().Save();
+
+            m_navigationPane.SetPinnedItems(core::Settings::Instance().PinnedItems());
+            m_navigationPane.SelectFolderPath(m_history.Current());   // 重建树后选中状态要补回来
+
+            Logger::Info(L"取消固定：" + path);
         });
     }
 
-    // ---------------- 3. 三个导航按钮（自绘扁平按钮，无边框） ----------------
+    // ---------------- 3. 导航按钮（自绘扁平按钮，无边框、无白底） ----------------
+    // 底色统一用顶部工具条的 248 灰，否则按钮区域会出现一块白底
+    const COLORREF toolbarColor = RGB(248, 248, 248);
+
+    m_homeButton.Create(m_hWnd, kControlIdHome, FlatButton::ArrowKind::Home, m_hInstance);
+    m_homeButton.SetBackgroundColor(toolbarColor);
+
     m_backButton.Create(m_hWnd, kControlIdBack, FlatButton::ArrowKind::Back, m_hInstance);
+    m_backButton.SetBackgroundColor(toolbarColor);
+
     m_forwardButton.Create(m_hWnd, kControlIdForward, FlatButton::ArrowKind::Forward, m_hInstance);
+    m_forwardButton.SetBackgroundColor(toolbarColor);
+
     m_upButton.Create(m_hWnd, kControlIdUp, FlatButton::ArrowKind::Up, m_hInstance);
+    m_upButton.SetBackgroundColor(toolbarColor);
+
+    m_refreshButton.Create(m_hWnd, kControlIdRefresh, FlatButton::ArrowKind::Refresh, m_hInstance);
+    m_refreshButton.SetBackgroundColor(toolbarColor);
+
+    // 计算机图标：贴在地址栏左端，白色底，和路径的白底连成一片
+    m_thisPcButton.Create(m_hWnd, kControlIdThisPc, FlatButton::ArrowKind::Computer, m_hInstance);
+    m_thisPcButton.SetBackgroundColor(RGB(255, 255, 255));
 
     // ---------------- 4. 地址栏（分段可点击） ----------------
     if (m_addressBar.Create(m_hWnd, kControlIdAddress, m_hInstance))
@@ -409,6 +508,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------
     case WM_CREATE:
     {
+        // 父窗口绘制时跳过子控件占的区域，避免拖动分隔线时整片重画闪烁
+        LONG_PTR windowStyle = ::GetWindowLongPtrW(m_hWnd, GWL_STYLE);
+        ::SetWindowLongPtrW(m_hWnd, GWL_STYLE, windowStyle | WS_CLIPCHILDREN);
+
         // 图标缓存必须先初始化：左侧导航栏建树时就要用它取图标
         if (m_iconCache.Initialize())
         {
@@ -444,6 +547,111 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         LayoutChildren();
         return 0;
+
+    // --------------------------------------------------------------
+    // 绘制：地址栏下面那条横线、左栏右边那条竖线
+    // --------------------------------------------------------------
+    case WM_ERASEBKGND:
+        // 背景我们已经在 WM_PAINT 里整块铺过了，这里直接说"擦好了"，
+        // 少一次闪烁（拖动分隔线时尤其明显）
+        return 1;
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT paint = {};
+        HDC hdc = ::BeginPaint(m_hWnd, &paint);
+
+        RECT clientRect = {};
+        ::GetClientRect(m_hWnd, &clientRect);
+
+        // 控件之间的缝隙是父窗口自己的地盘，先铺一层底色
+        ::FillRect(hdc, &clientRect, ::GetSysColorBrush(COLOR_WINDOW));
+
+        // 顶部工具条（按钮 + 地址栏那一行）用浅灰底（248,248,248），
+        // 只有地址栏那块本身仍然是白底（它自己画），这样"路径区"才显得是独立一块
+        if (!::IsRectEmpty(&m_addressDividerRect))
+        {
+            RECT topRect = clientRect;
+            topRect.bottom = m_addressDividerRect.top;
+
+            HBRUSH topBrush = ::CreateSolidBrush(RGB(248, 248, 248));
+            ::FillRect(hdc, &topRect, topBrush);
+            ::DeleteObject(topBrush);
+        }
+
+        // 地址栏下面那条横线（把上面的路径和下面的文件区分开）
+        if (!::IsRectEmpty(&m_addressDividerRect))
+        {
+            ::FillRect(hdc, &m_addressDividerRect, ::GetSysColorBrush(COLOR_3DLIGHT));
+        }
+
+        // 左栏和文件列表中间那条竖线
+        if (m_paneVisible && !::IsRectEmpty(&m_paneDividerRect))
+        {
+            ::FillRect(hdc, &m_paneDividerRect, ::GetSysColorBrush(COLOR_3DLIGHT));
+        }
+
+        ::EndPaint(m_hWnd, &paint);
+        return 0;
+    }
+
+    // --------------------------------------------------------------
+    // 中间那条竖线：鼠标移上去变成左右箭头，按住能拖着改左栏宽度
+    // --------------------------------------------------------------
+    case WM_SETCURSOR:
+    {
+        if (LOWORD(lParam) == HTCLIENT)
+        {
+            POINT pt = {};
+            ::GetCursorPos(&pt);
+            ::ScreenToClient(m_hWnd, &pt);
+
+            if (IsOnPaneDivider(pt.x))
+            {
+                ::SetCursor(::LoadCursorW(nullptr, IDC_SIZEWE));
+                return TRUE;
+            }
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN:
+    {
+        int x = static_cast<short>(LOWORD(lParam));
+        if (IsOnPaneDivider(x))
+        {
+            m_draggingSplitter = true;
+            ::SetCapture(m_hWnd);   // 抓住鼠标，拖出窗口范围也能继续跟手
+            return 0;
+        }
+        break;
+    }
+
+    case WM_MOUSEMOVE:
+    {
+        if (m_draggingSplitter)
+        {
+            UpdatePaneWidth(static_cast<short>(LOWORD(lParam)));
+            return 0;
+        }
+        break;
+    }
+
+    case WM_LBUTTONUP:
+    {
+        if (m_draggingSplitter)
+        {
+            m_draggingSplitter = false;
+            ::ReleaseCapture();
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CAPTURECHANGED:
+        // 鼠标被别的东西抢走了（比如弹出菜单），就当拖动结束
+        m_draggingSplitter = false;
+        break;
 
     // --------------------------------------------------------------
     // 按钮点击
@@ -506,6 +714,26 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             case kControlIdUp:
                 GoUp();
+                return 0;
+            case kControlIdHome:
+            {
+                // 主页：去「我的文档」
+                PWSTR documentsPath = nullptr;
+                if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documentsPath)) &&
+                    documentsPath != nullptr)
+                {
+                    std::wstring target(documentsPath);
+                    ::CoTaskMemFree(documentsPath);
+                    NavigateToPath(target);
+                }
+                return 0;
+            }
+            case kControlIdRefresh:
+                RefreshCurrentFolder();
+                return 0;
+            case kControlIdThisPc:
+                // 计算机图标：去「此电脑」（虚拟文件夹，路径是它的 CLSID）
+                NavigateToPath(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
                 return 0;
             default:
                 break;
@@ -719,11 +947,24 @@ void MainWindow::GoForward()
 void MainWindow::GoUp()
 {
     std::wstring current = m_history.Current();
-    std::wstring parent  = NavigationHistory::ParentPath(current);
-    if (parent == current)
+    if (current.empty())
     {
-        return;   // 已经在根目录
+        return;
     }
+
+    // 上一级交给 Shell 命名空间自己算（和资源管理器那个「向上」按钮同一套逻辑）：
+    //   下载 → kf168（用户主文件夹）→ 用户 → 本地磁盘 (C:) → 此电脑
+    //   此电脑 → 顶层「桌面」（里面含此电脑、主文件夹、音乐、图片等）→ 再向上就没有了
+    // 这里不能用 NavigationHistory::ParentPath 那种字符串截断：
+    // 它对 "C:\" 只会原地返回，永远走不到「此电脑」和「桌面」这两层。
+    std::wstring parent = shell::GetParentPath(current);
+    if (parent.empty())
+    {
+        Logger::Info(L"向上：已经在命名空间顶层，路径=" + current);
+        return;   // 已经在顶层（例如顶层「桌面」），什么都不做
+    }
+
+    Logger::Info(L"向上：" + current + L" → " + parent);
     NavigateToPath(parent);
 }
 
@@ -764,10 +1005,28 @@ void MainWindow::StartEnumeration(const std::wstring& path)
         m_fileListView.SetResult(nullptr);
     }
 
-    // 地址栏、标题、状态栏立即反映新路径
-    m_addressBar.SetPath(path);
-    ::SetWindowTextW(m_hWnd, (std::wstring(kWindowTitleBase) + L" - " + path + L"（加载中…）").c_str());
-    UpdateStatusBar();
+    // 地址栏立即反映新路径
+    std::wstring displayPath = DisplayNameForPath(path);
+    m_addressBar.SetPathWithLabel(path, displayPath);
+
+    // 标题只在"真的换了目录"时改一次，而且这一次先不带项数：
+    //   换目录 → 「文件管理器 - C:\」，等结果回来再补成「（14 项）」
+    //   同目录刷新（F5 / 自动感知变化 / 粘贴完成 / 新建之后重扫）→ 标题一个字都不动
+    // 之前每次刷新都会先写「（加载中…）」再写「（14 项）」，这两段文字来回切，
+    // 看上去就是标题栏括号里一直在闪。
+    if (!isSameDir)
+    {
+        m_lastTitle = std::wstring(kWindowTitleBase) + L" - " + displayPath;
+        ::SetWindowTextW(m_hWnd, m_lastTitle.c_str());
+    }
+
+    // 状态栏同理：只有换目录时才切成「正在读取…」，
+    // 同一目录刷新期间保持原来的「14 个项目」不动
+    if (!isSameDir)
+    {
+        UpdateStatusBar();
+    }
+
     UpdateNavigationState();
 
     HWND hwnd = m_hWnd;
@@ -1071,11 +1330,18 @@ std::shared_ptr<shell::EnumerateResult> MainWindow::CurrentResult()
 
 void MainWindow::UpdateTitle()
 {
-    std::wstring path = m_history.Current();
+    std::wstring path = DisplayNameForPath(m_history.Current());
 
-    ::SetWindowTextW(m_hWnd,
-                     (std::wstring(kWindowTitleBase) + L" - " + path +
-                      L"（" + std::to_wstring(m_fileListView.ItemCount()) + L" 项）").c_str());
+    std::wstring title = std::wstring(kWindowTitleBase) + L" - " + path +
+                         L"（" + std::to_wstring(m_fileListView.ItemCount()) + L" 项）";
+
+    // 标题没变就不要重设：频繁改窗口标题会让任务栏按钮重新生成，
+    // 视觉上就是窗口"闪一下"，像失去了焦点
+    if (title != m_lastTitle)
+    {
+        m_lastTitle = title;
+        ::SetWindowTextW(m_hWnd, title.c_str());
+    }
 }
 
 void MainWindow::SortEntries()
@@ -1110,7 +1376,11 @@ void MainWindow::OnColumnClick(int column)
 
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
     m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
-    m_fileListView.MergeResult(result);   // 最小范围更新，只重绘变化的部分
+
+    // 排序只改了「谁排第几」，条目数量一个没变，增量更新（MergeResult）看不出任何变化，
+    // 结果就是列表还显示旧顺序，非得鼠标划过才重画。这里必须整表重设一遍。
+    // SetResult 内部会自己记住选中项和滚动位置，再按名字恢复，所以排序后选中不会乱跳。
+    m_fileListView.SetResult(result);
 
     // 记一笔，方便验证点了表头到底有没有生效
     if (result != nullptr)
@@ -1254,8 +1524,19 @@ void MainWindow::RegisterDropTargets()
     // ---- 左栏 ----
     shell::DropTargetCallbacks treeCallbacks;
 
+    // 拖到左栏固定区时的"落点标记"：用一个不会和真实路径撞车的假名称，
+    // 放到 PerformDrop 里就能分清"这是要固定"还是"这是要放进某个文件夹"
+    static const std::wstring kPinnedMarker = L"::PINNED";
+
     treeCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
+        // 落在固定区（硬盘区下面那一段）：接受，但含义是"固定"，不是搬文件
+        if (m_navigationPane.IsInPinnedArea(ptClient))
+        {
+            return kPinnedMarker;
+        }
+
+        // 落在某个文件夹节点上：那个节点的目录（和以前一样）
         return m_navigationPane.HitTestPath(ptClient);
     };
 
@@ -1263,17 +1544,145 @@ void MainWindow::RegisterDropTargets()
                                        const std::wstring& targetDirectory,
                                        DWORD effect, bool createShortcut)
     {
+        if (targetDirectory == kPinnedMarker)
+        {
+            // 拖进固定区：只记一个快捷入口，文件本身原地不动
+            AddPinnedItems(sources);
+            return;
+        }
+
         PerformDropFromOutside(sources, targetDirectory, effect, createShortcut);
     };
 
-    // 拖动过程中把"鼠标正压着的那个左栏节点"点亮（系统自带的拖放高亮）
+    // 拖动过程中的反馈
     treeCallbacks.DragOverFeedback = [this](POINT ptClient, bool acceptable)
     {
+        // 固定区没有"放进哪个目录"的概念，这里不点亮任何行
+        if (acceptable && m_navigationPane.IsInPinnedArea(ptClient))
+        {
+            m_navigationPane.SetDropHighlight(nullptr);
+            return;
+        }
+
         HTREEITEM item = acceptable ? m_navigationPane.HitTestDroppableItem(ptClient) : nullptr;
         m_navigationPane.SetDropHighlight(item);
     };
 
     shell::RegisterWindowDropTarget(m_navigationPane.Handle(), treeCallbacks);
+}
+
+// ============================================================================
+// 左栏固定区
+// ============================================================================
+
+// 左栏点了一项：是目录就进去，是程序 / 快捷方式就启动它
+void MainWindow::OpenPinnedOrFolder(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    DWORD attributes = ::GetFileAttributesW(path.c_str());
+
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        NavigateToPath(path);
+        return;
+    }
+
+    // 不是目录 → 当程序启动（.exe / .lnk 交给系统，效果和双击一样）
+    HINSTANCE result = ::ShellExecuteW(m_hWnd, L"open", path.c_str(),
+                                      nullptr, nullptr, SW_SHOWNORMAL);
+
+    if (reinterpret_cast<INT_PTR>(result) <= 32)
+    {
+        Logger::Warn(L"左栏启动失败：" + path);
+    }
+    else
+    {
+        Logger::Info(L"左栏启动：" + path);
+    }
+}
+
+// 固定区认的"应用"：可执行程序和快捷方式。
+// 其它文件（txt、图片、压缩包…）拖进来一律忽略，免得固定区变成第二个桌面。
+static bool LooksLikeApplication(const std::wstring& path)
+{
+    const wchar_t* extensions[] = { L".exe", L".lnk", L".bat", L".cmd", L".appref-ms" };
+
+    for (const wchar_t* extension : extensions)
+    {
+        size_t extLength = static_cast<size_t>(::lstrlenW(extension));
+
+        if (path.size() > extLength &&
+            ::_wcsicmp(path.c_str() + (path.size() - extLength), extension) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void MainWindow::AddPinnedItems(const std::vector<std::wstring>& sources)
+{
+    bool changed = false;
+    int  ignored = 0;
+
+    for (const std::wstring& path : sources)
+    {
+        DWORD attributes = ::GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            ++ignored;
+            continue;
+        }
+
+        core::PinnedItem item;
+        item.path     = path;
+        item.isFolder = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+        if (!item.isFolder && !LooksLikeApplication(path))
+        {
+            ++ignored;
+            continue;
+        }
+
+        // 显示名取路径末段；"C:\" 这种把尾部反斜杠去掉
+        size_t lastSlash = path.find_last_of(L'\\');
+        item.name = (lastSlash == std::wstring::npos) ? path : path.substr(lastSlash + 1);
+
+        while (!item.name.empty() && item.name.back() == L'\\')
+        {
+            item.name.pop_back();
+        }
+
+        if (item.name.empty())
+        {
+            ++ignored;
+            continue;
+        }
+
+        if (core::Settings::Instance().AddPinned(item))
+        {
+            changed = true;
+            Logger::Info(L"固定：" + item.name + L"（" + item.path + L"）");
+        }
+    }
+
+    if (!changed)
+    {
+        Logger::Info(L"拖进固定区的内容里没有可固定的项（忽略 " +
+                     std::to_wstring(ignored) + L" 项）");
+        return;
+    }
+
+    core::Settings::Instance().Save();
+
+    // 整栏重建后把选中状态补回来（重建会把选中清掉）
+    m_navigationPane.SetPinnedItems(core::Settings::Instance().PinnedItems());
+    m_navigationPane.SelectFolderPath(m_history.Current());
 }
 
 void MainWindow::UnregisterDropTargets()
@@ -1507,9 +1916,22 @@ void MainWindow::OnEnumerationDone()
         }
     }
 
-    ::SetWindowTextW(m_hWnd,
-                     (std::wstring(kWindowTitleBase) + L" - " + result->path +
-                      L"（" + std::to_wstring(result->entries.size()) + L" 项）").c_str());
+    // 标题也只在内容真的变了才重设（道理同 UpdateTitle：避免任务栏闪）
+    {
+        std::wstring title = std::wstring(kWindowTitleBase) + L" - " + DisplayNameForPath(result->path) +
+                             L"（" + std::to_wstring(result->entries.size()) + L" 项）";
+
+        if (title != m_lastTitle)
+        {
+            m_lastTitle = title;
+            ::SetWindowTextW(m_hWnd, title.c_str());
+        }
+    }
+
+    // 左栏选中状态跟着当前目录走：
+    // 当前目录在左栏里就选中它；不在（进了硬盘里的子文件夹）就清空选中。
+    // 清空是为了让"再点桌面"能生效——见 NavigationPane::SelectFolderPath 的说明
+    m_navigationPane.SelectFolderPath(result->path);
 
     UpdateNavigationState();
     UpdateStatusBar();
@@ -1567,6 +1989,26 @@ void MainWindow::OnItemActivated(size_t index)
 
     if (entry.isFolder && !entry.fullPath.empty())
     {
+        // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」）不一定真能"进去"：
+        // 控制面板里「恢复」「凭据管理器」「Windows Defender 防火墙」这些，
+        // 属性上是文件夹，其实是 applet（双击应该弹设置界面），往里进只会得到一个空列表，
+        // 用户看到的就是"双击打不开、只有个空文件夹"。
+        // 所以先探一下它是"容器"还是"applet"：容器就导航进去（空的也进去，显示空列表），
+        // applet 就交给系统按"打开"处理——和资源管理器双击的行为一致。
+        const bool isShellNamespace = (entry.fullPath.compare(0, 2, L"::") == 0) ||
+                                      (entry.fullPath.compare(0, 6, L"shell:") == 0);
+
+        if (isShellNamespace && !shell::ShellItemIsContainer(entry.fullPath))
+        {
+            HINSTANCE openResult = ::ShellExecuteW(m_hWnd, L"open", entry.fullPath.c_str(),
+                                                   nullptr, nullptr, SW_SHOWNORMAL);
+            if (reinterpret_cast<INT_PTR>(openResult) <= 32)
+            {
+                Logger::Error(L"打开虚拟项失败，路径=" + entry.fullPath);
+            }
+            return;
+        }
+
         NavigateToPath(entry.fullPath);
         return;
     }
@@ -1605,8 +2047,8 @@ void MainWindow::LayoutChildren()
     int buttonWidth  = Scale(34);
     int buttonHeight = Scale(32);
     int gap        = Scale(4);
-    int navHeight  = Scale(46);
-    int addressHeight = Scale(26);
+    int navHeight  = Scale(40);
+    int addressHeight = Scale(30);
 
     // 状态栏自己会贴到底部，先让它调整，再取高度
     ::SendMessageW(m_hStatusBar, WM_SIZE, 0, 0);
@@ -1618,6 +2060,9 @@ void MainWindow::LayoutChildren()
     int buttonY = (navHeight - buttonHeight) / 2;
     int cursorX = margin;
 
+    m_homeButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    cursorX += buttonWidth + gap;
+
     m_backButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
@@ -1625,10 +2070,18 @@ void MainWindow::LayoutChildren()
     cursorX += buttonWidth + gap;
 
     m_upButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
-    cursorX += buttonWidth + Scale(10);
+    cursorX += buttonWidth + gap;
+
+    m_refreshButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    cursorX += buttonWidth + Scale(8);   // 按钮组和地址栏之间留宽一点
+
+    // ---- 计算机图标（地址栏左端，和路径共用白色底）----
+    int addressY = (navHeight - addressHeight) / 2;
+    int computerWidth = Scale(28);
+    m_thisPcButton.Resize(cursorX, addressY, computerWidth, addressHeight);
+    cursorX += computerWidth;
 
     // ---- 地址栏 ----
-    int addressY = (navHeight - addressHeight) / 2;
     int addressWidth = clientWidth - cursorX - margin;
     if (addressWidth < Scale(150))
     {
@@ -1636,24 +2089,53 @@ void MainWindow::LayoutChildren()
     }
     m_addressBar.Resize(cursorX, addressY, addressWidth, addressHeight);
 
-    // ---- 左侧导航栏 + 文件列表 ----
+    // ---- 地址栏下面那条横线 ----
+    // 整条窗口宽，把上方"路径 + 按钮"的工具条和下面的内容区隔开
     int bodyHeight = clientHeight - navHeight - statusHeight;
     if (bodyHeight < 0)
     {
         bodyHeight = 0;
     }
 
-    int paneWidth = Scale(240);
+    m_addressDividerRect.left   = 0;
+    m_addressDividerRect.top    = navHeight;
+    m_addressDividerRect.right  = clientWidth;
+    m_addressDividerRect.bottom = navHeight + 1;
+
+    // ---- 左侧导航栏 + 文件列表 ----
+    // 内容区从横线下面 1 像素开始
+    int contentY      = navHeight + 1;
+    int contentHeight = bodyHeight - 1;
+    if (contentHeight < 0)
+    {
+        contentHeight = 0;
+    }
+
+    int paneWidth = CurrentPaneWidth();
 
     // 窗口太窄时收起左栏，保证列表还有足够宽度可看
     bool showPane = (m_navigationPane.Handle() != nullptr)
                     && (clientWidth - paneWidth) >= Scale(360);
 
+    m_paneVisible = showPane;
+
     if (showPane)
     {
         ::ShowWindow(m_navigationPane.Handle(), SW_SHOW);
-        m_navigationPane.Resize(0, navHeight, paneWidth, bodyHeight);
-        m_fileListView.Resize(paneWidth, navHeight, clientWidth - paneWidth, bodyHeight);
+
+        // 左栏铺满整条（0 ~ 竖线）：选中那一行的高亮要占满整条，
+        // 图标和文字的 10 像素留白在 NavigationPane 内部处理
+        m_navigationPane.Resize(0, contentY, paneWidth, contentHeight);
+
+        // 左栏右边那条竖线，宽 1 像素
+        m_paneDividerRect.left   = paneWidth;
+        m_paneDividerRect.top    = contentY;
+        m_paneDividerRect.right  = paneWidth + 1;
+        m_paneDividerRect.bottom = contentY + contentHeight;
+
+        // 文件列表从竖线右边开始
+        m_fileListView.Resize(paneWidth + 1, contentY,
+                              clientWidth - paneWidth - 1, contentHeight);
     }
     else
     {
@@ -1661,7 +2143,71 @@ void MainWindow::LayoutChildren()
         {
             ::ShowWindow(m_navigationPane.Handle(), SW_HIDE);
         }
-        m_fileListView.Resize(0, navHeight, clientWidth, bodyHeight);
+
+        ::SetRectEmpty(&m_paneDividerRect);
+        m_fileListView.Resize(0, contentY, clientWidth, contentHeight);
+    }
+
+    // 布局变了，窗口自己那两条线要重画
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+}
+
+// 鼠标是不是压在那条竖线上
+// 线本身只有 1 像素宽，太细不好抓，所以左右各放宽 3 像素当热区
+bool MainWindow::IsOnPaneDivider(int clientX) const
+{
+    if (!m_paneVisible)
+    {
+        return false;
+    }
+
+    int splitX    = CurrentPaneWidth();
+    int tolerance = Scale(3);
+
+    return clientX >= splitX - tolerance && clientX <= splitX + 1 + tolerance;
+}
+
+// 拖动分隔线：把左栏宽度改成鼠标所在的位置
+//
+// 宽度限制的考虑：
+//   最窄 150 —— 再窄的话「本地磁盘 (C:)」这种长名字会被截得只剩「本地…」
+//   最宽 400 —— 再宽就没必要了，列表那边该留的地方得留
+//   右边至少留 360 给列表，窗口本身很小的时候上限自动往下收
+void MainWindow::UpdatePaneWidth(int clientX)
+{
+    int minWidth = Scale(150);
+    int maxWidth = Scale(400);
+
+    RECT clientRect = {};
+    ::GetClientRect(m_hWnd, &clientRect);
+    int clientWidth = clientRect.right - clientRect.left;
+
+    int roomForList = clientWidth - Scale(360);
+    if (maxWidth > roomForList)
+    {
+        maxWidth = roomForList;
+    }
+
+    if (maxWidth < minWidth)
+    {
+        maxWidth = minWidth;
+    }
+
+    int width = clientX;
+
+    if (width < minWidth)
+    {
+        width = minWidth;
+    }
+    if (width > maxWidth)
+    {
+        width = maxWidth;
+    }
+
+    if (width != CurrentPaneWidth())
+    {
+        m_navWidth = width;
+        LayoutChildren();
     }
 }
 
@@ -1676,8 +2222,12 @@ void MainWindow::UpdateNavigationState()
     ::EnableWindow(m_forwardButton.Handle(), m_history.CanGoForward() ? TRUE : FALSE);
 
     std::wstring current = m_history.Current();
-    std::wstring parent  = NavigationHistory::ParentPath(current);
-    ::EnableWindow(m_upButton.Handle(), (parent != current) ? TRUE : FALSE);
+
+    // 「向上」能不能点也用同一套 Shell 逻辑判断：
+    // 这样到了顶层「桌面」时按钮会变灰（和资源管理器一致），
+    // 而不是像以前那样在 "C:\" 上永远亮着却点不动
+    std::wstring parent = current.empty() ? std::wstring() : shell::GetParentPath(current);
+    ::EnableWindow(m_upButton.Handle(), parent.empty() ? FALSE : TRUE);
 }
 
 void MainWindow::UpdateStatusBar()
@@ -1701,5 +2251,12 @@ void MainWindow::UpdateStatusBar()
         }
     }
 
+    // 文字没变就不重设：反复写同一句话也会让状态栏重绘一次，看着像闪
+    if (text == m_lastStatusText)
+    {
+        return;
+    }
+
+    m_lastStatusText = text;
     ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
 }

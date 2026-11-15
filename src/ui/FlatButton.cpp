@@ -7,6 +7,10 @@
 
 #include "FlatButton.h"
 
+#include <shellapi.h>   // SHGetStockIconInfo / SHSTOCKICONINFO
+
+#pragma comment(lib, "shell32.lib")
+
 namespace
 {
 
@@ -23,6 +27,9 @@ const int kCornerRadius = 6;
 const wchar_t* kGlyphBack    = L"\xE72B";   // ←
 const wchar_t* kGlyphForward = L"\xE72A";   // →
 const wchar_t* kGlyphUp      = L"\xE74A";   // ↑
+const wchar_t* kGlyphRefresh = L"\xE72C";   // 刷新（圆形箭头）
+const wchar_t* kGlyphHome    = L"\xE80F";   // 主页（小房子）
+const wchar_t* kGlyphPc      = L"\xE977";   // 计算机（系统图标取不到时的备用字形）
 
 } // namespace
 
@@ -36,6 +43,24 @@ FlatButton::~FlatButton()
     {
         ::DeleteObject(m_hArrowFont);
         m_hArrowFont = nullptr;
+    }
+
+    if (m_hArrowFontSmall != nullptr)
+    {
+        ::DeleteObject(m_hArrowFontSmall);
+        m_hArrowFontSmall = nullptr;
+    }
+
+    if (m_backBrush != nullptr)
+    {
+        ::DeleteObject(m_backBrush);
+        m_backBrush = nullptr;
+    }
+
+    if (m_hStockIcon != nullptr)
+    {
+        ::DestroyIcon(m_hStockIcon);
+        m_hStockIcon = nullptr;
     }
 }
 
@@ -104,44 +129,71 @@ bool FlatButton::Create(HWND parent, UINT id, ArrowKind kind, HINSTANCE hInstanc
         return false;
     }
 
+    // 底色画刷（后面可以用 SetBackgroundColor 换色）
+    m_backBrush = ::CreateSolidBrush(m_backColor);
+
+    // 「计算机」按钮用系统自带的电脑图标，比字体字形更像资源管理器
+    if (kind == ArrowKind::Computer)
+    {
+        SHSTOCKICONINFO stockInfo = {};
+        stockInfo.cbSize = sizeof(stockInfo);
+
+        if (SUCCEEDED(::SHGetStockIconInfo(SIID_DESKTOPPC,
+                                           SHGSI_ICON | SHGSI_SMALLICON,
+                                           &stockInfo)))
+        {
+            m_hStockIcon = stockInfo.hIcon;
+        }
+    }
+
     // 箭头字体：Win11 先用 Segoe Fluent Icons，没有就退回 Segoe MDL2 Assets
     {
-        int dpi        = ::GetDpiForWindow(m_hWnd);
-        if (dpi <= 0)
+        // 造一套图标字体的函数：pixelHeight 是想要的字形高度（96 DPI 下的像素）
+        auto makeIconFont = [this](int pixelHeight) -> HFONT
         {
-            dpi = 96;
-        }
-        int fontHeight = -::MulDiv(16, dpi, 96);
-
-        m_hArrowFont = ::CreateFontW(
-            fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-            L"Segoe Fluent Icons");
-
-        // 验证是否真的用上了这套字体（字体不存在时系统会悄悄换成别的）
-        if (m_hArrowFont != nullptr)
-        {
-            HDC dc = ::GetDC(m_hWnd);
-            HGDIOBJ oldFont = ::SelectObject(dc, m_hArrowFont);
-
-            wchar_t actualFace[LF_FACESIZE] = {};
-            ::GetTextFaceW(dc, LF_FACESIZE, actualFace);
-
-            ::SelectObject(dc, oldFont);
-            ::ReleaseDC(m_hWnd, dc);
-
-            if (::wcscmp(actualFace, L"Segoe Fluent Icons") != 0)
+            int dpi = ::GetDpiForWindow(m_hWnd);
+            if (dpi <= 0)
             {
-                ::DeleteObject(m_hArrowFont);
-
-                m_hArrowFont = ::CreateFontW(
-                    fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                    L"Segoe MDL2 Assets");
+                dpi = 96;
             }
-        }
+            int fontHeight = -::MulDiv(pixelHeight, dpi, 96);
+
+            HFONT font = ::CreateFontW(
+                fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                L"Segoe Fluent Icons");
+
+            // 验证是否真的用上了这套字体（字体不存在时系统会悄悄换成别的）
+            if (font != nullptr)
+            {
+                HDC dc = ::GetDC(m_hWnd);
+                HGDIOBJ oldFont = ::SelectObject(dc, font);
+
+                wchar_t actualFace[LF_FACESIZE] = {};
+                ::GetTextFaceW(dc, LF_FACESIZE, actualFace);
+
+                ::SelectObject(dc, oldFont);
+                ::ReleaseDC(m_hWnd, dc);
+
+                if (::wcscmp(actualFace, L"Segoe Fluent Icons") != 0)
+                {
+                    ::DeleteObject(font);
+
+                    font = ::CreateFontW(
+                        fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                        L"Segoe MDL2 Assets");
+                }
+            }
+
+            return font;
+        };
+
+        // 16px：主页那个小房子；14px：后退/前进/向上/刷新，比原来小约一成，更接近系统按钮的观感
+        m_hArrowFont      = makeIconFont(16);
+        m_hArrowFontSmall = makeIconFont(14);
     }
 
     return true;
@@ -154,6 +206,23 @@ void FlatButton::Resize(int x, int y, int width, int height)
         return;
     }
     ::SetWindowPos(m_hWnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void FlatButton::SetBackgroundColor(COLORREF color)
+{
+    m_backColor = color;
+
+    if (m_backBrush != nullptr)
+    {
+        ::DeleteObject(m_backBrush);
+        m_backBrush = nullptr;
+    }
+    m_backBrush = ::CreateSolidBrush(color);
+
+    if (m_hWnd != nullptr)
+    {
+        ::InvalidateRect(m_hWnd, nullptr, FALSE);
+    }
 }
 
 // ============================================================================
@@ -335,8 +404,9 @@ void FlatButton::Draw(HDC hdc)
     RECT clientRect = {};
     ::GetClientRect(m_hWnd, &clientRect);
 
-    // ---- 背景：平时就是窗口底色（白色），不画任何边框 ----
-    ::FillRect(hdc, &clientRect, ::GetSysColorBrush(COLOR_WINDOW));
+    // ---- 背景：平时就是工具条底色（不再是白底方块）----
+    ::FillRect(hdc, &clientRect,
+               m_backBrush != nullptr ? m_backBrush : ::GetSysColorBrush(COLOR_WINDOW));
 
     // ---- 悬停 / 按下：浅灰圆角背景 ----
     if (m_hot || m_pressed)
@@ -365,23 +435,66 @@ void FlatButton::Draw(HDC hdc)
 
 void FlatButton::DrawArrow(HDC hdc, const RECT& clientRect)
 {
-    // 箭头用图标字体画（和系统资源管理器是同一套字形，观感一致）
-    const wchar_t* glyph = kGlyphBack;
-    switch (m_kind)
-    {
-    case ArrowKind::Back:    glyph = kGlyphBack;    break;
-    case ArrowKind::Forward: glyph = kGlyphForward; break;
-    case ArrowKind::Up:      glyph = kGlyphUp;      break;
-    }
-
     COLORREF arrowColor = m_enabled
                           ? ::GetSysColor(COLOR_WINDOWTEXT)
                           : ::GetSysColor(COLOR_GRAYTEXT);
 
+    // 有系统图标（计算机按钮）：直接画图标，居中
+    if (m_hStockIcon != nullptr)
+    {
+        ICONINFO iconInfo = {};
+        int iconWidth  = 16;
+        int iconHeight = 16;
+
+        if (::GetIconInfo(m_hStockIcon, &iconInfo))
+        {
+            BITMAP bitmap = {};
+            if (iconInfo.hbmColor != nullptr && ::GetObjectW(iconInfo.hbmColor, sizeof(bitmap), &bitmap) > 0)
+            {
+                iconWidth  = bitmap.bmWidth;
+                iconHeight = bitmap.bmHeight;
+            }
+            if (iconInfo.hbmColor != nullptr) { ::DeleteObject(iconInfo.hbmColor); }
+            if (iconInfo.hbmMask != nullptr)  { ::DeleteObject(iconInfo.hbmMask); }
+        }
+
+        int x = clientRect.left + ((clientRect.right - clientRect.left) - iconWidth) / 2;
+        int y = clientRect.top  + ((clientRect.bottom - clientRect.top) - iconHeight) / 2;
+
+        ::DrawIconEx(hdc, x, y, m_hStockIcon, iconWidth, iconHeight, 0, nullptr, DI_NORMAL);
+
+        if (!m_enabled)
+        {
+            // 禁用时盖一层 50% 白，看起来是"灰掉"的（和系统禁用按钮观感一致）
+            HBRUSH coverBrush = ::CreateSolidBrush(RGB(248, 248, 248));
+            RECT   coverRect  = { x, y, x + iconWidth, y + iconHeight };
+            ::FillRect(hdc, &coverRect, coverBrush);
+            ::DeleteObject(coverBrush);
+        }
+        return;
+    }
+
+    // 其余用图标字体画（和系统资源管理器是同一套字形，观感一致）
+    const wchar_t* glyph = kGlyphBack;
+    switch (m_kind)
+    {
+    case ArrowKind::Back:     glyph = kGlyphBack;    break;
+    case ArrowKind::Forward:  glyph = kGlyphForward; break;
+    case ArrowKind::Up:       glyph = kGlyphUp;      break;
+    case ArrowKind::Refresh:  glyph = kGlyphRefresh; break;
+    case ArrowKind::Home:     glyph = kGlyphHome;    break;
+    case ArrowKind::Computer: glyph = kGlyphPc;      break;
+    }
+
     ::SetBkMode(hdc, TRANSPARENT);
     ::SetTextColor(hdc, arrowColor);
 
-    HGDIOBJ oldFont = ::SelectObject(hdc, m_hArrowFont);
+    // 后退 / 前进 / 向上 / 刷新 用 14px 那套，看起来比原来小一成
+    const bool  useSmall = (m_kind == ArrowKind::Back || m_kind == ArrowKind::Forward ||
+                            m_kind == ArrowKind::Up   || m_kind == ArrowKind::Refresh);
+    HFONT       font     = (useSmall && m_hArrowFontSmall != nullptr) ? m_hArrowFontSmall : m_hArrowFont;
+
+    HGDIOBJ oldFont = ::SelectObject(hdc, font);
 
     RECT textRect = clientRect;
     ::DrawTextW(hdc, glyph, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);

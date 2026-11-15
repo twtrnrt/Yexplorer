@@ -69,6 +69,18 @@ public:
     int GetIconIndexByPath(const std::wstring& path);
 
     // ------------------------------------------------------------------
+    // 按「完整路径」取图标并缓存（exe / lnk 这类"每个文件有自己的图标"的条目用）
+    //
+    // 为什么需要它：按扩展名取图标用的是假文件名 + SHGFI_USEFILEATTRIBUTES，
+    // 系统不会去读真实文件，所以所有 .exe 只能拿到同一个"通用程序"图标。
+    // exe 的图标是打包在 exe 自己文件里的，必须拿真实路径去问系统。
+    //
+    // 代价：每个条目一次 shell 查询（系统有图标缓存，通常零点几毫秒），
+    //       所以只在"可见行需要画图标"时才会调用，并且结果按路径缓存。
+    // ------------------------------------------------------------------
+    int GetIconIndexByFullPath(const std::wstring& path);
+
+    // ------------------------------------------------------------------
     // 取「半透明版」图标索引（被剪切的项目要看起来淡一点，和资源管理器一致）
     //
     // 做法：把原图标按 50% 透明度重画一份，追加进同一个图像列表，返回新索引。
@@ -89,6 +101,7 @@ private:
     HIMAGELIST               m_hImageList = nullptr;
 
     std::unordered_map<std::wstring, int> m_extensionIconCache;  // 扩展名 → 图标索引
+    std::unordered_map<std::wstring, int> m_pathIconCache;       // 完整路径 → 图标索引
     std::unordered_map<int, int>          m_dimmedIconCache;     // 原索引 → 半透明索引
 
     int  m_folderIconIndex  = 0;   // 文件夹统一图标

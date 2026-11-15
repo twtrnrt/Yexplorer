@@ -11,8 +11,9 @@
 // ============================================================================
 
 #include <windows.h>
-#include <objbase.h>        // CoInitializeEx / CoUninitialize
+#include <objbase.h>        // OleInitialize / OleUninitialize
 #include <commctrl.h>       // InitCommonControlsEx
+#include <shlobj.h>         // SetCurrentProcessExplicitAppUserModelID
 
 #include <string>
 
@@ -98,6 +99,11 @@ int WINAPI wWinMain(HINSTANCE hInstance,
     // ---------- 步骤 2：控件与 DPI ----------
     EnableCommonControls();
     EnableDpiAwareness();
+
+    // 给进程一个固定的应用标识（AppUserModelID）。
+    // 不设的话，每次改窗口标题（比如刷新后更新"（N 项）"）系统都会
+    // 重新生成任务栏按钮，表现为任务栏图标闪一下、窗口像失去了焦点。
+    ::SetCurrentProcessExplicitAppUserModelID(L"Kf168.FileExplorer");
 
     // ---------- 步骤 3：初始化 COM / OLE ----------
     // 用 OleInitialize 而不是 CoInitializeEx：

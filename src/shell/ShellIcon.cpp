@@ -8,6 +8,7 @@
 #include "ShellIcon.h"
 
 #include <cwctype>
+#include <shlobj.h>      // SHParseDisplayName（虚拟项取图标要靠它换成 PIDL）
 #include <shlwapi.h>
 
 #pragma comment(lib, "shlwapi.lib")
@@ -169,6 +170,87 @@ int IconCache::GetIconIndexByPath(const std::wstring& path)
         return m_folderIconIndex;
     }
     return fileInfo.iIcon;
+}
+
+// ============================================================================
+// 按完整路径取图标（exe / lnk 这类"图标长在文件自己身上"的条目用）
+//
+// 和上面按扩展名取图标的区别只有两点：
+//   1. 传给系统的不是假名字，而是真实路径；
+//   2. 不带 SHGFI_USEFILEATTRIBUTES，系统会真的去读这个文件（读它内嵌的图标）。
+// 结果按路径缓存，同一个文件只问一次。
+// ============================================================================
+
+int IconCache::GetIconIndexByFullPath(const std::wstring& path)
+{
+    if (!m_initialized || path.empty())
+    {
+        return 0;
+    }
+
+    // 「C:」这种光秃秃的盘符要补成「C:\」：不补的话系统会把它当成"当前目录"，
+    // 取回来的不是驱动器图标
+    std::wstring normalized = path;
+    if (normalized.size() == 2 && normalized[1] == L':')
+    {
+        normalized += L'\\';
+    }
+
+    auto cached = m_pathIconCache.find(normalized);
+    if (cached != m_pathIconCache.end())
+    {
+        return cached->second;
+    }
+
+    int iconIndex = 0;
+
+    // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」这种解析名）
+    // 千万不能直接把字符串丢给 SHGetFileInfo：实测它一律返回 0，
+    // 结果就是主文件夹 / 控制面板 / 网络 / 回收站全都显示成普通黄色文件夹。
+    // 正确做法是先 SHParseDisplayName 换成 PIDL，再用 SHGFI_PIDL 问图标。
+    const bool isShellNamespace = (normalized.compare(0, 2, L"::") == 0) ||
+                                  (normalized.compare(0, 6, L"shell:") == 0);
+
+    if (isShellNamespace)
+    {
+        PIDLIST_ABSOLUTE pidl = nullptr;
+        if (SUCCEEDED(::SHParseDisplayName(normalized.c_str(), nullptr, &pidl, 0, nullptr)) &&
+            pidl != nullptr)
+        {
+            SHFILEINFOW fileInfo = {};
+            DWORD_PTR result = ::SHGetFileInfoW(
+                reinterpret_cast<LPCWSTR>(pidl),
+                0,
+                &fileInfo,
+                sizeof(fileInfo),
+                SHGFI_PIDL | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+
+            if (result != 0)
+            {
+                iconIndex = fileInfo.iIcon;
+            }
+            ::CoTaskMemFree(pidl);
+        }
+    }
+    else
+    {
+        SHFILEINFOW fileInfo = {};
+        DWORD_PTR result = ::SHGetFileInfoW(
+            normalized.c_str(),
+            0,                                   // 0：让系统自己去取真实属性
+            &fileInfo,
+            sizeof(fileInfo),
+            SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+
+        // 取不到就给 0（列表会显示系统默认文件图标），不要太在意
+        if (result != 0)
+        {
+            iconIndex = fileInfo.iIcon;
+        }
+    }
+
+    m_pathIconCache[normalized] = iconIndex;
+    return iconIndex;
 }
 
 // ============================================================================

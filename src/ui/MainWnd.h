@@ -46,6 +46,9 @@ static const int kControlIdBack    = 1001;
 static const int kControlIdForward = 1002;
 static const int kControlIdUp      = 1003;
 static const int kControlIdAddress = 1004;
+static const int kControlIdHome    = 1010;   // 主页（去「我的文档」）
+static const int kControlIdRefresh = 1011;   // 刷新
+static const int kControlIdThisPc  = 1012;   // 计算机图标（去「此电脑」）
 
 // 快捷键命令 ID（和控件 ID 分开编号，避免撞号）
 static const int kCommandCopy      = 3101;   // Ctrl+C
@@ -126,6 +129,12 @@ private:
     // ---- 打开选中项 ----
     void OpenSelection();
 
+// 左栏里点了一项：是目录就进去，是程序/快捷方式就启动它
+void OpenPinnedOrFolder(const std::wstring& path);
+
+// 把拖进左栏固定区的东西记进配置文件（只记路径，不动文件本身）
+void AddPinnedItems(const std::vector<std::wstring>& sources);
+
     // ---- 排序（点表头）----
     void OnColumnClick(int column);
     void SortEntries();          // 按当前排序状态排一遍数据
@@ -148,6 +157,15 @@ private:
     // 重新布局所有子控件
     void LayoutChildren();
 
+    // 当前左栏宽度（还没拖过时用默认值 240）
+    int CurrentPaneWidth() const { return m_navWidth > 0 ? m_navWidth : Scale(240); }
+
+    // 鼠标是不是压在「左栏和列表中间那条竖线」上（热区比线本身宽几像素，方便抓住）
+    bool IsOnPaneDivider(int clientX) const;
+
+    // 拖动分隔线：把左栏宽度改成鼠标所在的位置
+    void UpdatePaneWidth(int clientX);
+
     // 按 DPI 缩放
     int Scale(int value) const;
 
@@ -165,6 +183,9 @@ private:
     FlatButton   m_backButton;         // 后退（自绘扁平按钮）
     FlatButton   m_forwardButton;      // 前进
     FlatButton   m_upButton;           // 向上
+    FlatButton   m_homeButton;         // 主页（点一下去「我的文档」）
+    FlatButton   m_refreshButton;      // 刷新
+    FlatButton   m_thisPcButton;       // 计算机图标（地址栏左端，点了去「此电脑」）
     AddressBar   m_addressBar;         // 地址栏（分段可点击，比如 C: > Windows）
 
     HWND         m_hStatusBar     = nullptr;
@@ -211,4 +232,24 @@ private:
     bool                                         m_resultReady = false;
     double                                       m_elapsedMs   = 0.0;
     std::wstring                                 m_enumPath;
+
+    // ---- 当前窗口标题 ----
+    // 记一份，只在标题真的变了才去设置：
+    // 每次刷新都重设标题会让任务栏按钮重新生成，视觉上窗口会"闪一下"
+    std::wstring                                 m_lastTitle;
+
+    // ---- 状态栏最后写进去的文字 ----
+    // 同样只在文字真的变了才重设，否则「14 个项目」和「正在读取…」来回切，
+    // 状态栏看着一直在闪
+    std::wstring                                 m_lastStatusText;
+
+    // ---- 左栏宽度（拖中间那条分隔线时改变）----
+    // 本轮只在这次运行里记住；关机重开又回默认 240，持久化留到阶段 10 统一做
+    int  m_navWidth         = 0;       // 0 表示还没拖过，用默认宽度
+    bool m_draggingSplitter = false;   // 是不是正在拖那条线
+    bool m_paneVisible      = false;   // 左栏当前是否显示（窗口太窄时会收起来）
+
+    // 两条分隔线的位置：LayoutChildren 里算好，WM_PAINT 直接照着画
+    RECT m_addressDividerRect = {};    // 地址栏下面那条横线
+    RECT m_paneDividerRect    = {};    // 左栏右边那条竖线
 };

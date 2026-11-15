@@ -9,18 +9,13 @@
 #include "core/Logger.h"
 
 #include <ShlObj.h>    // SHGetKnownFolderPath / FOLDERID_*
+#include <uxtheme.h>   // SetWindowTheme
+#include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM（右键菜单取坐标用）
 #include <string>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
-
-namespace
-{
-
-// 「此电脑」的 CLSID 路径。传给 SHGetFileInfoW 可以直接拿到系统的电脑图标。
-const wchar_t* kMyComputerClsid = L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-
-} // namespace
+#pragma comment(lib, "uxtheme.lib")
 
 // ============================================================================
 // 构造 / 析构
@@ -65,7 +60,8 @@ bool NavigationPane::Create(HWND parent, HINSTANCE hInstance, shell::IconCache* 
         return false;
     }
 
-    // 图标：直接借系统小图标图像列表
+    // 图标：先挂系统小图标图像列表，把树建出来（图标索引按系统列表算），
+    // 建完再换成"左边留白"的自建列表（索引一一对应，不会错位）
     if (iconCache != nullptr && iconCache->ImageList() != nullptr)
     {
         m_hImageList = iconCache->ImageList();
@@ -73,7 +69,16 @@ bool NavigationPane::Create(HWND parent, HINSTANCE hInstance, shell::IconCache* 
     }
 
     ApplyFont();
+
+    // 每个导航项目的高度：默认行高偏挤，撑到 30 像素（按当前 DPI 换算）
+    ::SendMessageW(m_hWnd, TVM_SETITEMHEIGHT,
+                   static_cast<WPARAM>(::MulDiv(30, ::GetDpiForWindow(m_hWnd), 96)), 0);
+
     BuildTree();
+
+    // 换成资源管理器自己的主题：它自带"图标离左边有点距离"的内边距，
+    // 比自己造图像列表干净，也不会动到选中高亮（高亮仍由控件画满整行）
+    ::SetWindowTheme(m_hWnd, L"Explorer", nullptr);
 
     return true;
 }
@@ -118,23 +123,9 @@ void NavigationPane::BuildTree()
     TreeView_DeleteAllItems(m_hWnd);
     m_nodes.clear();
 
-    // 「快速访问」分组标题用一个普通文件夹图标
+    // 文件夹图标：用系统文件夹图标
     // 注意不要用 "C:\" 取图标——那会被识别成驱动器，拿到硬盘图标
-    int iconFolder   = (m_iconCache != nullptr) ? m_iconCache->FolderIconIndex() : 0;
-    int iconComputer = (m_iconCache != nullptr)
-                       ? m_iconCache->GetIconIndexByPath(kMyComputerClsid) : iconFolder;
-
-    // ---------------- 快速访问 ----------------
-    HTREEITEM quickAccessItem = nullptr;
-    InsertGroup(TVI_ROOT, L"快速访问", iconFolder);
-    {
-        // 刚插入的分组就是 TreeView 的最后一个根节点，取回来当父节点
-        quickAccessItem = TreeView_GetRoot(m_hWnd);
-        while (TreeView_GetNextSibling(m_hWnd, quickAccessItem) != nullptr)
-        {
-            quickAccessItem = TreeView_GetNextSibling(m_hWnd, quickAccessItem);
-        }
-    }
+    int iconFolder = (m_iconCache != nullptr) ? m_iconCache->FolderIconIndex() : 0;
 
     struct KnownFolder
     {
@@ -144,13 +135,16 @@ void NavigationPane::BuildTree()
 
     const KnownFolder knownFolders[] =
     {
-        { &FOLDERID_Desktop,  L"桌面" },
+        { &FOLDERID_Desktop,   L"桌面" },
         { &FOLDERID_Downloads, L"下载" },
         { &FOLDERID_Documents, L"文档" },
         { &FOLDERID_Pictures,  L"图片" },
         { &FOLDERID_Music,     L"音乐" },
     };
 
+    // ---------------- 常用位置（最上面这一组）----------------
+    // 不再套「快速访问」这层分组标题：那层标题点不了、也不接受拖放，纯占位置，
+    // 所以直接把这几项排到最上层，点哪一项就跳哪一项
     for (const auto& known : knownFolders)
     {
         std::wstring path;
@@ -161,47 +155,89 @@ void NavigationPane::BuildTree()
 
         int iconIndex = (m_iconCache != nullptr)
                         ? m_iconCache->GetIconIndexByPath(path) : iconFolder;
-        InsertLeaf(quickAccessItem, known.displayName, path, iconIndex);
+        InsertLeaf(TVI_ROOT, known.displayName, path, iconIndex);
     }
 
-    TreeView_Expand(m_hWnd, quickAccessItem, TVE_EXPAND);
+    // ---------------- 分隔线 ----------------
+    // 常用位置和下面那组硬盘之间画一条横线（左右各留 10 像素）
+    InsertSeparator(TVI_ROOT);
 
-    // ---------------- 此电脑 ----------------
-    InsertGroup(TVI_ROOT, L"此电脑", iconComputer);
-    HTREEITEM computerItem = TreeView_GetRoot(m_hWnd);
-    while (TreeView_GetNextSibling(m_hWnd, computerItem) != nullptr)
+    // ---------------- 各硬盘 ----------------
+    // 同样不套「此电脑」这层分组标题，直接用一条横线隔开就够了
+    AddDrives(TVI_ROOT);
+
+    // ---------------- 固定区（用户自己拖进来的文件夹 / 程序）----------------
+    // 先来一条横线，把固定区和上面的硬盘隔开
+    InsertSeparator(TVI_ROOT);
+
+    // 记下固定区的起始位置（就是刚插进去那条分隔线的行顶）。
+    // 拖放时靠它判断"鼠标是不是进到固定区了"——进了就只做固定，不移动文件。
     {
-        computerItem = TreeView_GetNextSibling(m_hWnd, computerItem);
+        HTREEITEM separatorItem = m_nodes.back().item;
+        RECT      separatorRect = {};
+
+        if (separatorItem != nullptr &&
+            TreeView_GetItemRect(m_hWnd, separatorItem, &separatorRect, TRUE))
+        {
+            m_pinnedTop = separatorRect.top;
+        }
+        else
+        {
+            m_pinnedTop = -1;
+        }
     }
 
-    AddDrives(computerItem);
-    TreeView_Expand(m_hWnd, computerItem, TVE_EXPAND);
+    if (m_pinnedItems.empty())
+    {
+        // 一条都没有的时候给一行灰字，不然这块一片空白，用户不知道这里能干什么
+        InsertHint(TVI_ROOT, L"把文件夹或程序拖到这里");
+    }
+    else
+    {
+        for (const core::PinnedItem& item : m_pinnedItems)
+        {
+            InsertPinned(TVI_ROOT, item);
+        }
+    }
 
-    Logger::Info(L"左侧导航栏构建完成，节点数=" + std::to_wstring(m_nodes.size()));
+    Logger::Info(L"左侧导航栏构建完成，节点数=" + std::to_wstring(m_nodes.size()) +
+                 L"，固定项=" + std::to_wstring(m_pinnedItems.size()));
 }
 
-void NavigationPane::InsertGroup(HTREEITEM parentItem, const std::wstring& text, int iconIndex)
+// 插入一条分隔线用的占位节点
+//
+// 树控件没有原生的"分隔线"这种东西，惯例做法是插一个空行占位，
+// 然后在这一行上自己画一条横线（画在 HandleNotify 的 NM_CUSTOMDRAW 里）。
+// 这个节点不是目录：点它不跳转、拖到它上面也不接受。
+void NavigationPane::InsertSeparator(HTREEITEM parentItem)
 {
     size_t nodeIndex = m_nodes.size();
-    m_nodes.push_back(NodeData{ L"", true });
+
+    NodeData nodeData;
+    nodeData.isSeparator = true;      // 标记成"分隔线"，不是目录
+    m_nodes.push_back(nodeData);
 
     TVINSERTSTRUCTW insert = {};
     insert.hParent      = parentItem;
     insert.hInsertAfter = TVI_LAST;
     insert.item.mask    = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
-    insert.item.pszText        = const_cast<wchar_t*>(text.c_str());
+    insert.item.pszText        = const_cast<wchar_t*>(L"");
     insert.item.lParam         = static_cast<LPARAM>(nodeIndex);
-    insert.item.iImage         = iconIndex;
-    insert.item.iSelectedImage = iconIndex;
+    insert.item.iImage         = I_IMAGENONE;   // 不显示图标
+    insert.item.iSelectedImage = I_IMAGENONE;
 
-    TreeView_InsertItem(m_hWnd, &insert);
+    HTREEITEM item = TreeView_InsertItem(m_hWnd, &insert);
+    m_nodes[nodeIndex].item = item;
 }
 
 void NavigationPane::InsertLeaf(HTREEITEM parentItem, const std::wstring& text,
                                 const std::wstring& path, int iconIndex)
 {
     size_t nodeIndex = m_nodes.size();
-    m_nodes.push_back(NodeData{ path, false });
+
+    NodeData nodeData;
+    nodeData.path = path;
+    m_nodes.push_back(nodeData);
 
     TVINSERTSTRUCTW insert = {};
     insert.hParent      = parentItem;
@@ -212,9 +248,174 @@ void NavigationPane::InsertLeaf(HTREEITEM parentItem, const std::wstring& text,
     insert.item.iImage         = iconIndex;
     insert.item.iSelectedImage = iconIndex;
 
-    TreeView_InsertItem(m_hWnd, &insert);
+    HTREEITEM item = TreeView_InsertItem(m_hWnd, &insert);
+    m_nodes[nodeIndex].item = item;
 }
 
+// 插入一条固定项。
+// 文件夹用系统文件夹图标（按路径取，网络盘那种也能取对），
+// 程序和快捷方式按完整路径取它自己的图标（和文件列表里看到的一致）。
+void NavigationPane::InsertPinned(HTREEITEM parentItem, const core::PinnedItem& item)
+{
+    int iconIndex = 0;
+
+    if (m_iconCache != nullptr)
+    {
+        iconIndex = item.isFolder
+                    ? m_iconCache->GetIconIndexByPath(item.path)
+                    : m_iconCache->GetIconIndexByFullPath(item.path);
+    }
+
+    size_t nodeIndex = m_nodes.size();
+
+    NodeData nodeData;
+    nodeData.path     = item.path;
+    nodeData.isPinned = true;
+    m_nodes.push_back(nodeData);
+
+    TVINSERTSTRUCTW insert = {};
+    insert.hParent      = parentItem;
+    insert.hInsertAfter = TVI_LAST;
+    insert.item.mask    = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
+    insert.item.pszText        = const_cast<wchar_t*>(item.name.c_str());
+    insert.item.lParam         = static_cast<LPARAM>(nodeIndex);
+    insert.item.iImage         = iconIndex;
+    insert.item.iSelectedImage = iconIndex;
+
+    HTREEITEM treeItem = TreeView_InsertItem(m_hWnd, &insert);
+    m_nodes[nodeIndex].item = treeItem;
+}
+
+// 插入"固定区还空着"时的灰色提示行。
+// 这行不是目录：点它不跳转、也不能接收拖放（拖到这里算"拖到固定区"）。
+void NavigationPane::InsertHint(HTREEITEM parentItem, const std::wstring& text)
+{
+    size_t nodeIndex = m_nodes.size();
+
+    NodeData nodeData;
+    nodeData.isHint = true;
+    m_nodes.push_back(nodeData);
+
+    TVINSERTSTRUCTW insert = {};
+    insert.hParent      = parentItem;
+    insert.hInsertAfter = TVI_LAST;
+    insert.item.mask    = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
+    insert.item.pszText        = const_cast<wchar_t*>(text.c_str());
+    insert.item.lParam         = static_cast<LPARAM>(nodeIndex);
+    insert.item.iImage         = I_IMAGENONE;
+    insert.item.iSelectedImage = I_IMAGENONE;
+
+    HTREEITEM treeItem = TreeView_InsertItem(m_hWnd, &insert);
+    m_nodes[nodeIndex].item = treeItem;
+}
+
+// ============================================================================
+// 固定区
+// ============================================================================
+
+void NavigationPane::SetPinnedItems(const std::vector<core::PinnedItem>& items)
+{
+    m_pinnedItems = items;
+
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    BuildTree();   // 整树重建（项目就十几行，重建比增量改省心）
+}
+
+bool NavigationPane::IsInPinnedArea(POINT ptClient) const
+{
+    return m_pinnedTop >= 0 && ptClient.y >= m_pinnedTop;
+}
+
+// 右键菜单：只有压在固定项上才弹「取消固定」
+LRESULT NavigationPane::ShowContextMenu(int screenX, int screenY)
+{
+    if (m_hWnd == nullptr)
+    {
+        return 0;
+    }
+
+    POINT pt = { screenX, screenY };
+
+    if (screenX == -1 && screenY == -1)
+    {
+        // 键盘（Shift+F10 / 菜单键）唤起的：改用当前选中项的位置
+        HTREEITEM selected = TreeView_GetSelection(m_hWnd);
+        RECT      selectedRect = {};
+
+        if (selected == nullptr || !TreeView_GetItemRect(m_hWnd, selected, &selectedRect, FALSE))
+        {
+            return 0;
+        }
+
+        pt.x = selectedRect.left;
+        pt.y = selectedRect.bottom;
+    }
+    else
+    {
+        ::ScreenToClient(m_hWnd, &pt);
+    }
+
+    HTREEITEM hitItem = HitTestDroppableItem(pt);
+    if (hitItem == nullptr)
+    {
+        return 0;   // 空白处 / 分隔线 / 提示行：不弹菜单
+    }
+
+    TVITEMW treeItem = {};
+    treeItem.mask  = TVIF_PARAM;
+    treeItem.hItem = hitItem;
+
+    if (!TreeView_GetItem(m_hWnd, &treeItem))
+    {
+        return 0;
+    }
+
+    size_t nodeIndex = static_cast<size_t>(treeItem.lParam);
+    if (nodeIndex >= m_nodes.size() || !m_nodes[nodeIndex].isPinned)
+    {
+        return 0;   // 桌面、下载、硬盘这些不归固定区管，右键不弹菜单
+    }
+
+    // 先把这一项选中，让用户一眼看出操作的是哪个
+    TreeView_SelectItem(m_hWnd, hitItem);
+
+    POINT screenPt = pt;
+    ::ClientToScreen(m_hWnd, &screenPt);
+
+    HMENU menu = ::CreatePopupMenu();
+    ::AppendMenuW(menu, MF_STRING, 1, L"取消固定");
+    ::SetMenuDefaultItem(menu, 1, FALSE);
+
+    // 菜单的"主人"要给顶层窗口（主窗口），给树控件这种子窗口的话，
+    // 菜单会立刻收起来、键盘也点不动
+    HWND ownerWindow = ::GetAncestor(m_hWnd, GA_ROOT);
+    if (ownerWindow == nullptr)
+    {
+        ownerWindow = m_hWnd;
+    }
+
+    int command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                   screenPt.x, screenPt.y, 0, ownerWindow, nullptr);
+
+    ::DestroyMenu(menu);
+
+    Logger::Info(L"左栏右键菜单：command=" + std::to_wstring(command) +
+                 L"，项=" + m_nodes[nodeIndex].path);
+
+    if (command == 1 && m_onUnpin)
+    {
+        m_onUnpin(m_nodes[nodeIndex].path);
+    }
+
+    return 0;
+}
+
+// 右键菜单不用子类化 WM_CONTEXTMENU，改成走 HandleNotify 里的 NM_RCLICK
+// （NM_RCLICK 是树控件给父窗口的标准右键通知，不用额外挂窗口过程，更省事也更稳）。
 void NavigationPane::AddDrives(HTREEITEM parentItem)
 {
     DWORD driveMask = ::GetLogicalDrives();
@@ -292,7 +493,7 @@ bool NavigationPane::GetKnownFolderPath(const GUID& folderId, std::wstring& outP
 // 判定规则（和资源管理器左栏一致）：
 //   · 整行都算命中（控件开了 TVS_FULLROWSELECT，压在右边空白处也认）
 //   · 只有「纯展开箭头」不算（那是展开用的，不是放置区）
-//   · 分组标题（快速访问 / 此电脑）只是分类，不是真实目录，也不能放
+//   · 分隔线那一行不是目录，不能放
 HTREEITEM NavigationPane::HitTestDroppableItem(POINT ptClient) const
 {
     if (m_hWnd == nullptr)
@@ -330,38 +531,43 @@ HTREEITEM NavigationPane::HitTestDroppableItem(POINT ptClient) const
         return nullptr;
     }
 
-    if (m_nodes[nodeIndex].isGroup)
+    if (m_nodes[nodeIndex].isSeparator || m_nodes[nodeIndex].isHint)
     {
-        return nullptr;   // 分组标题不接受放置
+        return nullptr;   // 分隔线、提示行都不接受放置
     }
 
     return hitItem;
 }
 
-std::wstring NavigationPane::HitTestPath(POINT ptClient) const
+// 取某个节点对应的目录路径（分隔条、空白返回空串）
+std::wstring NavigationPane::ItemPath(HTREEITEM item) const
 {
-    HTREEITEM hitItem = HitTestDroppableItem(ptClient);
-    if (hitItem == nullptr)
+    if (m_hWnd == nullptr || item == nullptr)
     {
         return std::wstring();
     }
 
-    TVITEMW item = {};
-    item.mask  = TVIF_PARAM;
-    item.hItem = hitItem;
+    TVITEMW treeItem = {};
+    treeItem.mask  = TVIF_PARAM;
+    treeItem.hItem = item;
 
-    if (!TreeView_GetItem(m_hWnd, &item))
+    if (!TreeView_GetItem(m_hWnd, &treeItem))
     {
         return std::wstring();
     }
 
-    size_t nodeIndex = static_cast<size_t>(item.lParam);
+    size_t nodeIndex = static_cast<size_t>(treeItem.lParam);
     if (nodeIndex >= m_nodes.size())
     {
         return std::wstring();
     }
 
     return m_nodes[nodeIndex].path;
+}
+
+std::wstring NavigationPane::HitTestPath(POINT ptClient) const
+{
+    return ItemPath(HitTestDroppableItem(ptClient));
 }
 
 // 拖放高亮：把鼠标正压着的那一行点亮（用系统自带的 TVIS_DROPHILITED）
@@ -409,11 +615,163 @@ void NavigationPane::SetDropHighlight(HTREEITEM item)
     }
 }
 
+// ============================================================================
+// 左栏选中状态跟着当前目录走
+// ============================================================================
+
+// 比较两个路径是不是同一个目录：忽略大小写，忽略末尾多余的反斜杠
+static bool SameFolder(const std::wstring& a, const std::wstring& b)
+{
+    std::wstring x = a;
+    std::wstring y = b;
+
+    // "C:\" 这种盘符根长度正好 3，不能再砍，否则变成 "C:" 就比错了
+    while (x.size() > 3 && (x.back() == L'\\' || x.back() == L'/'))
+    {
+        x.pop_back();
+    }
+    while (y.size() > 3 && (y.back() == L'\\' || y.back() == L'/'))
+    {
+        y.pop_back();
+    }
+
+    return ::_wcsicmp(x.c_str(), y.c_str()) == 0;
+}
+
+void NavigationPane::SelectFolderPath(const std::wstring& path)
+{
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    HTREEITEM matched = nullptr;
+    HTREEITEM matchedPinned = nullptr;   // 固定项先记下来，上面那组没有命中时才用它
+
+    for (const NodeData& node : m_nodes)
+    {
+        if (node.isSeparator || node.isHint || node.item == nullptr)
+        {
+            continue;
+        }
+
+        if (!SameFolder(node.path, path))
+        {
+            continue;
+        }
+
+        // 同一个目录可能既有"文档"这种常用项、又被用户固定了一份。
+        // 优先点亮上面那组（固定区里那个只是快捷入口，不该抢主选中）。
+        if (node.isPinned)
+        {
+            if (matchedPinned == nullptr)
+            {
+                matchedPinned = node.item;
+            }
+            continue;
+        }
+
+        matched = node.item;
+        break;
+    }
+
+    if (matched == nullptr)
+    {
+        matched = matchedPinned;
+    }
+
+    // 找到就选中；找不到（进到了某个硬盘里的子文件夹）就清空选中。
+    // TreeView_SelectItem 触发的是 TVC_BYPROGRAM，HandleNotify 里只认
+    // TVC_BYMOUSE / TVC_BYKEYBOARD，所以这种"程序性选中"不会引发导航。
+    TreeView_SelectItem(m_hWnd, matched);
+}
+
 LRESULT NavigationPane::HandleNotify(LPARAM lParam)
 {
     if (lParam == 0)
     {
         return 0;
+    }
+
+    NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
+
+    // ------------------------------------------------------------
+    // 右键：树控件的 NM_RCLICK（固定区那一项上才弹「取消固定」）
+    // ------------------------------------------------------------
+    if (header->code == NM_RCLICK)
+    {
+        // 用光标实际位置（GetMessagePos 在某些情况下可能拿到更早一条消息的位置）
+        POINT cursor = {};
+        ::GetCursorPos(&cursor);
+        return ShowContextMenu(cursor.x, cursor.y);
+    }
+
+    // ------------------------------------------------------------
+    // 分隔线：那条横线是自己画的
+    //
+    // 树控件没有原生「分隔线」，惯例是插一个空行占位，然后在这一行上画线。
+    // 这里只接管「分隔线」这一行的绘制，其它行原样交给控件（不碰它们的观感）。
+    // ------------------------------------------------------------
+    if (header->code == NM_CUSTOMDRAW)
+    {
+        NMTVCUSTOMDRAW* customDraw = reinterpret_cast<NMTVCUSTOMDRAW*>(lParam);
+
+        if (customDraw->nmcd.dwDrawStage == CDDS_PREPAINT)
+        {
+            return CDRF_NOTIFYITEMDRAW;   // 每一行都问我们一次要不要自己画
+        }
+
+        if (customDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT)
+        {
+            size_t nodeIndex = static_cast<size_t>(customDraw->nmcd.lItemlParam);
+
+            if (nodeIndex < m_nodes.size() && m_nodes[nodeIndex].isSeparator)
+            {
+                RECT rowRect = {};
+                if (TreeView_GetItemRect(m_hWnd,
+                                         reinterpret_cast<HTREEITEM>(customDraw->nmcd.dwItemSpec),
+                                         &rowRect, TRUE))
+                {
+                    // 这一行是空节点，控件给出的"整行矩形"只有很窄一块，
+                    // 不能拿它当线的长度——线要按树控件的整个宽度来画。
+                    RECT clientRect = {};
+                    ::GetClientRect(m_hWnd, &clientRect);
+
+                    // 先铺满这一行的底色（横跨控件整宽）
+                    RECT rowBack = {};
+                    rowBack.left   = clientRect.left;
+                    rowBack.right  = clientRect.right;
+                    rowBack.top    = rowRect.top;
+                    rowBack.bottom = rowRect.bottom;
+                    ::FillRect(customDraw->nmcd.hdc, &rowBack, ::GetSysColorBrush(COLOR_WINDOW));
+
+                    // 左右各留 10 像素空白
+                    int inset = ::MulDiv(10, ::GetDpiForWindow(m_hWnd), 96);
+                    int lineY = (rowRect.top + rowRect.bottom) / 2;
+
+                    RECT lineRect = {};
+                    lineRect.left   = clientRect.left + inset;
+                    lineRect.right  = clientRect.right - inset;
+                    lineRect.top    = lineY;
+                    lineRect.bottom = lineY + 1;
+
+                    ::FillRect(customDraw->nmcd.hdc, &lineRect, ::GetSysColorBrush(COLOR_3DLIGHT));
+                }
+
+                return CDRF_SKIPDEFAULT;   // 这一行完全由我们自己画
+            }
+
+            // 固定区空着时的提示行：文字画成灰色，看起来是"说明"而不是"能点的东西"
+            if (nodeIndex < m_nodes.size() && m_nodes[nodeIndex].isHint)
+            {
+                customDraw->clrText = ::GetSysColor(COLOR_GRAYTEXT);
+                return CDRF_NEWFONT;
+            }
+
+            return CDRF_DODEFAULT;
+        }
+
+        return CDRF_DODEFAULT;
     }
 
     NMTREEVIEWW* treeView = reinterpret_cast<NMTREEVIEWW*>(lParam);
@@ -436,8 +794,8 @@ LRESULT NavigationPane::HandleNotify(LPARAM lParam)
         return 0;
     }
 
-    // 分组标题（快速访问 / 此电脑）只用来分类，点了不跳转
-    if (m_nodes[nodeIndex].isGroup)
+    // 分隔线那一行只是占位，点了不跳转
+    if (m_nodes[nodeIndex].isSeparator)
     {
         return 0;
     }

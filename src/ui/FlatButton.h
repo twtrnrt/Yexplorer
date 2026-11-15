@@ -32,6 +32,9 @@ public:
         Back,      // ←
         Forward,   // →
         Up,        // ↑
+        Refresh,   // 刷新（圆形箭头）
+        Home,      // 主页（小房子，点了去「我的文档」）
+        Computer,  // 计算机（点了去「此电脑」，用系统自带的电脑图标）
     };
 
     FlatButton() = default;
@@ -44,6 +47,11 @@ public:
     bool Create(HWND parent, UINT id, ArrowKind kind, HINSTANCE hInstance);
 
     void Resize(int x, int y, int width, int height);
+
+    // 设置按钮底色。
+    //   顶部工具栏上的按钮 → 设成工具条的 248 灰，这样不会有白底方块；
+    //   地址栏里的计算机按钮 → 设成白色，和路径的白底连成一片。
+    void SetBackgroundColor(COLORREF color);
 
     HWND Handle() const { return m_hWnd; }
 
@@ -68,5 +76,12 @@ private:
     bool m_enabled       = true;    // 是否可用
     bool m_trackingLeave = false;   // 是否已注册"鼠标离开"通知
 
-    HFONT m_hArrowFont   = nullptr; // 箭头图标字体（Segoe Fluent Icons / MDL2）
+    HFONT m_hArrowFont   = nullptr; // 箭头图标字体（Segoe Fluent Icons / MDL2），16px
+    HFONT m_hArrowFontSmall = nullptr; // 小一号（14px），给后退/前进/向上/刷新用
+
+
+    COLORREF m_backColor = RGB(248, 248, 248); // 按钮底色（默认跟顶部工具条一致）
+    HBRUSH   m_backBrush = nullptr;            // 底色画刷（按需重建）
+
+    HICON    m_hStockIcon = nullptr;           // 系统自带的图标（只给 Computer 用）
 };

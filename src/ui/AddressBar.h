@@ -39,6 +39,11 @@ public:
     // 外部导航到新目录后调用，重新生成分段
     void SetPath(const std::wstring& path);
 
+    // 虚拟文件夹专用（例如「此电脑」）。
+    // 这类路径是 ::{GUID} 形式，没法按反斜杠切段，整段显示 label，
+    // 点击整段仍然回到 path 本身。
+    void SetPathWithLabel(const std::wstring& path, const std::wstring& label);
+
     // 点了某一段时回调，参数是该段对应的完整路径
     void SetNavigateCallback(std::function<void(const std::wstring&)> callback);
 
@@ -85,6 +90,7 @@ private:
     UINT m_controlId = 0;
 
     std::wstring m_path;                          // 当前路径
+    std::wstring m_label;                         // 虚拟文件夹的显示名（如「此电脑」），普通路径为空
     std::vector<Segment> m_segments;              // 切好的分段
     std::vector<RECT>    m_segmentRects;          // 每段在控件内的矩形（用于命中判断）
     std::vector<bool>    m_segmentVisible;        // 该段是否被省略掉

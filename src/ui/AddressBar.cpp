@@ -151,6 +151,13 @@ int AddressBar::Scale(int value) const
 void AddressBar::SetPath(const std::wstring& path)
 {
     m_path = path;
+
+    // 普通磁盘路径：清掉虚拟文件夹的显示名，避免串味
+    if (m_path.compare(0, 2, L"::") != 0 && m_path.compare(0, 6, L"shell:") != 0)
+    {
+        m_label.clear();
+    }
+
     RebuildSegments();
 
     if (m_editing && m_hEdit != nullptr)
@@ -164,6 +171,12 @@ void AddressBar::SetPath(const std::wstring& path)
     }
 }
 
+void AddressBar::SetPathWithLabel(const std::wstring& path, const std::wstring& label)
+{
+    m_label = label;
+    SetPath(path);
+}
+
 void AddressBar::RebuildSegments()
 {
     m_segments.clear();
@@ -172,6 +185,18 @@ void AddressBar::RebuildSegments()
     std::wstring p = m_path;
     if (p.empty())
     {
+        return;
+    }
+
+    // 虚拟文件夹（「此电脑」这类）：路径是 ::{GUID}，没法切段，
+    // 整条显示系统给的名字，点它就是回它自己
+    if (!m_label.empty() &&
+        (p.compare(0, 2, L"::") == 0 || p.compare(0, 6, L"shell:") == 0))
+    {
+        Segment segment;
+        segment.text     = m_label;
+        segment.fullPath = p;
+        m_segments.push_back(segment);
         return;
     }
 
@@ -377,9 +402,13 @@ void AddressBar::Draw(HDC hdc)
     // 背景
     ::FillRect(hdc, &clientRect, ::GetSysColorBrush(COLOR_WINDOW));
 
-    // 编辑模式下由输入框自己画，这里只画背景
+    // 编辑模式：输入框自己填白，这里给它描一圈边框
+    // （输入框内缩了 1 像素，这圈线正好露在外面，不会被输入框盖住；
+    //   之前靠输入框自己的 STATICEDGE，右边和下边会被父窗口边缘裁掉）
     if (m_editing)
     {
+        RECT frame = clientRect;
+        ::FrameRect(hdc, &frame, ::GetSysColorBrush(COLOR_3DLIGHT));
         return;
     }
 
@@ -475,7 +504,7 @@ void AddressBar::BeginEditingImpl()
     if (m_hEdit == nullptr)
     {
         m_hEdit = ::CreateWindowExW(
-            WS_EX_STATICEDGE,
+            0,
             L"EDIT", L"",
             WS_CHILD | ES_AUTOHSCROLL | ES_LEFT,
             0, 0, 0, 0,
@@ -498,11 +527,18 @@ void AddressBar::BeginEditingImpl()
                             reinterpret_cast<DWORD_PTR>(this));
     }
 
-    // 拉满整个客户区
+    // 比客户区小一圈（内缩 1 像素）：
+    // 编辑框自己的边框画在窗口内侧，如果铺满客户区，右边和下边的边框
+    // 正好压在父窗口边界上会被裁掉，看着像"没有右边线、没有下边线"
     RECT clientRect = {};
     ::GetClientRect(m_hWnd, &clientRect);
-    ::SetWindowPos(m_hEdit, HWND_TOP, 0, 0, clientRect.right, clientRect.bottom,
-                   SWP_SHOWWINDOW);
+    int inset     = 1;
+    int editWidth  = clientRect.right  - inset * 2;
+    int editHeight = clientRect.bottom - inset * 2;
+    if (editWidth  < 1) { editWidth  = 1; }
+    if (editHeight < 1) { editHeight = 1; }
+
+    ::SetWindowPos(m_hEdit, HWND_TOP, inset, inset, editWidth, editHeight, SWP_SHOWWINDOW);
 
     m_editing = true;
     ::SetWindowTextW(m_hEdit, m_path.c_str());
@@ -621,7 +657,13 @@ LRESULT AddressBar::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         {
             RECT clientRect = {};
             ::GetClientRect(m_hWnd, &clientRect);
-            ::SetWindowPos(m_hEdit, HWND_TOP, 0, 0, clientRect.right, clientRect.bottom,
+            int inset      = 1;
+            int editWidth  = clientRect.right  - inset * 2;
+            int editHeight = clientRect.bottom - inset * 2;
+            if (editWidth  < 1) { editWidth  = 1; }
+            if (editHeight < 1) { editHeight = 1; }
+
+            ::SetWindowPos(m_hEdit, HWND_TOP, inset, inset, editWidth, editHeight,
                            SWP_NOACTIVATE);
         }
         ::InvalidateRect(m_hWnd, nullptr, FALSE);
