@@ -34,7 +34,60 @@ const wchar_t* kPreferredDropEffect = L"Preferred DropEffect";
 } // namespace
 
 // ============================================================================
-// 写剪贴板
+// 写一段纯文字进剪贴板（「复制文件路径」用）
+//
+// 和 WriteFiles 分开：那个放的是 CF_HDROP（文件清单），
+// 这个放的是 CF_UNICODETEXT（一段文字），记事本、输入框之类的地方都能直接粘贴。
+// ============================================================================
+bool WriteText(const std::wstring& text, HWND owner)
+{
+    if (text.empty())
+    {
+        return false;
+    }
+
+    if (!OpenClipboardWithRetry(owner))
+    {
+        return false;
+    }
+
+    ::EmptyClipboard();
+
+    // 末尾要带一个 \0，按字符数算字节
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+
+    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hMem == nullptr)
+    {
+        ::CloseClipboard();
+        return false;
+    }
+
+    void* data = ::GlobalLock(hMem);
+    if (data == nullptr)
+    {
+        ::GlobalFree(hMem);
+        ::CloseClipboard();
+        return false;
+    }
+
+    ::memcpy(data, text.c_str(), bytes);
+    ::GlobalUnlock(hMem);
+
+    // 放进去成功之后这块内存归系统管，不能自己释放
+    if (::SetClipboardData(CF_UNICODETEXT, hMem) == nullptr)
+    {
+        ::GlobalFree(hMem);
+        ::CloseClipboard();
+        return false;
+    }
+
+    ::CloseClipboard();
+    return true;
+}
+
+// ============================================================================
+// 写剪贴板（文件）
 // ============================================================================
 bool WriteFiles(const std::vector<std::wstring>& paths, bool isCut, HWND owner)
 {

@@ -586,6 +586,8 @@ void MainWindow::CreateChildControls()
         { static_cast<BYTE>(FVIRTKEY),            VK_F2,     kCommandRename },
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Z',       kCommandUndo },   // 撤销
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Y',       kCommandRedo },   // 恢复
+        // 复制文件路径（和资源管理器一样是 Ctrl+Shift+C）
+        { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'C', kCommandCopyPath },
     };
 
     m_hAccelerator = ::CreateAcceleratorTableW(accelerators, ARRAYSIZE(accelerators));
@@ -856,6 +858,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         {
         case kCommandCopy:
             DoCopy();
+            return 0;
+        case kCommandCopyPath:
+            DoCopyPath();
             return 0;
         case kCommandCut:
             DoCut();
@@ -1559,6 +1564,40 @@ void MainWindow::DoCopy()
     Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 项（已写入系统剪贴板）");
 }
 
+// ---------------------------------------------------------------------------
+// 复制文件路径（右键菜单 + Ctrl+Shift+C）
+//
+// 和资源管理器一致：多条的话一行一条，整段文字进系统剪贴板，
+// 粘到记事本、聊天窗口、命令行里都能直接用。
+// ---------------------------------------------------------------------------
+void MainWindow::DoCopyPath()
+{
+    const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+    if (selected.empty())
+    {
+        return;
+    }
+
+    std::wstring text;
+
+    for (const auto& path : selected)
+    {
+        if (!text.empty())
+        {
+            text += L"\r\n";
+        }
+        text += path;
+    }
+
+    if (!shellclip::WriteText(text, m_hWnd))
+    {
+        Logger::Warn(L"复制文件路径失败（剪贴板可能被别的程序占用）");
+        return;
+    }
+
+    Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 条文件路径到剪贴板");
+}
+
 void MainWindow::DoCut()
 {
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
@@ -1879,6 +1918,7 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 //   ─────
 //   剪切
 //   复制
+//   复制文件路径        （只把路径文字放进剪贴板，Ctrl+Shift+C 也能触发）
 //   ─────
 //   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
 //   ─────
@@ -1905,6 +1945,7 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+    ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
     // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1927,6 +1968,7 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 //   ─────
 //   剪切
 //   复制
+//   复制文件路径        （只把路径文字放进剪贴板，Ctrl+Shift+C 也能触发）
 //   ─────
 //   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
 //   ─────
@@ -1944,6 +1986,7 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderP
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+    ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
     // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1965,6 +2008,7 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderP
 //   ─────
 //   剪切
 //   复制
+//   复制文件路径        （多选时一行一条路径，Ctrl+Shift+C 也能触发）
 //   ─────
 //   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
 //   ─────
@@ -1981,6 +2025,7 @@ void MainWindow::BuildMultipleMenu(HMENU menu)
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+    ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
     // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);

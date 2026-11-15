@@ -579,9 +579,27 @@ void AddressBar::Draw(HDC hdc)
         if (hasNext)
         {
             RECT sepRect = { rect.right, rect.top, rect.right + sepWidth, rect.bottom };
-            ::SetTextColor(hdc, kSeparatorColor);
-            ::DrawTextW(hdc, L">", -1, &sepRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            ::SetTextColor(hdc, ::GetSysColor(COLOR_WINDOWTEXT));
+
+            // ------------------------------------------------------------
+            // 分隔符：不再画字体里的 ">"（那个角太尖、显得又小又挤），
+            // 改成自己画一个小尖角：两条 1px 的浅灰线，开口比 ">" 更开，
+            // 观感贴近资源管理器地址栏里那种细箭头。
+            // 想调形状就改这三个数：armWidth（横向伸出）、armHeight（上下各伸出）
+            // ------------------------------------------------------------
+            const int centerX = sepRect.left + (sepRect.right - sepRect.left) / 2;
+            const int centerY = sepRect.top + (sepRect.bottom - sepRect.top) / 2;
+            const int armWidth  = Scale(3);   // 横向伸出：小一点箭头更细长（系统那种观感）
+            const int armHeight = Scale(5);   // 上下各伸出
+
+            HPEN   pen    = ::CreatePen(PS_SOLID, 1, kSeparatorColor);
+            HGDIOBJ oldPen = ::SelectObject(hdc, pen);
+
+            ::MoveToEx(hdc, centerX - armWidth, centerY - armHeight, nullptr);
+            ::LineTo(hdc, centerX + armWidth, centerY);
+            ::LineTo(hdc, centerX - armWidth, centerY + armHeight);
+
+            ::SelectObject(hdc, oldPen);
+            ::DeleteObject(pen);
         }
     }
 

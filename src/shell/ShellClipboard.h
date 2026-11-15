@@ -29,6 +29,10 @@ namespace shellclip
 // isCut：true = 剪切（接收方粘贴完会删源），false = 复制
 bool WriteFiles(const std::vector<std::wstring>& paths, bool isCut, HWND owner);
 
+// 把一段纯文字放进系统剪贴板（CF_UNICODETEXT）。
+// 现在给右键「复制文件路径」用：多选时几条路径按行拼成一段文字。
+bool WriteText(const std::wstring& text, HWND owner);
+
 // 从系统剪贴板读出一批文件路径
 // 剪贴板里不是文件（比如是一段文字）就返回 false
 // isCut：读到的"首选效果"是不是移动

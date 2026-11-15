@@ -73,6 +73,7 @@ static const int kCommandProperties = 3202;  // 属性
 static const int kCommandOpenInNewWindow = 3203;  // 在新窗口中打开
 static const int kCommandUndo       = 3204;  // 撤销（Ctrl+Z）
 static const int kCommandRedo       = 3205;  // 恢复/重做（Ctrl+Y）
+static const int kCommandCopyPath   = 3206;  // 复制文件路径（Ctrl+Shift+C）
 
 // 「打开方式」子菜单里的命令
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
@@ -164,6 +165,7 @@ private:
 
     // ---- 文件操作（阶段 4）----
     void DoCopy();          // Ctrl+C：记住选中的路径
+    void DoCopyPath();      // Ctrl+Shift+C / 右键「复制文件路径」：把路径文字放进剪贴板
     void DoCut();           // Ctrl+X：记住选中的路径，粘贴时移动
     void DoPaste();         // Ctrl+V：复制/移动到家目录
     void DoDelete();        // Delete：删到回收站
