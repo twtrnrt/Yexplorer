@@ -71,7 +71,8 @@ static const int kCommandGoUp      = 3108;   // Backspace
 static const int kCommandOpen       = 3201;  // 打开
 static const int kCommandProperties = 3202;  // 属性
 static const int kCommandOpenInNewWindow = 3203;  // 在新窗口中打开
-static const int kCommandUndo       = 3204;  // 撤销（Ctrl+Z 同效）
+static const int kCommandUndo       = 3204;  // 撤销（Ctrl+Z）
+static const int kCommandRedo       = 3205;  // 恢复/重做（Ctrl+Y）
 
 // 「打开方式」子菜单里的命令
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
@@ -205,10 +206,13 @@ private:
     void FillViewMenu(HMENU parentMenu);
     void FillNewFolderAndNewMenu(HMENU menu);
 
-    // ---- 撤销（只记最近一次操作，和资源管理器一样单步撤销）----
+    // ---- 撤销 / 恢复（多级，和资源管理器一样 Ctrl+Z / Ctrl+Y）----
     //
-    // 文案跟系统一样，显示成「撤销 删除」「撤销 重命名」「撤销 移动」
-    // 「撤销 复制」「撤销 新建」；没有可撤销的操作时整项不出现。
+    // 每一步记成一条 UndoRecord：操作前在哪（beforePaths）、操作后在哪（afterPaths）。
+    // 撤销 = 按相反方向做一遍，做完把这条压进重做栈；重做 = 再按原方向做一遍。
+    //
+    // 菜单文案跟系统一样，显示「撤销 删除」「撤销 重命名」「撤销 移动」
+    // 「撤销 复制」「撤销 新建」；栈空时这一项整条不出现。
     enum class UndoKind
     {
         None,
@@ -226,11 +230,17 @@ private:
         std::vector<std::wstring> beforePaths;   // 操作之前在哪（重命名前的全路径 / 移动和删除的源路径）
     };
 
-    UndoRecord m_undoRecord;
+    // 最多记多少级（再多也没人真的会连撤 50 步，省点内存）
+    static const size_t kMaxUndoSteps = 50;
 
-    void FillUndoItem(HMENU menu);     // 有可撤销的操作才往菜单里加一项
-    void PerformUndo();                // 真正执行撤销
-    void ClearUndoRecord();            // 没有可撤销的东西了
+    std::vector<UndoRecord> m_undoStack;   // 撤销栈（末尾是最新的一步）
+    std::vector<UndoRecord> m_redoStack;   // 重做栈（撤销过的步骤按顺序排在这里）
+
+    void PushUndoRecord(const UndoRecord& record);   // 操作成功后压栈（同时清空重做栈）
+    void FillUndoItem(HMENU menu);                   // 有可撤销的步骤才往菜单里加一项
+    void PerformUndo();                              // Ctrl+Z / 右键「撤销」
+    void PerformRedo();                              // Ctrl+Y
+    void ClearUndoHistory();                         // 清空两栈
 
     // 用另一个自身进程打开这个目录（「在新窗口中打开」）
     void OpenFolderInNewWindow(const std::wstring& folderPath);

@@ -581,6 +581,8 @@ void MainWindow::CreateChildControls()
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'A',       kCommandSelectAll },
         { static_cast<BYTE>(FVIRTKEY),            VK_BACK,   kCommandGoUp },
         { static_cast<BYTE>(FVIRTKEY),            VK_F2,     kCommandRename },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Z',       kCommandUndo },   // 撤销
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Y',       kCommandRedo },   // 恢复
     };
 
     m_hAccelerator = ::CreateAcceleratorTableW(accelerators, ARRAYSIZE(accelerators));
@@ -875,6 +877,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandUndo:
             PerformUndo();
             return 0;
+        case kCommandRedo:
+            PerformRedo();
+            return 0;
         case kCommandOpenInNewWindow:
         {
             // 「在新窗口中打开」：文件夹 / 盘符 用自身进程新开一个窗口
@@ -1081,28 +1086,31 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
             Logger::Info(L"文件操作完成");
 
-            // 记进撤销记录（单步：覆盖上一次）
+            // 记进撤销栈（操作成功才记，失败/取消不留记录）
             if (m_lastOperation == FileOperationKind::Delete)
             {
-                m_undoRecord.kind        = UndoKind::Delete;
-                m_undoRecord.beforePaths = m_operationPaths;   // 原路径：撤销时按它从回收站还原
-                m_undoRecord.afterPaths.clear();
+                UndoRecord record;
+                record.kind        = UndoKind::Delete;
+                record.beforePaths = m_operationPaths;   // 原路径：撤销时按它从回收站还原
+                PushUndoRecord(record);
             }
             else if (m_lastOperation == FileOperationKind::Move ||
                      m_lastOperation == FileOperationKind::Copy)
             {
-                m_undoRecord.kind = (m_lastOperation == FileOperationKind::Move)
-                                    ? UndoKind::Move : UndoKind::Copy;
-                m_undoRecord.beforePaths = m_operationPaths;
-                m_undoRecord.afterPaths.clear();
+                UndoRecord record;
+                record.kind        = (m_lastOperation == FileOperationKind::Move) ? UndoKind::Move
+                                                                                  : UndoKind::Copy;
+                record.beforePaths = m_operationPaths;
 
                 for (const std::wstring& source : m_operationPaths)
                 {
                     // 操作完成后这一项在目标目录里；用户中途改名会导致找不到，
                     // 撤销时那种项就静默跳过，不影响其它项
-                    m_undoRecord.afterPaths.push_back(
+                    record.afterPaths.push_back(
                         JoinDirectoryFile(m_operationTargetDirectory, FileNameOf(source)));
                 }
+
+                PushUndoRecord(record);
             }
         }
         else
@@ -2184,29 +2192,57 @@ static HRESULT RestoreDeletedFromRecycleBin(const std::vector<std::wstring>& ori
     return hr;
 }
 
+// ---------------------------------------------------------------------------
+// 撤销栈的维护
+// ---------------------------------------------------------------------------
+void MainWindow::PushUndoRecord(const UndoRecord& record)
+{
+    if (record.kind == UndoKind::None)
+    {
+        return;
+    }
+
+    m_undoStack.push_back(record);
+
+    // 超出上限就把最老的一步挤掉
+    if (m_undoStack.size() > kMaxUndoSteps)
+    {
+        m_undoStack.erase(m_undoStack.begin());
+    }
+
+    // 出现新操作后，原来"恢复"过的那些步骤就作废了（和所有编辑器一样）
+    m_redoStack.clear();
+}
+
+void MainWindow::ClearUndoHistory()
+{
+    m_undoStack.clear();
+    m_redoStack.clear();
+}
+
 void MainWindow::FillUndoItem(HMENU menu)
 {
+    if (m_undoStack.empty())
+    {
+        return;     // 没有可撤销的步骤：这一项整条不出现
+    }
+
     const wchar_t* verb = nullptr;
 
-    switch (m_undoRecord.kind)
+    switch (m_undoStack.back().kind)
     {
     case UndoKind::Create: verb = L"新建";   break;
     case UndoKind::Rename: verb = L"重命名"; break;
     case UndoKind::Move:   verb = L"移动";   break;
     case UndoKind::Copy:   verb = L"复制";   break;
     case UndoKind::Delete: verb = L"删除";   break;
-    default:               return;          // 没有可撤销的：这一项整条不出现
+    default:               return;
     }
 
     const std::wstring text = std::wstring(L"撤销 ") + verb + L"(&U)";
 
     ::AppendMenuW(menu, MF_STRING, kCommandUndo, text.c_str());
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-}
-
-void MainWindow::ClearUndoRecord()
-{
-    m_undoRecord = UndoRecord();
 }
 
 void MainWindow::PerformUndo()
@@ -2217,9 +2253,15 @@ void MainWindow::PerformUndo()
         return;
     }
 
-    // 拷贝一份再清空：撤销过程中就算出错也不会把记录搞乱
-    const UndoRecord record = m_undoRecord;
-    ClearUndoRecord();
+    if (m_undoStack.empty())
+    {
+        Logger::Info(L"撤销：没有可撤销的步骤");
+        return;
+    }
+
+    // 从栈顶那一 步开始反着做
+    const UndoRecord record = m_undoStack.back();
+    m_undoStack.pop_back();
 
     switch (record.kind)
     {
@@ -2232,6 +2274,17 @@ void MainWindow::PerformUndo()
             shellops::DeleteItems({ path }, m_hWnd);
         }
         Logger::Info(L"撤销：已删除 " + std::to_wstring(record.afterPaths.size()) + L" 项");
+
+        // 「新建」撤销后没法重做（原来的文件内容已经没了），
+        // 把重做栈清掉，免得 Ctrl+Y 恢复到一半
+        if (record.kind == UndoKind::Create)
+        {
+            m_redoStack.clear();
+        }
+        else
+        {
+            m_redoStack.push_back(record);
+        }
         break;
     }
 
@@ -2245,6 +2298,7 @@ void MainWindow::PerformUndo()
             shellops::MoveItems({ record.afterPaths[i] }, parent, m_hWnd);
         }
         Logger::Info(L"撤销：已移回 " + std::to_wstring(count) + L" 项");
+        m_redoStack.push_back(record);
         break;
     }
 
@@ -2257,11 +2311,96 @@ void MainWindow::PerformUndo()
             shellops::RenameItem(record.afterPaths[i], FileNameOf(record.beforePaths[i]), m_hWnd);
         }
         Logger::Info(L"撤销：已改回 " + std::to_wstring(count) + L" 项的名字");
+        m_redoStack.push_back(record);
         break;
     }
 
     case UndoKind::Delete:
         RestoreDeletedFromRecycleBin(record.beforePaths, m_hWnd);
+        m_redoStack.push_back(record);
+        break;
+
+    default:
+        return;
+    }
+
+    RefreshCurrentFolder();
+}
+
+// ---------------------------------------------------------------------------
+// 恢复（重做）：把撤销过的那一步再正向做一遍
+//
+// 每类操作"正向"怎么做，和它撤销正好相反：
+//   重命名 → 改成 afterPaths 里的新名字
+//   移动   → 搬到 afterPaths 所在的目录
+//   复制   → 复制到 afterPaths 所在的目录
+//   删除   → 再删一次
+//   （新建没有重做：撤销时原有的文件内容已经进回收站，重做不出同一个文件）
+// ---------------------------------------------------------------------------
+void MainWindow::PerformRedo()
+{
+    if (m_operationRunning != nullptr && m_operationRunning->load())
+    {
+        Logger::Warn(L"有文件操作正在进行，恢复先不执行");
+        return;
+    }
+
+    if (m_redoStack.empty())
+    {
+        Logger::Info(L"恢复：没有可恢复的步骤");
+        return;
+    }
+
+    const UndoRecord record = m_redoStack.back();
+    m_redoStack.pop_back();
+
+    switch (record.kind)
+    {
+    case UndoKind::Rename:
+    {
+        const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            shellops::RenameItem(record.beforePaths[i], FileNameOf(record.afterPaths[i]), m_hWnd);
+        }
+        Logger::Info(L"恢复：已改回新名字 " + std::to_wstring(count) + L" 项");
+        m_undoStack.push_back(record);
+        break;
+    }
+
+    case UndoKind::Move:
+    {
+        const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            shellops::MoveItems({ record.beforePaths[i] },
+                                NavigationHistory::ParentPath(record.afterPaths[i]), m_hWnd);
+        }
+        Logger::Info(L"恢复：已再移动 " + std::to_wstring(count) + L" 项");
+        m_undoStack.push_back(record);
+        break;
+    }
+
+    case UndoKind::Copy:
+    {
+        const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            shellops::CopyItems({ record.beforePaths[i] },
+                                NavigationHistory::ParentPath(record.afterPaths[i]), m_hWnd);
+        }
+        Logger::Info(L"恢复：已再复制 " + std::to_wstring(count) + L" 项");
+        m_undoStack.push_back(record);
+        break;
+    }
+
+    case UndoKind::Delete:
+        for (const std::wstring& path : record.beforePaths)
+        {
+            shellops::DeleteItems({ path }, m_hWnd);
+        }
+        Logger::Info(L"恢复：已再删除 " + std::to_wstring(record.beforePaths.size()) + L" 项");
+        m_undoStack.push_back(record);
         break;
 
     default:
@@ -2709,10 +2848,13 @@ void MainWindow::DoNewItem(size_t index)
         return;
     }
 
-    // 记进撤销记录：撤销「新建」= 把刚建出来的这个文件删掉
-    m_undoRecord.kind = UndoKind::Create;
-    m_undoRecord.beforePaths.clear();
-    m_undoRecord.afterPaths.assign(1, created);
+    // 记进撤销栈：撤销「新建」= 把刚建出来的这个文件删掉
+    {
+        UndoRecord record;
+        record.kind = UndoKind::Create;
+        record.afterPaths.assign(1, created);
+        PushUndoRecord(record);
+    }
 
     // ---- 局部插入一行（不重扫整个目录）----
     std::wstring name = created;
@@ -3367,10 +3509,14 @@ void MainWindow::DoRename(size_t index, const std::wstring& newName)
 
     Logger::Info(L"重命名成功：" + oldName + L" → " + newName);
 
-    // 记进撤销记录：撤销就是把这个新名字改回 oldName
-    m_undoRecord.kind = UndoKind::Rename;
-    m_undoRecord.beforePaths.assign(1, oldPath);
-    m_undoRecord.afterPaths.assign(1, NavigationHistory::ParentPath(oldPath) + L"\\" + newName);
+    // 记进撤销栈：撤销「重命名」就是把这个新名字改回 oldName
+    {
+        UndoRecord record;
+        record.kind        = UndoKind::Rename;
+        record.beforePaths.assign(1, oldPath);
+        record.afterPaths.assign(1, NavigationHistory::ParentPath(oldPath) + L"\\" + newName);
+        PushUndoRecord(record);
+    }
 
     // 局部更新：只改这一行的名字和路径，再按新的名字重新排一下，不重扫目录
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
@@ -3771,10 +3917,13 @@ void MainWindow::DoNewFolder()
     {
         Logger::Info(L"新建文件夹成功：" + created);
 
-        // 记进撤销记录：撤销「新建」= 把这个刚建的文件夹删掉
-        m_undoRecord.kind = UndoKind::Create;
-        m_undoRecord.beforePaths.clear();
-        m_undoRecord.afterPaths.assign(1, created);
+        // 记进撤销栈：撤销「新建」= 把这个刚建的文件夹删掉
+        {
+            UndoRecord record;
+            record.kind = UndoKind::Create;
+            record.afterPaths.assign(1, created);
+            PushUndoRecord(record);
+        }
 
         // 不重扫整个目录：直接往列表里插一条，界面立刻更新
         // 目录名是最后一段
