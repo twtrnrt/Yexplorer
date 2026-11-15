@@ -1812,19 +1812,15 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 //   刷新            （和「查看」同一组，紧在查看下面）
 //   ─────
 //   粘贴            （剪贴板里有文件才出现）
+//   撤销 / 恢复      （紧跟在「粘贴」那一格的下一格，有才出现）
 //   ─────
 //   新建文件夹
 //   新建 >
 //   ─────
 //   属性
-//
-// 撤销项加在最上面（有可撤销的操作时才出现，文案随最近那次操作走，
-// 和资源管理器一样显示成「撤销 删除」「撤销 重命名」这种）
 // ---------------------------------------------------------------------------
 void MainWindow::BuildBackgroundMenu(HMENU menu)
 {
-    FillUndoItem(menu);
-
     FillViewMenu(menu);
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
 
@@ -1834,7 +1830,9 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
         ::AppendMenuW(menu, MF_STRING, kCommandPaste, L"粘贴(&P)");
     }
 
+    // 撤销 / 恢复 紧跟在「粘贴」的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    FillUndoItem(menu);
 
     FillNewFolderAndNewMenu(menu);
 
@@ -1851,6 +1849,8 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 //   剪切
 //   复制
 //   ─────
+//   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
+//   ─────
 //   删除
 //   ─────
 //   重命名
@@ -1859,9 +1859,6 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 // ---------------------------------------------------------------------------
 void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 {
-    // 撤销 / 恢复 放在最上面一组（空白处、单选、多选都一样）
-    FillUndoItem(menu);
-
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
     // 打开方式：只给"普通文件"；菜单内容全部来自内存里的账本，零成本
@@ -1878,7 +1875,10 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
     ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
 
+    // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    FillUndoItem(menu);
+
     ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1897,6 +1897,8 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 //   剪切
 //   复制
 //   ─────
+//   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
+//   ─────
 //   删除
 //   ─────
 //   重命名
@@ -1905,9 +1907,6 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 // ---------------------------------------------------------------------------
 void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderPath*/)
 {
-    // 撤销 / 恢复 放在最上面一组（空白处、单选、多选都一样）
-    FillUndoItem(menu);
-
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
     ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
 
@@ -1915,7 +1914,10 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderP
     ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
 
+    // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    FillUndoItem(menu);
+
     ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1933,6 +1935,8 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderP
 //   剪切
 //   复制
 //   ─────
+//   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
+//   ─────
 //   删除
 //   ─────
 //   属性
@@ -1941,16 +1945,16 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderP
 // ---------------------------------------------------------------------------
 void MainWindow::BuildMultipleMenu(HMENU menu)
 {
-    // 撤销 / 恢复 放在最上面一组（空白处、单选、多选都一样）
-    FillUndoItem(menu);
-
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
 
+    // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    FillUndoItem(menu);
+
     ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
