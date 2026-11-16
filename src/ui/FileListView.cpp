@@ -50,6 +50,12 @@ static const DWORD kTypeAheadTimeoutMs = 500;
 
 static const UINT kMsgFinishTileRename = WM_APP + 101;
 
+// 小图标视图的列宽（和 SetViewMode 里 SetIconSpacing 的宽度保持一致）与文字留白：
+// 留白 = 16px 图标 + 图标与文字的间距 + 右边一点空隙
+static const int kSmallIconColumnWidth = 200;
+static const int kSmallIconTextInset   = 26;
+
+
 
 // 判断一个名字是不是以 typed 开头（支持中文名按拼音首字母匹配）
 //
@@ -1471,6 +1477,10 @@ void FileListView::BeginRenameSelected()
 
     const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(selectedIndex)];
 
+    // 编辑框里的文字也主动灌一遍：小图标视图交给控件的名字是"截断 + 省略号"的显示文本，
+    // 不能拿它当改名的初始内容（否则一提交就把名字改成截断版了）。
+    ::SetWindowTextW(edit, entry.name.c_str());
+
     // ---- 只选中主文件名、不选扩展名（和资源管理器一致）----
     // 控件的编辑框默认是全选的（连扩展名一起），这里改回来
     int selectEnd = static_cast<int>(entry.name.size());
@@ -1707,6 +1717,94 @@ void FileListView::FinishTileRename(bool commit)
     {
         m_onRename(static_cast<size_t>(index), newName);
     }
+}
+
+// ============================================================================
+// 小图标视图：把名字压成"列宽内放得下 + 省略号"
+//
+// 小图标（LVS_SMALLICON）的列宽不是我们设的 200 说了算，控件是按这一批里"最长的标签"
+// 自己算的：名字特别长时列宽被顶到几百像素，一列就吃满客户区、排不进第二列，
+// 超出的字还会被控件硬裁（这个视图它不画省略号）。
+//
+// 所以先把名字截成"放进列宽 + …"，控件算出来的列宽就回落到固定值，横向自然能并排多列。
+// 返回的是缓存成员，控件收到后立刻用掉，所以同一轮绘制里多点几次也安全。
+// ============================================================================
+const std::wstring& FileListView::EllipsizeForSmallIcon(const std::wstring& name, int maxWidth)
+{
+    // 同一个名字、同一个宽度会反复问（每画一格问一次），结果直接复用
+    if (name == m_cacheNameSource && maxWidth == m_cacheNameWidth)
+    {
+        return m_cacheNameText;
+    }
+
+    m_cacheNameSource = name;
+    m_cacheNameWidth  = maxWidth;
+    m_cacheNameText   = name;
+
+    HDC dc = ::GetDC(m_hWnd);
+    if (dc == nullptr || maxWidth <= 0)
+    {
+        if (dc != nullptr)
+        {
+            ::ReleaseDC(m_hWnd, dc);
+        }
+        return m_cacheNameText;
+    }
+
+    HGDIOBJ oldFont = (m_hFont != nullptr) ? ::SelectObject(dc, m_hFont) : nullptr;
+
+    SIZE fullSize = {};
+    ::GetTextExtentPoint32W(dc, name.c_str(), static_cast<int>(name.size()), &fullSize);
+
+    if (fullSize.cx > maxWidth)
+    {
+        const wchar_t ellipsisText[] = L"…";
+        SIZE ellipsisSize = {};
+        ::GetTextExtentPoint32W(dc, ellipsisText, 1, &ellipsisSize);
+
+        const int budget = maxWidth - static_cast<int>(ellipsisSize.cx);
+
+        if (budget <= 0)
+        {
+            m_cacheNameText = ellipsisText;
+        }
+        else
+        {
+            // 二分找"放得下的最长前缀"，前半留原文、末尾补省略号
+            int low  = 0;
+            int high = static_cast<int>(name.size());
+            int best = 0;
+
+            while (low <= high)
+            {
+                const int mid = (low + high) / 2;
+
+                SIZE partialSize = {};
+                ::GetTextExtentPoint32W(dc, name.c_str(), mid, &partialSize);
+
+                if (partialSize.cx <= budget)
+                {
+                    best = mid;
+                    low  = mid + 1;
+                }
+                else
+                {
+                    high = mid - 1;
+                }
+            }
+
+            m_cacheNameText = name.substr(0, static_cast<size_t>(best));
+            m_cacheNameText += ellipsisText;
+        }
+    }
+
+    if (oldFont != nullptr)
+    {
+        ::SelectObject(dc, oldFont);
+    }
+    ::ReleaseDC(m_hWnd, dc);
+
+    return m_cacheNameText;
 }
 
 // ============================================================================
@@ -1990,6 +2088,25 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             if (m_viewMode == ViewMode::Tiles)
             {
                 displayInfo->item.pszText = const_cast<wchar_t*>(L"");
+            }
+            else if (m_viewMode == ViewMode::SmallIcon)
+            {
+                // 小图标视图：名字要先截到列宽之内，否则控件按最长名字把列宽顶大，
+                // 一列吃满整个客户区、排不下第二列（详见 EllipsizeForSmallIcon 的注释）
+                const DWORD spacing = static_cast<DWORD>(
+                    ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+                int columnWidth = static_cast<int>(LOWORD(spacing));
+
+                // 控件把间距顶得离谱（说明被长名字撑了）就按我们设定的宽度算；
+                // 正常 DPI 放大（125%、150%）不会超过两倍，仍然采控件自己的值
+                if (columnWidth <= 0 || columnWidth > kSmallIconColumnWidth * 2)
+                {
+                    columnWidth = kSmallIconColumnWidth;
+                }
+
+                const int textWidth = columnWidth - kSmallIconTextInset;
+                displayInfo->item.pszText = const_cast<wchar_t*>(
+                    EllipsizeForSmallIcon(entry.name, textWidth).c_str());
             }
             else
             {

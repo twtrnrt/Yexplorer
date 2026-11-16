@@ -239,6 +239,10 @@ private:
     // 画名字和弹编辑框都用它，编辑框才能正好压在名字上。
     RECT ComputeTileNameRect(HDC dc, const RECT& tileRect, const shell::ShellEntry& entry) const;
 
+    // 小图标视图：把名字截成"列宽内放得下 + 省略号"，结果缓存在 m_cacheNameText 里并返回它。
+    // 目的：不让长名字把控件算出来的列宽撑大（撑大了就只剩单列、右边一片空白）。
+    const std::wstring& EllipsizeForSmallIcon(const std::wstring& name, int maxWidth);
+
     // 在表头上去掉所有排序箭头
     void ClearSortArrows();
 
@@ -313,6 +317,12 @@ private:
 
     // 平铺视图自建的改名编辑框（多行框）；其它视图用控件自带的那个，这里保持 nullptr
     HWND                      m_hEdit = nullptr;
+
+    // 小图标视图"名字截断"的缓存：同一个名字 + 同一个宽度反复问，直接用上次的结果，
+    // 免得每画一格都测一次字宽
+    std::wstring              m_cacheNameSource;
+    std::wstring              m_cacheNameText;
+    int                       m_cacheNameWidth = 0;
 
     // 平铺视图"再点一下已选中项就进改名"用：上一次点中的是哪一项、什么时候点的。
     // 没有文字可比（owner-data 列表控件的 item 文本在平铺下是空的），只能靠时间判断
