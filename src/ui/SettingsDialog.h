@@ -65,7 +65,9 @@ private:
 private:
     HWND  m_hWnd   = nullptr;
     HWND  m_hOwner = nullptr;
-    HWND  m_hCheck = nullptr;   // 系统复选框
+    HWND  m_hCheck = nullptr;        // 系统复选框：右键菜单显示图标
+    HWND  m_hCheckHidden = nullptr;  // 系统复选框：显示隐藏的文件和文件夹
+    HWND  m_hCheckSystem = nullptr;  // 系统复选框：显示受保护的操作系统文件
 
     HFONT m_font      = nullptr;   // 正文
     HFONT m_fontTitle = nullptr;   // 标题（比正文大一号、略粗）

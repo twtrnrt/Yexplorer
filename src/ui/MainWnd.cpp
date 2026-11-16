@@ -1016,9 +1016,22 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             case kControlIdSettings:
             {
-                // 设置窗口（里面就一个「右键菜单显示图标」开关）
+                // 设置窗口（右键菜单图标、显示隐藏文件、默认文件管理器）
+                //
+                // 显示隐藏文件 / 显示系统文件这两个开关一改，当前目录的内容就会变，
+                // 所以记下改之前的值，关窗后发现有变化就按新规则重新枚举一次。
+                const core::Settings& settings = core::Settings::Instance();
+                const bool wasHidden = settings.ShowHiddenFiles();
+                const bool wasSystem = settings.ShowSystemFiles();
+
                 SettingsDialog dialog;
                 dialog.ShowModal(m_hWnd);
+
+                if (wasHidden != settings.ShowHiddenFiles() ||
+                    wasSystem != settings.ShowSystemFiles())
+                {
+                    RefreshCurrentFolder();
+                }
                 return 0;
             }
             default:

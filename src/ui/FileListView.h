@@ -235,6 +235,28 @@ private:
     void RestoreSelectionAndScroll(const std::vector<std::wstring>& selectedNames,
                                    const std::wstring&              topName);
 
+    // ------------------------------------------------------------------
+    // 按字母跳转（和资源管理器「在视图中选择键入项」那一套一致）
+    //
+    // 规则：连续按下的字符累积成串（间隔超过 500ms 就清零重来），
+    //       从当前焦点项的下一个开始找"名字以这个串开头"的项，
+    //       找到末尾绕回开头；累积串没有匹配时退回用最后一个字符再找一次
+    //       （这就是"连按同一个字母能一直往下循环"的原理）。
+    //       中文名按拼音首字母参与匹配（文档 → wd，「重」的 z/c/t 都算命中）。
+    // 实现：子类化列表控件，拦 WM_CHAR，吃掉字符，避免控件自己再做一次单字母跳转。
+    // ------------------------------------------------------------------
+    static LRESULT CALLBACK ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                                 LPARAM lParam, UINT_PTR id, DWORD_PTR refData);
+
+    // 处理一个输入字符：返回 true 表示已经跳转、这个字符被消费掉了
+    bool HandleTypeAheadCharacter(wchar_t ch);
+
+    // 从 startIndex 之后开始按 needle 找匹配项（扫到末尾再绕回开头），找不到返回 -1
+    int FindTypeAheadMatch(const std::wstring& needle, int startIndex) const;
+
+    std::wstring m_typeAhead;              // 累积的输入串
+    DWORD        m_typeAheadTick = 0;      // 上一次按键的 GetTickCount，用来判断超时
+
 private:
     HWND                                          m_hWnd      = nullptr;
     std::shared_ptr<shell::EnumerateResult>        m_result;

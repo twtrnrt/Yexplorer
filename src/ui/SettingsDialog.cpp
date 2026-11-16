@@ -27,12 +27,14 @@ const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 // 客户区大小（不含标题栏与边框）
 const int kClientWidth  = 420;
-const int kClientHeight = 330;
+const int kClientHeight = 430;
 const int kPadding      = 24;
 
 // 控件 ID
-const int kControlIdMenuIcons = 4001;
-const int kControlIdClose     = 4002;
+const int kControlIdMenuIcons  = 4001;
+const int kControlIdClose      = 4002;
+const int kControlIdShowHidden = 4003;   // 显示隐藏的文件和文件夹
+const int kControlIdShowSystem = 4004;   // 显示受保护的操作系统文件
 
 // 颜色
 const COLORREF kBackgroundColor = RGB(255, 255, 255);
@@ -54,6 +56,11 @@ const wchar_t* kTitleText = L"设置";
 
 const wchar_t* kHintText1 = L"勾选后，「打开方式」和「新建」菜单里的每一项前面会显示小图标。";
 const wchar_t* kHintText2 = L"不勾选就是纯文字菜单（默认，弹出更快）。改动立即保存。";
+
+// 显示隐藏 / 系统文件那一段的说明
+const wchar_t* kHiddenCheckText = L"显示隐藏的文件和文件夹";
+const wchar_t* kSystemCheckText = L"显示受保护的操作系统文件";
+const wchar_t* kHiddenHintText  = L"隐藏项用浅灰文字标示。改动立即生效，不用重启程序。";
 
 // 「默认文件管理器」按钮的两套文案
 const wchar_t* kActionTextRegister  = L"注册为默认文件管理器";
@@ -270,6 +277,34 @@ bool SettingsDialog::CreateDialogWindow()
                        core::Settings::Instance().MenuIcons() ? BST_CHECKED : BST_UNCHECKED, 0);
     }
 
+    // ---- 显示隐藏文件 / 显示系统文件两个复选框 ----
+    // 和资源管理器「查看」选项卡里那两个选项一一对应，默认都不勾。
+    m_hCheckHidden = ::CreateWindowExW(0, L"BUTTON", kHiddenCheckText,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                       0, 0, 0, 0, m_hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdShowHidden)),
+                                       ::GetModuleHandleW(nullptr), nullptr);
+
+    m_hCheckSystem = ::CreateWindowExW(0, L"BUTTON", kSystemCheckText,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                       0, 0, 0, 0, m_hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdShowSystem)),
+                                       ::GetModuleHandleW(nullptr), nullptr);
+
+    if (m_hCheckHidden != nullptr)
+    {
+        ::SendMessageW(m_hCheckHidden, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SendMessageW(m_hCheckHidden, BM_SETCHECK,
+                       core::Settings::Instance().ShowHiddenFiles() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    if (m_hCheckSystem != nullptr)
+    {
+        ::SendMessageW(m_hCheckSystem, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SendMessageW(m_hCheckSystem, BM_SETCHECK,
+                       core::Settings::Instance().ShowSystemFiles() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
     // 「默认文件管理器」按钮的初始文案：问一次注册表，看当前 exe 是不是已经注册过
     m_defaultManagerRegistered = shell::IsDefaultFileManager();
 
@@ -284,11 +319,27 @@ void SettingsDialog::Layout()
 
     const int padding = Scale(kPadding);
 
-    // 复选框：标题下面
+    // 三个复选框：第一块（图标开关）在标题下面，第二块（隐藏/系统）在它说明文字下面
     if (m_hCheck != nullptr)
     {
         ::MoveWindow(m_hCheck,
                      padding, padding + Scale(44),
+                     clientRect.right - padding * 2, Scale(24),
+                     TRUE);
+    }
+
+    if (m_hCheckHidden != nullptr)
+    {
+        ::MoveWindow(m_hCheckHidden,
+                     padding, padding + Scale(132),
+                     clientRect.right - padding * 2, Scale(24),
+                     TRUE);
+    }
+
+    if (m_hCheckSystem != nullptr)
+    {
+        ::MoveWindow(m_hCheckSystem,
+                     padding, padding + Scale(160),
                      clientRect.right - padding * 2, Scale(24),
                      TRUE);
     }
@@ -299,7 +350,7 @@ void SettingsDialog::Layout()
     const int actionHeight = Scale(32);
 
     m_actionRect.left   = padding;
-    m_actionRect.top    = padding + Scale(148);
+    m_actionRect.top    = padding + Scale(228);
     m_actionRect.right  = m_actionRect.left + actionWidth;
     m_actionRect.bottom = m_actionRect.top + actionHeight;
 
@@ -323,10 +374,26 @@ void SettingsDialog::ApplyCheckState()
     const bool showIcons =
         (::SendMessageW(m_hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-    core::Settings::Instance().SetMenuIcons(showIcons);
-    core::Settings::Instance().Save();
+    // 显示隐藏 / 显示系统文件（两个独立开关，缺一个控件就沿用配置里的旧值）
+    const bool showHidden =
+        (m_hCheckHidden != nullptr) &&
+        (::SendMessageW(m_hCheckHidden, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-    Logger::Info(std::wstring(L"设置：右键菜单显示图标 = ") + (showIcons ? L"开" : L"关"));
+    const bool showSystem =
+        (m_hCheckSystem != nullptr) &&
+        (::SendMessageW(m_hCheckSystem, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    core::Settings& settings = core::Settings::Instance();
+    settings.SetMenuIcons(showIcons);
+    settings.SetShowHiddenFiles(showHidden);
+    settings.SetShowSystemFiles(showSystem);
+
+    // 一改就写盘，不做"确定/取消"
+    settings.Save();
+
+    Logger::Info(std::wstring(L"设置：右键菜单显示图标 = ") + (showIcons ? L"开" : L"关") +
+                 L"，显示隐藏文件 = " + (showHidden ? L"开" : L"关") +
+                 L"，显示系统文件 = " + (showSystem ? L"开" : L"关"));
 }
 
 void SettingsDialog::ToggleDefaultManager()
@@ -392,8 +459,14 @@ void SettingsDialog::Draw(HDC dc)
     hintRect.top += Scale(20);
     ::DrawTextW(dc, kHintText2, -1, &hintRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
+    // ---- 显示隐藏 / 系统文件那一段的说明（两个复选框下面一行小字）----
+    RECT hiddenHintRect = { Scale(kPadding), Scale(kPadding) + Scale(188),
+                            clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(214) };
+
+    ::DrawTextW(dc, kHiddenHintText, -1, &hiddenHintRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
+
     // ---- 分隔线（1px，浅灰）----
-    const int dividerY = Scale(kPadding) + Scale(132);
+    const int dividerY = Scale(kPadding) + Scale(212);
 
     HPEN dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
     HGDIOBJ oldPen  = ::SelectObject(dc, dividerPen);
@@ -492,7 +565,11 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         const int controlId = LOWORD(wParam);
         const int notifyCode = HIWORD(wParam);
 
-        if (controlId == kControlIdMenuIcons && notifyCode == BN_CLICKED)
+        // 三个复选框任何一个是用户点的，都按当前三个控件的状态整体存一次
+        if ((controlId == kControlIdMenuIcons ||
+             controlId == kControlIdShowHidden ||
+             controlId == kControlIdShowSystem) &&
+            notifyCode == BN_CLICKED)
         {
             ApplyCheckState();
             return 0;

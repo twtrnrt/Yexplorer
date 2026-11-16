@@ -13,6 +13,7 @@
 #include "shell/ShellDragDrop.h"
 #include "core/Format.h"
 #include "core/Logger.h"
+#include "core/PinyinInitials.h"   // 汉字 → 拼音首字母（按字母跳转时匹配中文名）
 
 #include <uxtheme.h>   // SetWindowTheme
 #include <algorithm>
@@ -28,6 +29,67 @@ static const int kTimeColumnWidth  = 160;   // 修改日期（默认值，用户
 static const int kTypeColumnWidth  = 120;   // 类型
 static const int kSizeColumnWidth  = 110;   // 大小
 static const int kNameColumnMin    = 260;   // 名称列保底宽度
+
+// ============================================================================
+// 按字母跳转：超时与匹配
+// ============================================================================
+
+// 两次按键间隔超过这个时间，累积的字母串就清零重新算（500ms，按需求定的）。
+// 这个值决定了"输入快的两个字母能不能连成一个词"：慢于半秒就当成两次独立的单字母跳转。
+static const DWORD kTypeAheadTimeoutMs = 500;
+
+// 判断一个名字是不是以 typed 开头（支持中文名按拼音首字母匹配）
+//
+// 逐字符比较，不分配任何内存：
+//   · 名字这一格是汉字 → 它的拼音首字母集合里要有 typed 对应的那个字母
+//     （「重」的集合是 {c, t, z}，所以输入 c 或 z 都算命中）
+//   · 名字这一格是普通字符（字母/数字/符号/空格/点）→ 直接比，不区分大小写
+// typed 的字符都应该是小写（调用方已经归一化）。
+static bool NameMatchesTypeAheadPrefix(const std::wstring& name, const std::wstring& typed)
+{
+    if (typed.empty() || name.size() < typed.size())
+    {
+        return false;
+    }
+
+    size_t index = 0;
+    for (const wchar_t ch : name)
+    {
+        if (index >= typed.size())
+        {
+            return true;   // typed 比完了，前面全都对上，就是一个前缀
+        }
+
+        const wchar_t typedChar = typed[index];
+        const unsigned int mask = core::PinyinInitialMask(ch);
+
+        if (mask != 0)
+        {
+            // 名字这一格是汉字：输入必须是小写字母，且是这个字的某个读音首字母
+            if (typedChar < L'a' || typedChar > L'z')
+            {
+                return false;
+            }
+            if ((mask & (1u << (typedChar - L'a'))) == 0)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            // 普通字符：统一按小写比较（数字、符号、空格、点本身就是它们自己）
+            if (static_cast<wchar_t>(::towlower(ch)) != typedChar)
+            {
+                return false;
+            }
+        }
+
+        ++index;
+    }
+
+    // 名字走完了还没把 typed 比完 → 名字太短，算不匹配
+    return index >= typed.size();
+}
 
 // ============================================================================
 // 哪些文件必须按「完整路径」取图标
@@ -133,6 +195,10 @@ bool FileListView::Create(HWND parent, HINSTANCE hInstance)
     // 用资源管理器自己的主题：选中行的样式（浅蓝底 + 细边）就和左栏导航一致了，
     // 这也是资源管理器列表本来的样子
     ::SetWindowTheme(m_hWnd, L"Explorer", nullptr);
+
+    // 子类化：为了拦 WM_CHAR 做"按字母跳转"（见 FileListSubclassProc 的注释）
+    ::SetWindowSubclass(m_hWnd, &FileListView::ListViewSubclassProc, 1,
+                        reinterpret_cast<DWORD_PTR>(this));
 
     return true;
 }
@@ -656,6 +722,10 @@ void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
     }
 
     m_result = std::move(result);
+
+    // 换目录 / 重新枚举了，之前攒的"按字母跳转"输入串就没意义了，清掉
+    m_typeAhead.clear();
+    m_typeAheadTick = 0;
 
     // 内容换了，之前记下的"拖放高亮"行号就对不上了，清掉（拖动中 DragOver 会重新设）
     m_dropHighlightPath.clear();
@@ -1200,6 +1270,135 @@ void FileListView::BeginRenameSelected()
 }
 
 // ============================================================================
+// 按字母跳转
+//
+// 和资源管理器「在视图中选择键入项」一套行为：
+//   1. 连续输入的字符累积成串（间隔超过 500ms 清零重来）；
+//   2. 从当前焦点项的下一个开始，找名字以这个串开头的项；
+//   3. 找到末尾绕回开头继续找（最多绕一圈）；
+//   4. 累积串一个都没匹配上，就退回用最后一个字符再找一次
+//      —— 这就是"连按同一个字母能一直往下循环"的原理；
+//   5. 命中后只选中它（清掉原来的多选）、滚到可见位置，不打开。
+//
+// 中文名按拼音首字母匹配，多音字的任一读音首字母都算命中（见 PinyinInitialMask）。
+ // ============================================================================
+
+LRESULT CALLBACK FileListView::ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                                    LPARAM lParam, UINT_PTR id, DWORD_PTR refData)
+{
+    FileListView* self = reinterpret_cast<FileListView*>(refData);
+
+    if (msg == WM_CHAR && self != nullptr)
+    {
+        // 注意：控件自己也有"单字母跳转"，返回 0 把它吃掉就不会跳第二次
+        if (self->HandleTypeAheadCharacter(static_cast<wchar_t>(wParam)))
+        {
+            return 0;
+        }
+    }
+    else if (msg == WM_NCDESTROY)
+    {
+        // 窗口要销毁了，把子类化摘掉（否则回调里还拿着已经释放的 this）
+        ::RemoveWindowSubclass(hWnd, &FileListView::ListViewSubclassProc, id);
+    }
+
+    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+int FileListView::FindTypeAheadMatch(const std::wstring& needle, int startIndex) const
+{
+    if (m_result == nullptr || m_result->entries.empty())
+    {
+        return -1;
+    }
+
+    const int count = static_cast<int>(m_result->entries.size());
+
+    // 从焦点项的下一项开始；没有焦点项（startIndex < 0）就从第一项开始
+    const int begin = (startIndex >= 0) ? (startIndex + 1) % count : 0;
+
+    for (int step = 0; step < count; ++step)
+    {
+        const int index = (begin + step) % count;
+        const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(index)];
+
+        // 分组标题行和占位格不是真实文件，跳过
+        if (entry.isGroupHeader || entry.isSpacer)
+        {
+            continue;
+        }
+
+        if (NameMatchesTypeAheadPrefix(entry.name, needle))
+        {
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+bool FileListView::HandleTypeAheadCharacter(wchar_t ch)
+{
+    if (m_hWnd == nullptr || m_result == nullptr || m_result->entries.empty())
+    {
+        return false;
+    }
+
+    // 只处理可打印字符。控制字符（回车、退格、Esc 等）原样交给控件和主窗口，
+    // 免得把"回车打开、Esc 取消"这类操作抢掉。
+    if (ch < 0x20 || ch == 0x7F)
+    {
+        return false;
+    }
+
+    // 大写统一成小写，比较时就不用再折一次
+    if (ch >= L'A' && ch <= L'Z')
+    {
+        ch = static_cast<wchar_t>(ch - L'A' + L'a');
+    }
+
+    // 超时（500ms）就当成新的一轮输入
+    const DWORD now = ::GetTickCount();
+    if (m_typeAhead.empty() || now - m_typeAheadTick > kTypeAheadTimeoutMs)
+    {
+        m_typeAhead.clear();
+    }
+
+    m_typeAheadTick = now;
+    m_typeAhead.push_back(ch);
+
+    const int startIndex = ListView_GetNextItem(m_hWnd, -1, LVNI_FOCUSED);
+
+    // 第一轮：用完整的累积串找
+    int foundIndex = FindTypeAheadMatch(m_typeAhead, startIndex);
+
+    if (foundIndex < 0 && m_typeAhead.size() > 1)
+    {
+        // 第二轮：累积串没命中（比如连按了两次 a，串变成 "aa"），
+        // 退回只用一个字符重新找 —— 这样连按同一个字母能一直循环到下一个
+        m_typeAhead.assign(1, m_typeAhead.back());
+        foundIndex = FindTypeAheadMatch(m_typeAhead, startIndex);
+    }
+
+    if (foundIndex < 0)
+    {
+        // 一个都没匹配上：不动作，也不响，保持安静（系统在没匹配时也不给提示）
+        return true;   // 字符仍然吃掉，别让它跑进控件触发默认的单字母跳转
+    }
+
+    // 清掉原来的多选，只选中命中的这一项（和系统一致：输入字母等于"选这一项"）
+    ListView_SetItemState(m_hWnd, -1, 0, LVIS_SELECTED);
+
+    ListView_SetItemState(m_hWnd, foundIndex,
+                          LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+
+    ListView_EnsureVisible(m_hWnd, foundIndex, FALSE);
+
+    return true;
+}
+
+// ============================================================================
 // 通知处理
 // ============================================================================
 
@@ -1457,6 +1656,16 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                     DrawTile(customDraw->nmcd.hdc, tileRect, index, selected);
                 }
                 return CDRF_SKIPDEFAULT;
+            }
+
+            // ---- 隐藏项：文字画成浅灰（和资源管理器里隐藏项的观感一致）----
+            // 资源管理器是"图标半透明 + 文字略淡"，我们这里先只把文字调淡，
+            // 图标仍是正常图标（不额外做一份半透明图标列表，省一份内存和绘制工作）。
+            if (m_result != nullptr && index < m_result->entries.size() &&
+                m_result->entries[index].isHidden)
+            {
+                customDraw->clrText = RGB(120, 120, 120);
+                return CDRF_NEWFONT;
             }
 
             if (m_result != nullptr && index < m_result->entries.size() &&

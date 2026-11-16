@@ -20,6 +20,7 @@
 
 #include "ShellFolder.h"
 #include "../core/Logger.h"
+#include "../core/Settings.h"   // 显示隐藏文件 / 系统文件两个开关
 
 // WIL：COM 智能指针与 HRESULT 工具
 #include <wil/com.h>
@@ -496,11 +497,24 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
         // ---------------- 第 3 步：拿枚举器 ----------------
         // SHCONTF_FOLDERS   —— 要文件夹
         // SHCONTF_NONFOLDERS—— 要文件
-        // 暂不包含隐藏项，保持和资源管理器默认行为一致
+        // SHCONTF_INCLUDEHIDDEN —— 只有配置里开了"显示隐藏文件"或"显示系统文件"才带。
+        //   不带的话隐藏项根本枚举不出来（和资源管理器默认一致，也更快）；
+        //   带上了以后还要在第 4 步按两个开关逐项过滤：
+        //     · 系统文件（带 FILE_ATTRIBUTE_SYSTEM，通常同时也带隐藏位）只看 showSystemFiles；
+        //     · 普通隐藏项只看 showHiddenFiles。
+        //   这就是资源管理器那两个选项的语义。
         wil::com_ptr<IEnumIDList> enumList;
-        THROW_IF_FAILED(folder->EnumObjects(nullptr,
-                                            SHCONTF_FOLDERS | SHCONTF_NONFOLDERS,
-                                            enumList.put()));
+
+        const core::Settings& settings = core::Settings::Instance();
+        const bool            needHidden = settings.NeedHiddenItems();
+
+        DWORD enumFlags = SHCONTF_FOLDERS | SHCONTF_NONFOLDERS;
+        if (needHidden)
+        {
+            enumFlags |= SHCONTF_INCLUDEHIDDEN;
+        }
+
+        THROW_IF_FAILED(folder->EnumObjects(nullptr, enumFlags, enumList.put()));
 
         // ---------------- 第 4 步：逐个取子项 ----------------
         LPITEMIDLIST childPidl = nullptr;
@@ -517,7 +531,45 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
                 break;
             }
 
+            // ----------------------------------------------------------
+            // 先按「显示隐藏文件 / 显示系统文件」两个开关过滤
+            //
+            // 只有开了其中至少一个才会走到这里（needHidden），每项多一次
+            // GetAttributesOf（本地项很快，几万项的目录也只是多几十毫秒）。
+            // 放在取名字、取大小之前判断：被过滤掉的项不做后续工作，省开销。
+            // ----------------------------------------------------------
+            bool isHidden     = false;
+            bool isSystemFile = false;
+
+            if (needHidden)
+            {
+                // 第二个参数要求 PCUITEMID_CHILD_ARRAY（每项是 const ITEMIDLIST*，
+                // 注意它带的 __unaligned 限定符，所以这里用 PCUITEMID_CHILD 中转，
+                // 直接写 const ITEMIDLIST* 会触发 C4090 警告）。
+                PCUITEMID_CHILD attributeTarget = childPidl;
+                SFGAOF          attrs           = SFGAO_HIDDEN | SFGAO_SYSTEM;
+
+                if (SUCCEEDED(folder->GetAttributesOf(1, &attributeTarget, &attrs)))
+                {
+                    isHidden     = (attrs & SFGAO_HIDDEN) != 0;
+                    isSystemFile = (attrs & SFGAO_SYSTEM) != 0;
+
+                    // 系统文件只受 showSystemFiles 管；普通隐藏项只受 showHiddenFiles 管
+                    const bool shouldShow = isSystemFile ? settings.ShowSystemFiles()
+                                                        : (!isHidden || settings.ShowHiddenFiles());
+                    if (!shouldShow)
+                    {
+                        ::CoTaskMemFree(childPidl);
+                        childPidl = nullptr;
+                        fetched   = 0;
+                        continue;
+                    }
+                }
+            }
+
             ShellEntry entry;
+            entry.isHidden     = isHidden;
+            entry.isSystemFile = isSystemFile;
             entry.isFolder = IsFolder(folder.get(), childPidl);
             entry.name     = GetDisplayName(folder.get(), childPidl);
             FillExtraInfo(folder.get(), childPidl, entry);

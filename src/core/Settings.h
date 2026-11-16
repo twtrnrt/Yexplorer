@@ -180,6 +180,23 @@ public:
     bool MenuIcons() const { return m_menuIcons; }
     void SetMenuIcons(bool show) { m_menuIcons = show; }
 
+    // ---------------- 显示隐藏文件 / 系统文件 ----------------
+    // 对应资源管理器「查看」选项卡里的两个选项：
+    //   showHiddenFiles —— 显示隐藏的文件、文件夹（FILE_ATTRIBUTE_HIDDEN）
+    //   showSystemFiles —— 显示受保护的操作系统文件（FILE_ATTRIBUTE_SYSTEM）
+    // 两个都默认关，行为和以前一样（隐藏项根本不会枚举出来）。
+    // 注意：系统文件通常本身也带隐藏属性，所以只勾"显示隐藏"时系统文件照样不出来，
+    // 这一点和资源管理器一致（它也是"受保护的系统文件"单独一个开关）。
+    bool ShowHiddenFiles() const { return m_showHiddenFiles; }
+    void SetShowHiddenFiles(bool show) { m_showHiddenFiles = show; }
+
+    bool ShowSystemFiles() const { return m_showSystemFiles; }
+    void SetShowSystemFiles(bool show) { m_showSystemFiles = show; }
+
+    // 两个开关里只要有一个是开的，枚举时就得把隐藏项一起拿回来（SHCONTF_INCLUDEHIDDEN），
+    // 再按上面的两个开关逐项过滤。两个都关时走老路径，一个隐藏项都不枚举，零额外开销。
+    bool NeedHiddenItems() const { return m_showHiddenFiles || m_showSystemFiles; }
+
     // ---------------- 「打开方式」账本 ----------------
     const std::vector<OpenWithEntry>& OpenWithEntries() const { return m_openWith; }
 
@@ -217,6 +234,10 @@ private:
     std::map<std::wstring, int> m_viewByLocation;
     std::wstring  m_lastFolder;
     bool          m_menuIcons      = false;   // 右键菜单是否显示图标（默认关）
+
+    // 显示隐藏文件 / 系统文件（默认都关，和资源管理器的默认一致）
+    bool          m_showHiddenFiles = false;
+    bool          m_showSystemFiles = false;
 
     // 「打开方式」账本（按扩展名分组）
     std::vector<OpenWithEntry> m_openWith;

@@ -147,6 +147,7 @@
     <ClCompile Include="src\core\Format.cpp" />
     <ClCompile Include="src\core\FolderWatcher.cpp" />
     <ClCompile Include="src\core\Logger.cpp" />
+    <ClCompile Include="src\core\PinyinInitials.cpp" />
     <ClCompile Include="src\core\Settings.cpp" />
     <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\shell\ShellIcon.cpp" />
@@ -173,6 +174,7 @@
     <ClInclude Include="src\core\Format.h" />
     <ClInclude Include="src\core\FolderWatcher.h" />
     <ClInclude Include="src\core\Logger.h" />
+    <ClInclude Include="src\core\PinyinInitials.h" />
     <ClInclude Include="src\core\NavigationHistory.h" />
     <ClInclude Include="src\core\Settings.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />

@@ -38,6 +38,12 @@ struct ShellEntry
     std::wstring name;              // 显示名（文件名或虚拟项名称）
     std::wstring fullPath;          // 绝对路径；虚拟项（如「此电脑」）可能为空
     bool         isFolder = false;  // 是否文件夹
+    // 隐藏 / 受保护的系统文件标记（FILE_ATTRIBUTE_HIDDEN / FILE_ATTRIBUTE_SYSTEM）
+    // 只有配置里打开了"显示隐藏文件"或"显示系统文件"时才会去查、才会填；
+    // 两个都关时这里恒为 false（省掉每项一次属性查询，性能不受影响）。
+    // 列表用它把隐藏项画成淡色，右键/菜单逻辑不依赖它。
+    bool         isHidden     = false;
+    bool         isSystemFile = false;
     uint64_t     size     = 0;      // 文件大小（字节）；文件夹固定为 0
     FILETIME     modified = {};     // 修改时间（UTC）；取不到时全为 0
 

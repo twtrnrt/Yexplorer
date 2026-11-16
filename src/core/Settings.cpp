@@ -282,6 +282,10 @@ bool Settings::Load()
         // 右键菜单显示图标：没记过就是关（保持原来的纯文字菜单）
         m_menuIcons = json.value("menuIcons", false);
 
+        // 显示隐藏文件 / 系统文件：没记过就是关（和资源管理器默认一致）
+        m_showHiddenFiles = json.value("showHiddenFiles", false);
+        m_showSystemFiles = json.value("showSystemFiles", false);
+
         // ---------------- 「打开方式」账本 ----------------
         // 结构：{ ".txt": { "default": "…", "items": [ {...}, … ] }, … }
         if (json.contains("openWith") && json["openWith"].is_object())
@@ -452,6 +456,16 @@ bool Settings::Save()
     if (m_menuIcons)
     {
         json["menuIcons"] = true;
+    }
+
+    // 显示隐藏文件 / 系统文件：同样只在开的时候写
+    if (m_showHiddenFiles)
+    {
+        json["showHiddenFiles"] = true;
+    }
+    if (m_showSystemFiles)
+    {
+        json["showSystemFiles"] = true;
     }
 
     // ---------------- 「打开方式」账本 ----------------
