@@ -131,5 +131,10 @@
     <ClCompile Include="src\launcher\ExplorerLauncher.cpp" />
   </ItemGroup>
 
+  <!-- ==================== 资源：版本信息（用来认亲） ==================== -->
+  <ItemGroup>
+    <ResourceCompile Include="src\launcher\res\launcher.rc" />
+  </ItemGroup>
+
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

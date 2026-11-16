@@ -94,6 +94,16 @@
       <GenerateManifest>false</GenerateManifest>
       <AdditionalDependencies>comctl32.lib;ole32.lib;shell32.lib;shlwapi.lib;comdlg32.lib;user32.lib;gdi32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <!--
+      编译完把 explorer.exe 薄代理复制到输出目录，命名 explorer-proxy.exe。
+      「注册为默认文件管理器」时会把它部署到 C:\Windows\System32\explorer.exe；
+      发布压缩包也靠这个文件，不能漏。
+      （代理本身用 Launcher.vcxproj 单独编译，产物在 bin\launcher\x64）
+    -->
+    <PostBuildEvent>
+      <Command>if exist "$(ProjectDir)bin\launcher\x64\explorer.exe" (copy /Y "$(ProjectDir)bin\launcher\x64\explorer.exe" "$(OutDir)explorer-proxy.exe") else (echo [提示] 代理还没编译，跳过复制)</Command>
+      <Message>复制 explorer.exe 代理到输出目录</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
 
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -120,6 +130,10 @@
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>comctl32.lib;ole32.lib;shell32.lib;shlwapi.lib;comdlg32.lib;user32.lib;gdi32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(ProjectDir)bin\launcher\x64\explorer.exe" (copy /Y "$(ProjectDir)bin\launcher\x64\explorer.exe" "$(OutDir)explorer-proxy.exe") else (echo [提示] 代理还没编译，跳过复制)</Command>
+      <Message>复制 explorer.exe 代理到输出目录</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
 
   <!--
@@ -146,6 +160,7 @@
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
     <ClCompile Include="src\shell\ShellNew.cpp" />
     <ClCompile Include="src\shell\DefaultManager.cpp" />
+    <ClCompile Include="src\shell\ExplorerProxy.cpp" />
     <ClCompile Include="src\shell\ShellOperations.cpp" />
     <ClCompile Include="src\ui\AddressBar.cpp" />
     <ClCompile Include="src\ui\FileListView.cpp" />
@@ -172,6 +187,7 @@
     <ClInclude Include="src\shell\ShellOpenWith.h" />
     <ClInclude Include="src\shell\ShellNew.h" />
     <ClInclude Include="src\shell\DefaultManager.h" />
+    <ClInclude Include="src\shell\ExplorerProxy.h" />
     <ClInclude Include="src\shell\ShellOperations.h" />
     <ClInclude Include="src\ui\AddressBar.h" />
     <ClInclude Include="src\ui\FileListView.h" />

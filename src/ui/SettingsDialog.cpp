@@ -18,6 +18,7 @@
 #include "core/Logger.h"
 #include "core/Settings.h"
 #include "shell/DefaultManager.h"
+#include "shell/ExplorerProxy.h"   // System32 里 explorer.exe 代理的部署/移除
 
 namespace
 {
@@ -331,9 +332,26 @@ void SettingsDialog::ApplyCheckState()
 void SettingsDialog::ToggleDefaultManager()
 {
     // 已注册 → 恢复系统默认；未注册 → 注册成本程序
-    const bool ok = m_defaultManagerRegistered
+    const bool wasRegistered = m_defaultManagerRegistered;
+    const bool ok = wasRegistered
                   ? shell::RestoreSystemFileManager()
                   : shell::RegisterDefaultFileManager();
+
+    // 注册表改完之后，顺手处理 System32 里的 explorer.exe 代理：
+    //   注册 → 放进去（不存在就部署、是我们放的旧版就替换、是别人的就只提醒）
+    //   恢复 → 如果是我们放的，删掉（别人的不动）
+    // 这两步需要管理员权限，会弹一次 UAC；用户拒绝也不影响注册表的结果。
+    if (ok)
+    {
+        if (wasRegistered)
+        {
+            shell::RemoveProxyIfOurs(m_hWnd);
+        }
+        else
+        {
+            shell::DeployProxyIfNeeded(m_hWnd);
+        }
+    }
 
     // 以注册表的实际状态为准（注册/恢复失败时按钮文案不该跟着变）
     m_defaultManagerRegistered = shell::IsDefaultFileManager();

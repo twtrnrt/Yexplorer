@@ -1,0 +1,49 @@
+// ============================================================================
+//  explorer.exe 薄代理 —— 版本信息资源
+//  文件：src/launcher/res/launcher.rc
+//
+//  【为什么需要这段版本信息】
+//    「注册为默认文件管理器」时要往 C:\Windows\System32 里放一份 explorer.exe。
+//    放之前必须先回答一个问题：目标路径上已有的那个 explorer.exe，
+//    是不是我们自己放的？
+//      - 是我们放的 → 可以直接覆盖（升级）
+//      - 不是我们放的（系统文件、别的软件、用户手工放的）→ 只提醒，绝不覆盖
+//
+//    判断依据就用这里写的 ProductName：
+//        产品名必须是 “Yexplorer Launcher”，文件名必须是 explorer.exe
+//    这两个值是我们自己定的，别的程序不可能恰好一样，
+//    而且写死在 exe 里，不依赖注册表、重装后照样能认出来。
+// ============================================================================
+
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     1,0,0,1
+ PRODUCTVERSION  1,0,0,1
+ FILEFLAGSMASK   0x3fL
+ FILEFLAGS       0x0L
+ FILEOS          VOS_NT_WINDOWS32
+ FILETYPE        VFT_APP
+ FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0409 = 英文(美国)，04b0 = Unicode；这里刻意用英文块，
+        // 避免 rc 编译器在不同代码页下把中文写出乱码
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Yexplorer"
+            VALUE "FileDescription",  "Yexplorer explorer.exe proxy"
+            VALUE "FileVersion",      "1.0.0.1"
+            VALUE "InternalName",     "explorer"
+            VALUE "OriginalFilename", "explorer.exe"
+            // ★ 就是靠这个值认出“是我们放的”
+            VALUE "ProductName",      "Yexplorer Launcher"
+            VALUE "ProductVersion",   "1.0.0.1"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

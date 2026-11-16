@@ -59,6 +59,40 @@ HKCU\Software\Classes\Directory\shell\open\command
 
 ## 放置方法
 
+### 自动部署（推荐）
+
+点设置里的「注册为默认文件管理器」时，程序会自动把代理放进
+`C:\Windows\System32\explorer.exe`：
+
+| System32 里当前的状态 | 程序的处理 |
+|---|---|
+| 没有这个文件 | 提权部署（弹一次 UAC） |
+| 有，且是我们放的、内容还是最新的 | 什么都不做，不弹 UAC |
+| 有，是我们放的旧版本 | 提权替换（弹一次 UAC） |
+| 有，**但不是我们放的**（系统文件/别的软件/手工放的旧版） | 只弹窗提醒，绝不覆盖 |
+
+点「恢复系统默认文件管理器」时：如果那个文件是我们放的，会提权删掉；不是我放的就不动。
+
+**怎么认出“是我们放的”**：代理 exe 里嵌了版本资源（`src/launcher/res/launcher.rc`），
+
+```
+ProductName      = "Yexplorer Launcher"
+OriginalFilename = "explorer.exe"
+```
+
+这两个值是固定标记，写死在文件里，不依赖注册表，重装、换目录都认得出来。
+判断逻辑见 `src/shell/ExplorerProxy.cpp` 的 `IsOursProxy`。
+
+**需要的前置文件**：主程序同目录下的 `explorer-proxy.exe`
+（编译时由 `Explorer.vcxproj` 的 PostBuild 自动从 `bin\launcher\x64\explorer.exe` 复制过去；
+发布压缩包里必须带上它，否则点注册会提示“找不到自带的代理文件”）。
+
+**第一次的特殊情况**：如果以前手工往 System32 复制过一份**没有版本标记**的旧代理，
+程序认不出它，会弹「不是本程序放的」提醒。这时手动删掉
+`C:\Windows\System32\explorer.exe`，再点一次注册即可。
+
+### 手工放置（备用）
+
 编译产物（Release）：
 
 ```
@@ -66,8 +100,11 @@ bin\launcher\x64\explorer.exe   →  复制到  C:\Windows\System32\explorer.exe
 bin\launcher\x86\explorer.exe   →  复制到  C:\Windows\SysWOW64\explorer.exe
 ```
 
-- 两份都要：64 位进程发起调用走 System32，**32 位进程（微信常见）走 SysWOW64**。
-- 需要**管理员权限**（用管理员 PowerShell/资源管理器复制）。
+- 64 位进程发起调用走 System32，**32 位进程走 SysWOW64**。
+  SysWOW64 那份默认不做：那里的 `explorer.exe` 是系统原有文件（所有者 TrustedInstaller），
+  替换要先 `takeown` 夺权、`sfc /scannow` 会还原，风险明显高于 System32（那个本来不存在、只是新增）。
+  真遇到 32 位程序拦不到、又想拦，再单独处理。
+- 需要**管理员权限**（自动部署会自己弹 UAC）。
 - 复制时不要覆盖/替换 `C:\Windows\explorer.exe`（那是系统真正的资源管理器，不在 System32）。
 - 杀软可能报“系统目录出现同名程序”，需要加白名单。这是该方案固有的代价。
 

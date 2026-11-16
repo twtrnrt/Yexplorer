@@ -18,6 +18,7 @@
 #include <string>
 
 #include "core/Logger.h"
+#include "shell/ExplorerProxy.h"   // 管理员身份下部署/移除 System32 里的 explorer.exe 代理
 #include "ui/MainWnd.h"
 #include "ui/WindowRelay.h"   // "这个目录已经开着了"就交给已有窗口
 
@@ -144,6 +145,34 @@ int WINAPI wWinMain(HINSTANCE hInstance,
     std::wstring logPath = GetExecutableDirectory() + L"\\FileExplorer.log";
     Logger::Init(logPath);
     Logger::Info(L"程序启动，日志文件：" + logPath);
+
+    // ---------- 步骤 1.5：特殊命令行（提权后执行的代理部署/移除） ----------
+    // 「注册为默认文件管理器」和「恢复系统默认文件管理器」需要往 System32 里
+    // 放/删一个 explorer.exe 代理，那需要管理员权限。
+    // 做法是主程序用 ShellExecuteEx(runas) 把自己再启动一次，带下面这两个开关，
+    // 由这个提权实例干完活、弹窗报告、然后退出——不会进入正常的主窗口流程。
+    {
+        std::wstring command = lpCmdLine != nullptr ? lpCmdLine : L"";
+        while (!command.empty() && (command.front() == L' ' || command.front() == L'\t'))
+        {
+            command.erase(command.begin());
+        }
+        while (!command.empty() && (command.back() == L' ' || command.back() == L'\t'))
+        {
+            command.pop_back();
+        }
+
+        if (command == L"--deploy-proxy" || command == L"--remove-proxy")
+        {
+            Logger::Info(L"以管理员身份执行代理操作：" + command);
+
+            const int result = shell::RunProxyCommandLine(command == L"--remove-proxy");
+
+            Logger::Info(L"代理操作结束，退出码=" + std::to_wstring(result));
+            Logger::Shutdown();
+            return result;
+        }
+    }
 
     // ---------- 步骤 2：控件与 DPI ----------
     EnableCommonControls();
