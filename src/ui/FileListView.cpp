@@ -50,10 +50,14 @@ static const DWORD kTypeAheadTimeoutMs = 500;
 
 static const UINT kMsgFinishTileRename = WM_APP + 101;
 
-// 小图标视图的列宽（和 SetViewMode 里 SetIconSpacing 的宽度保持一致）与文字留白：
-// 留白 = 16px 图标 + 图标与文字的间距 + 右边一点空隙
-static const int kSmallIconColumnWidth = 200;
-static const int kSmallIconTextInset   = 26;
+// 小图标视图的列宽参数：
+//   名字能显示多宽 = 300，列与列之间空 20，图标 16 + 图标与文字之间 4
+// 控件里每列总宽 = 名字宽 + 图标那一段 + 列间距
+static const int kSmallIconTextWidth = 300;
+static const int kSmallIconColumnGap = 20;
+static const int kSmallIconIconSpan  = 20;   // 16px 图标 + 图标与文字之间的 4px
+static const int kSmallIconColumnWidth =
+    kSmallIconTextWidth + kSmallIconIconSpan + kSmallIconColumnGap;   // = 340
 
 
 
@@ -318,7 +322,8 @@ void FileListView::SetViewMode(ViewMode mode)
     }
     else if (mode == ViewMode::SmallIcon)
     {
-        ListView_SetIconSpacing(m_hWnd, 200, 24);   // 一行一个名字的宽度，行距 24
+        // 小图标：每列总宽 340 = 名字 300 + 图标 16/间距 4 + 列间距 20；行距 24
+        ListView_SetIconSpacing(m_hWnd, kSmallIconColumnWidth, 24);
     }
 
     // 触发控件按新样式重排（不改尺寸，只让它重算布局）
@@ -2097,14 +2102,15 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                     ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
                 int columnWidth = static_cast<int>(LOWORD(spacing));
 
-                // 控件把间距顶得离谱（说明被长名字撑了）就按我们设定的宽度算；
+                // 控件把间距顶得离谱（说明被长名字撑了）就按我们设定的列宽算；
                 // 正常 DPI 放大（125%、150%）不会超过两倍，仍然采控件自己的值
                 if (columnWidth <= 0 || columnWidth > kSmallIconColumnWidth * 2)
                 {
                     columnWidth = kSmallIconColumnWidth;
                 }
 
-                const int textWidth = columnWidth - kSmallIconTextInset;
+                // 列宽里扣掉图标那一段和列间距，剩下的是名字能用的宽度
+                const int textWidth = columnWidth - kSmallIconIconSpan - kSmallIconColumnGap;
                 displayInfo->item.pszText = const_cast<wchar_t*>(
                     EllipsizeForSmallIcon(entry.name, textWidth).c_str());
             }
