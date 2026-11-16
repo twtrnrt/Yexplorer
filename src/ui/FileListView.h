@@ -61,7 +61,8 @@ public:
         Tiles
     };
 
-    using ActivateCallback    = std::function<void(size_t index)>;
+    // 双击回调：index = 被双击的项，openInNewWindow = 当时按着 Ctrl（要求在新窗口打开）
+    using ActivateCallback    = std::function<void(size_t index, bool openInNewWindow)>;
     using ContextMenuCallback = std::function<void(POINT screenPoint)>;
     using ColumnClickCallback = std::function<void(int column)>;
     using RenameCallback      = std::function<void(size_t index, const std::wstring& newName)>;

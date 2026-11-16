@@ -256,8 +256,16 @@ private:
     // 把操作的动词转成文案（「撤销 删除」里的"删除"）
     static const wchar_t* UndoVerbText(UndoKind kind);
 
-    // 用另一个自身进程打开这个目录（「在新窗口中打开」）
+    // 在另一个窗口里打开这个目录（「在新窗口中打开」/ 按住 Ctrl 双击）。
+    // 已经有窗口停在这个目录时会把它拉到前台，不再开新窗口。
     void OpenFolderInNewWindow(const std::wstring& folderPath);
+
+    // Ctrl+双击：文件夹 → 在新窗口打开（返回 true 表示已处理）；
+    // 文件/标题行等返回 false，交给默认的导航/打开逻辑
+    bool ActivateItemInNewWindow(size_t index);
+
+    // 别的窗口转来"打开这个目录"的请求、且当前目录正是它：拉到前台（可选选中某个文件）
+    void ActivateFromRelay(const std::wstring& selectFile);
 
     void ShowPropertiesForSelection();
 

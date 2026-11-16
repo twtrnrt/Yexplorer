@@ -19,6 +19,7 @@
 
 #include "core/Logger.h"
 #include "ui/MainWnd.h"
+#include "ui/WindowRelay.h"   // "这个目录已经开着了"就交给已有窗口
 
 // ============================================================================
 // 链接所需的系统库
@@ -210,20 +211,34 @@ int WINAPI wWinMain(HINSTANCE hInstance,
                          (startupSelectFile.empty() ? L"" : L"（启动后选中：" + startupSelectFile + L"）"));
         }
 
-        MainWindow mainWindow;
-        if (mainWindow.Create(hInstance, startupPath, startupSelectFile))
+        // 已经有一个窗口停在这个目录（或这个文件所在的目录）：
+        // 把那个窗口拉到前台，自己不再开新窗口。
+        // 只在"带路径启动"时问一次，不带参数的正常启动（比如点任务栏图标）不受影响。
+        const bool relayedToExistingWindow =
+            !startupPath.empty() &&
+            ui::RelayOpenFolderToExistingWindow(startupPath, startupSelectFile, nullptr);
+
+        if (relayedToExistingWindow)
         {
-            mainWindow.Show(SW_SHOW);
-            exitCode = mainWindow.RunMessageLoop();
+            Logger::Info(L"该目录已有窗口，本次启动交给它，不再开新窗口：" + startupPath);
         }
         else
         {
-            Logger::Error(L"主窗口创建失败");
-            ::MessageBoxW(nullptr,
-                          L"主窗口创建失败。",
-                          L"文件管理器",
-                          MB_ICONERROR | MB_OK);
-            exitCode = 2;
+            MainWindow mainWindow;
+            if (mainWindow.Create(hInstance, startupPath, startupSelectFile))
+            {
+                mainWindow.Show(SW_SHOW);
+                exitCode = mainWindow.RunMessageLoop();
+            }
+            else
+            {
+                Logger::Error(L"主窗口创建失败");
+                ::MessageBoxW(nullptr,
+                              L"主窗口创建失败。",
+                              L"文件管理器",
+                              MB_ICONERROR | MB_OK);
+                exitCode = 2;
+            }
         }
     }   // 主窗口对象在此析构，析构时会 join 后台线程
 

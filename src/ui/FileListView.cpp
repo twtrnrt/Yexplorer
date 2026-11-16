@@ -1334,10 +1334,24 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
     // --------------------------------------------------------------
     case NM_DBLCLK:
     {
-        int selectedIndex = ListView_GetNextItem(m_hWnd, -1, LVNI_SELECTED);
-        if (selectedIndex >= 0 && m_onActivate)
+        // 用"鼠标命中的那一项"而不是"当前选中项"：
+        // 按住 Ctrl 点第一下会把这个项取消选中，等第二下触发双击时已经没有
+        // 选中项了，靠选中项取会什么都打不开。
+        const NMITEMACTIVATE* item = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+        int hitIndex = (item != nullptr) ? item->iItem : -1;
+
+        if (hitIndex < 0)
         {
-            m_onActivate(static_cast<size_t>(selectedIndex));
+            // 兜底：没有命中项（比如键盘回车触发的）就还按选中项走
+            hitIndex = ListView_GetNextItem(m_hWnd, -1, LVNI_SELECTED);
+        }
+
+        if (hitIndex >= 0 && m_onActivate)
+        {
+            // 用 GetAsyncKeyState 而不是 GetKeyState：前者读的是"此刻真实的物理按键状态"，
+            // 后者跟着本线程消息队列走，遇到注入的按键（自动化测试、远程桌面）会读到旧值。
+            const bool ctrlHeld = (::GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            m_onActivate(static_cast<size_t>(hitIndex), ctrlHeld);
         }
         return 0;
     }

@@ -9,6 +9,7 @@
  // ============================================================================
 
 #include "MainWnd.h"
+#include "ui/WindowRelay.h"
 #include "core/Format.h"
 #include "core/Logger.h"
 #include "core/Settings.h"
@@ -35,7 +36,9 @@
 // 常量
 // ============================================================================
 
-static const wchar_t* kWindowClassName = L"FileExplorerMainWindow";
+// 窗口类名的定义挪到了 WindowRelay（跨进程找"已经开着这个目录的窗口"要用它，
+// 两处必须是同一个字符串，所以只留一个出处）
+static const wchar_t* kWindowClassName = ui::kMainWindowClassName;
 static const int      kInitialWidth    = 1180;
 static const int      kInitialHeight   = 740;
 static const wchar_t* kWindowTitleBase = L"文件管理器";
@@ -460,8 +463,14 @@ void MainWindow::CreateChildControls()
     {
         Logger::Error(L"文件列表控件创建失败");
     }
-    m_fileListView.SetActivateCallback([this](size_t index)
+    m_fileListView.SetActivateCallback([this](size_t index, bool openInNewWindow)
     {
+        // 按住 Ctrl 双击文件夹 = 在新窗口打开（跟右键那个菜单项一个效果）
+        if (openInNewWindow && ActivateItemInNewWindow(index))
+        {
+            return;
+        }
+
         OnItemActivated(index);
     });
     m_fileListView.SetContextMenuCallback([this](POINT screenPoint)
@@ -631,6 +640,34 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
+    // --------------------------------------------------------------
+    // 别的窗口把"打开这个目录"的请求转过来（跨进程 WM_COPYDATA）
+    //
+    // 对方问"你是不是正停在这个目录"，是就拉前自己并回 1，对方收到 1 就不再
+    // 开新窗口；不是就回 0，对方继续问下一个窗口。
+    // --------------------------------------------------------------
+    case WM_COPYDATA:
+    {
+        const COPYDATASTRUCT* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+
+        if (data != nullptr && data->dwData == ui::kRelayRequestMagic &&
+            data->lpData != nullptr && data->cbData >= sizeof(ui::RelayRequest))
+        {
+            const ui::RelayRequest* request = static_cast<const ui::RelayRequest*>(data->lpData);
+
+            if (ui::IsSameFolder(m_history.Current(), request->folder))
+            {
+                const std::wstring selectFile =
+                    (request->selectFile[0] != 0) ? std::wstring(request->selectFile) : std::wstring();
+
+                ActivateFromRelay(selectFile);
+                return 1;   // 告诉发送方：这个请求我接了
+            }
+        }
+
+        return 0;
+    }
+
     // --------------------------------------------------------------
     // 创建
     // --------------------------------------------------------------
@@ -2693,12 +2730,25 @@ void MainWindow::ShowPropertiesForSelection()
 }
 
 // ---------------------------------------------------------------------------
-// 在新窗口中打开：再启动一个自己（带目录参数），两个窗口各看各的
+// 在新窗口中打开
+//
+// 先问一圈"是不是已经有一个窗口停在这个目录了"：
+//   · 有（包括自己就在这个目录）→ 把那个窗口拉到前台，不再开新窗口；
+//   · 没有 → 再启动一个自己（带目录参数），两个窗口各看各的。
+//
+// 这个"问一圈"只发生在真的要开新窗口的那一下，日常导航不碰。
 // ---------------------------------------------------------------------------
 void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath)
 {
     if (folderPath.empty())
     {
+        return;
+    }
+
+    // 已经有窗口停在这个目录：拉起来就够了，别重复开
+    if (ui::RelayOpenFolderToExistingWindow(folderPath, std::wstring(), m_hWnd))
+    {
+        Logger::Info(L"该目录已有窗口，已拉起到前台：" + folderPath);
         return;
     }
 
@@ -2725,9 +2775,80 @@ void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath)
     }
 }
 
+// ---------------------------------------------------------------------------
+// 按住 Ctrl 双击：只有文件夹才在新窗口打开；文件仍按默认程序打开（跟系统一致）。
+// 返回 true = 这个双击已经被"开新窗口"这条处理掉了，别再走默认的导航/打开。
+// ---------------------------------------------------------------------------
+bool MainWindow::ActivateItemInNewWindow(size_t index)
+{
+    std::shared_ptr<shell::EnumerateResult> result;
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        result = m_result;
+    }
+
+    if (result == nullptr || index >= result->entries.size())
+    {
+        return false;
+    }
+
+    const shell::ShellEntry& entry = result->entries[index];
+
+    if (entry.isGroupHeader || entry.isSpacer)
+    {
+        return true;    // 标题行、占位格：吞掉，什么都不做
+    }
+
+    // 文件不在这儿处理：交给默认程序打开，和系统一致
+    if (!entry.isFolder || entry.fullPath.empty())
+    {
+        return false;
+    }
+
+    Logger::Info(L"Ctrl+双击：在新窗口中打开 [" + entry.name + L"] " + entry.fullPath);
+    OpenFolderInNewWindow(entry.fullPath);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 别的窗口把"打开这个目录"的请求转过来，而且当前目录正好就是它：
+//   1) 把自己拉到前台（最小化就还原）；
+//   2) 请求里带了要选中的文件，就选中它并滚到可见。
+// ---------------------------------------------------------------------------
+void MainWindow::ActivateFromRelay(const std::wstring& selectFile)
+{
+    if (::IsIconic(m_hWnd))
+    {
+        ::ShowWindow(m_hWnd, SW_RESTORE);
+    }
+
+    ::SetForegroundWindow(m_hWnd);
+    ::BringWindowToTop(m_hWnd);
+
+    if (selectFile.empty())
+    {
+        Logger::Info(L"收到其它窗口的请求，已拉到前台");
+        return;
+    }
+
+    // 列表还没枚举完（比如刚启动的窗口）就先记下来，OnEnumerationDone 里会选中
+    if (RealItemCount() == 0)
+    {
+        m_startupSelectFile = selectFile;
+    }
+    else
+    {
+        m_fileListView.SelectPaths({ selectFile });
+        m_fileListView.EnsureVisiblePath(selectFile);
+    }
+
+    Logger::Info(L"收到其它窗口的请求，已选中文件：" + selectFile);
+}
+
 void MainWindow::OpenSelection()
 {
     int selectedIndex = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+
     if (selectedIndex < 0)
     {
         return;
