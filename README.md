@@ -63,10 +63,11 @@
 ## 系统要求
 
 - Windows 10 x64（在 Win10 21H2 及以上验证过；Windows 11 未做完整验证）
-- Release 版是动态链接 MSVC 运行库，**需要安装
-  [Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)**；
-  没装的话双击会提示找不到 `VCRUNTIME140.dll`
-- Debug 版需要 Visual Studio 2022 的调试运行库（`VCRUNTIME140D.dll`），只适合开发机
+- **免安装运行**：Release 版是静态链接（`/MT`），不依赖 MSVC 运行库，
+  exe 单文件拷过去就能双击运行
+  - 如果你是自己从源码编译的 Release，同样是静态链接
+  - Debug 版是动态链接，需要 Visual Studio 2022 的调试运行库（`VCRUNTIME140D.dll`），
+    只适合开发机
 
 ## 编译
 
@@ -147,5 +148,5 @@ Yexplorer/
 
 ## 许可
 
-本项目暂未指定开源许可证（All rights reserved）。如需使用、分发或修改，
-请先与作者联系。
+本项目采用 [MIT 许可证](LICENSE)。可以自由使用、修改、再分发，包括商业用途，
+只需保留版权声明与许可证原文。
