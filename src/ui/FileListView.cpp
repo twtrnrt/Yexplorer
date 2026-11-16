@@ -1576,7 +1576,19 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         switch (displayInfo->item.iSubItem)
         {
         case 0:   // 名称
-            displayInfo->item.pszText = const_cast<wchar_t*>(entry.name.c_str());
+            // 平铺视图整格是我们自己画的（名字只画一行，放不下就用省略号），
+            // 但控件拿这里的文字去算"这一格多大"：名字越长它把格子算得越高
+            // （300 宽的格子里长名字能算到 89 高，而行距只有 68），
+            // 自绘的选中背景/白底就会溢出压到下面一行去。
+            // 平铺根本用不到控件文字，所以交空串，让每格高度只按 48px 图标算，稳定下来。
+            if (m_viewMode == ViewMode::Tiles)
+            {
+                displayInfo->item.pszText = const_cast<wchar_t*>(L"");
+            }
+            else
+            {
+                displayInfo->item.pszText = const_cast<wchar_t*>(entry.name.c_str());
+            }
             break;
 
         case 1:   // 修改日期
@@ -1744,6 +1756,18 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                 RECT tileRect = {};
                 if (ListView_GetItemRect(m_hWnd, static_cast<int>(index), &tileRect, LVIR_BOUNDS))
                 {
+                    // 格子的高度取控件的行距（SetIconSpacing 设的 68），不用 LVIR_BOUNDS 给的高度。
+                    // 控件那个高度是按名字文本换行算出来的，长名字会比行距大，
+                    // 照它画背景就会把下面一行压住。这里夹一下，兜住各种 DPI / 主题差异。
+                    const DWORD spacing = static_cast<DWORD>(
+                        ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+                    const int rowHeight = static_cast<int>(HIWORD(spacing));
+
+                    if (rowHeight > 0 && (tileRect.bottom - tileRect.top) > rowHeight)
+                    {
+                        tileRect.bottom = tileRect.top + rowHeight;
+                    }
+
                     // 选中状态必须问控件（owner-data 下 uItemState 里的位不可靠，
                     // 之前直接读 CDIS_SELECTED 导致每格都被当成"选中"的画成蓝底）
                     const bool selected =
