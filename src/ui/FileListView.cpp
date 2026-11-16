@@ -1495,10 +1495,20 @@ void FileListView::BeginRenameSelected()
                 ::ReleaseDC(m_hWnd, measureDc);
 
                 const int editWidth = nameRect.right - nameRect.left;
+
+                // 编辑框高度跟着名字文字块走：名字一行就是一行高，两行三行就是两三行高，
+                // 这样框能把原来那块名字全盖住。太扁的框（单行 19px）装不下字，
+                // 所以最少给 22。
+                int editHeight = static_cast<int>(nameRect.bottom - nameRect.top);
+                if (editHeight < 22)
+                {
+                    editHeight = 22;
+                }
+
                 if (editWidth > 40)
                 {
                     ::SetWindowPos(edit, nullptr, nameRect.left, nameRect.top,
-                                   editWidth, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+                                   editWidth, editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
                 }
 
                 // 先把这一格重画一遍（名字已经被跳过，不再画），再让编辑框自己画一次，
