@@ -50,9 +50,12 @@ static const DWORD kTypeAheadTimeoutMs = 500;
 
 static const UINT kMsgFinishTileRename = WM_APP + 101;
 
+// ============================================================================
 // 小图标视图的列宽参数：
 //   名字能显示多宽 = 300，列与列之间空 20，图标 16 + 图标与文字之间 4
 // 控件里每列总宽 = 名字宽 + 图标那一段 + 列间距
+// ============================================================================
+
 static const int kSmallIconTextWidth = 300;
 static const int kSmallIconColumnGap = 20;
 static const int kSmallIconIconSpan  = 20;   // 16px 图标 + 图标与文字之间的 4px
@@ -271,7 +274,10 @@ void FileListView::SetViewMode(ViewMode mode)
     {
     case ViewMode::LargeIcon: viewStyle = LVS_ICON;      break;
     case ViewMode::Tiles:     viewStyle = LVS_ICON;      break;   // 平铺也用图标布局，只是格子画法不同
-    case ViewMode::SmallIcon: viewStyle = LVS_SMALLICON; break;
+    // 小图标也用图标布局（不用 LVS_SMALLICON）：
+    // 虚拟列表（LVS_OWNERDATA）配 LVS_SMALLICON 时，控件的列宽算不准 ——
+    // 刚切过去会挤成一团、拉宽窗口反而只剩一列。用 LVS_ICON + 固定格子宽就稳定。
+    case ViewMode::SmallIcon: viewStyle = LVS_ICON;      break;
     case ViewMode::List:      viewStyle = LVS_LIST;      break;
     case ViewMode::Details:
     default:                  viewStyle = LVS_REPORT;    break;
@@ -322,7 +328,8 @@ void FileListView::SetViewMode(ViewMode mode)
     }
     else if (mode == ViewMode::SmallIcon)
     {
-        // 小图标：每列总宽 340 = 名字 300 + 图标 16/间距 4 + 列间距 20；行距 24
+        // 小图标：每格总宽 340 = 名字 300 + 图标 16/间距 4 + 列间距 20；行距 24。
+        // 用 LVS_ICON 的固定格子，拉宽窗口时控件会自动多排几列（行优先）。
         ListView_SetIconSpacing(m_hWnd, kSmallIconColumnWidth, 24);
     }
 
@@ -592,6 +599,14 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
 RECT FileListView::ComputeTileNameRect(HDC dc, const RECT& tileRect,
                                        const shell::ShellEntry& entry) const
 {
+    // 小图标：16px 图标在左，名字从图标右边开始，单行、整格垂直居中
+    if (m_viewMode == ViewMode::SmallIcon)
+    {
+        // 注意不能把变量叫 small：Windows 头文件里 small 是个宏（展开成 char）
+        RECT nameBox = { tileRect.left + 22, tileRect.top + 1, tileRect.right - 8, tileRect.bottom - 1 };
+        return nameBox;
+    }
+
     const int textLeft = tileRect.left + 62;
 
     if (entry.diskTotal > 0)
@@ -725,6 +740,37 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
             ::FillRect(dc, &tileRect, backBrush);
             ::DeleteObject(backBrush);
         }
+    }
+
+    // ---- 小图标：16px 图标在左、单行名字在右，整格垂直居中 ----
+    if (m_viewMode == ViewMode::SmallIcon)
+    {
+        HGDIOBJ oldFont = ::SelectObject(dc, m_hFont);
+        ::SetBkMode(dc, TRANSPARENT);
+
+        HIMAGELIST smallList = ListView_GetImageList(m_hWnd, LVSIL_SMALL);
+        const int iconTop = tileRect.top + ((tileRect.bottom - tileRect.top) - 16) / 2;
+
+        if (smallList != nullptr)
+        {
+            ::ImageList_Draw(smallList, IconIndexForEntry(entry), dc,
+                             tileRect.left + 2, iconTop, ILD_TRANSPARENT);
+        }
+
+        // 名字在图标右边：左起 22（图标 16 + 间距 4 + 2），右侧留 8
+        // 正在改名的那一行不画名字（位置让给自建编辑框）
+        if (static_cast<int>(index) != m_editingIndex)
+        {
+            RECT nameRect = { tileRect.left + 22, tileRect.top + 1,
+                              tileRect.right - 8, tileRect.bottom - 1 };
+
+            ::SetTextColor(dc, nameColor);
+            ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
+                        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+
+        ::SelectObject(dc, oldFont);
+        return;
     }
 
     // ---- 左边 48px 图标 ----
@@ -1464,8 +1510,8 @@ void FileListView::BeginRenameSelected()
         return;
     }
 
-    // 平铺走自己建的编辑框（自带的是单行框，做不出"三行高 + 字贴左上"）
-    if (m_viewMode == ViewMode::Tiles)
+    // 平铺和小图标都走自己建的编辑框（控件自带的那个位置和高度都不对）
+    if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon)
     {
         BeginTileRename(selectedIndex);
         return;
@@ -1572,7 +1618,8 @@ void FileListView::BeginTileRename(int index)
         return;
     }
 
-    // 高度：名字文字块的高度 + 上下各 2px 的余量（框线本身要占位，少给就会把字挤扁）
+    // 平铺 / 小图标：高度按名字文字块给（平铺可能三行，小图标一行），
+    // 再多给 4px 余量，少给就会把字挤扁
     int editHeight = static_cast<int>(nameRect.bottom - nameRect.top) + 4;
 
     HINSTANCE instance = reinterpret_cast<HINSTANCE>(
@@ -1722,94 +1769,6 @@ void FileListView::FinishTileRename(bool commit)
     {
         m_onRename(static_cast<size_t>(index), newName);
     }
-}
-
-// ============================================================================
-// 小图标视图：把名字压成"列宽内放得下 + 省略号"
-//
-// 小图标（LVS_SMALLICON）的列宽不是我们设的 200 说了算，控件是按这一批里"最长的标签"
-// 自己算的：名字特别长时列宽被顶到几百像素，一列就吃满客户区、排不进第二列，
-// 超出的字还会被控件硬裁（这个视图它不画省略号）。
-//
-// 所以先把名字截成"放进列宽 + …"，控件算出来的列宽就回落到固定值，横向自然能并排多列。
-// 返回的是缓存成员，控件收到后立刻用掉，所以同一轮绘制里多点几次也安全。
-// ============================================================================
-const std::wstring& FileListView::EllipsizeForSmallIcon(const std::wstring& name, int maxWidth)
-{
-    // 同一个名字、同一个宽度会反复问（每画一格问一次），结果直接复用
-    if (name == m_cacheNameSource && maxWidth == m_cacheNameWidth)
-    {
-        return m_cacheNameText;
-    }
-
-    m_cacheNameSource = name;
-    m_cacheNameWidth  = maxWidth;
-    m_cacheNameText   = name;
-
-    HDC dc = ::GetDC(m_hWnd);
-    if (dc == nullptr || maxWidth <= 0)
-    {
-        if (dc != nullptr)
-        {
-            ::ReleaseDC(m_hWnd, dc);
-        }
-        return m_cacheNameText;
-    }
-
-    HGDIOBJ oldFont = (m_hFont != nullptr) ? ::SelectObject(dc, m_hFont) : nullptr;
-
-    SIZE fullSize = {};
-    ::GetTextExtentPoint32W(dc, name.c_str(), static_cast<int>(name.size()), &fullSize);
-
-    if (fullSize.cx > maxWidth)
-    {
-        const wchar_t ellipsisText[] = L"…";
-        SIZE ellipsisSize = {};
-        ::GetTextExtentPoint32W(dc, ellipsisText, 1, &ellipsisSize);
-
-        const int budget = maxWidth - static_cast<int>(ellipsisSize.cx);
-
-        if (budget <= 0)
-        {
-            m_cacheNameText = ellipsisText;
-        }
-        else
-        {
-            // 二分找"放得下的最长前缀"，前半留原文、末尾补省略号
-            int low  = 0;
-            int high = static_cast<int>(name.size());
-            int best = 0;
-
-            while (low <= high)
-            {
-                const int mid = (low + high) / 2;
-
-                SIZE partialSize = {};
-                ::GetTextExtentPoint32W(dc, name.c_str(), mid, &partialSize);
-
-                if (partialSize.cx <= budget)
-                {
-                    best = mid;
-                    low  = mid + 1;
-                }
-                else
-                {
-                    high = mid - 1;
-                }
-            }
-
-            m_cacheNameText = name.substr(0, static_cast<size_t>(best));
-            m_cacheNameText += ellipsisText;
-        }
-    }
-
-    if (oldFont != nullptr)
-    {
-        ::SelectObject(dc, oldFont);
-    }
-    ::ReleaseDC(m_hWnd, dc);
-
-    return m_cacheNameText;
 }
 
 // ============================================================================
@@ -2085,34 +2044,13 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         switch (displayInfo->item.iSubItem)
         {
         case 0:   // 名称
-            // 平铺视图整格是我们自己画的（名字只画一行，放不下就用省略号），
-            // 但控件拿这里的文字去算"这一格多大"：名字越长它把格子算得越高
-            // （300 宽的格子里长名字能算到 89 高，而行距只有 68），
-            // 自绘的选中背景/白底就会溢出压到下面一行去。
-            // 平铺根本用不到控件文字，所以交空串，让每格高度只按 48px 图标算，稳定下来。
-            if (m_viewMode == ViewMode::Tiles)
+            // 平铺和小图标都是整格自己画的，控件这里的文字只被它用来算格子大小：
+            // 名字越长它把格子算得越高/越宽（平铺能算到 89 高，行距只有 68），
+            // 自绘的背景就会溢出压到下一行、或者列宽被顶大。
+            // 既然用不到，交空串，让格子尺寸只按图标算，稳定下来。
+            if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon)
             {
                 displayInfo->item.pszText = const_cast<wchar_t*>(L"");
-            }
-            else if (m_viewMode == ViewMode::SmallIcon)
-            {
-                // 小图标视图：名字要先截到列宽之内，否则控件按最长名字把列宽顶大，
-                // 一列吃满整个客户区、排不下第二列（详见 EllipsizeForSmallIcon 的注释）
-                const DWORD spacing = static_cast<DWORD>(
-                    ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
-                int columnWidth = static_cast<int>(LOWORD(spacing));
-
-                // 控件把间距顶得离谱（说明被长名字撑了）就按我们设定的列宽算；
-                // 正常 DPI 放大（125%、150%）不会超过两倍，仍然采控件自己的值
-                if (columnWidth <= 0 || columnWidth > kSmallIconColumnWidth * 2)
-                {
-                    columnWidth = kSmallIconColumnWidth;
-                }
-
-                // 列宽里扣掉图标那一段和列间距，剩下的是名字能用的宽度
-                const int textWidth = columnWidth - kSmallIconIconSpan - kSmallIconColumnGap;
-                displayInfo->item.pszText = const_cast<wchar_t*>(
-                    EllipsizeForSmallIcon(entry.name, textWidth).c_str());
             }
             else
             {
@@ -2331,8 +2269,10 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                 return CDRF_SKIPDEFAULT;   // 这一行已经画完了，别再让控件画
             }
 
-            // ---- 平铺视图：每个格子整块自己画（图标 + 名称 + 容量 + 进度条）----
-            if (m_viewMode == ViewMode::Tiles)
+            // ---- 平铺 / 小图标：每个格子整块自己画 ----
+            // 平铺画 48px 图标 + 三行名字 + 容量进度条；小图标画 16px 图标 + 单行名字，
+            // 具体分支在 DrawTile 里按 m_viewMode 走
+            if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon)
             {
                 RECT tileRect = {};
                 if (ListView_GetItemRect(m_hWnd, static_cast<int>(index), &tileRect, LVIR_BOUNDS))
