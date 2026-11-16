@@ -50,6 +50,38 @@ struct BatchRenameResult
     std::wstring newName;   // 只含文件名，不含目录
 };
 
+// ----------------------------------------------------------------------------
+// 一套可保存的规则（"模板"）
+//
+// 把窗口里所有规则控件的样子原样记下来，存成一份；点「载入」时按字回填，
+// 用户就不用每次都重新摆一遍。字段和界面上的控件一一对应。
+// ----------------------------------------------------------------------------
+struct RenameTemplate
+{
+    std::wstring name;
+
+    std::wstring prefix;        // 前缀
+    std::wstring suffix;        // 后缀
+    std::wstring find;          // 查找
+    std::wstring replace;       // 替换为
+    bool         caseSensitive = false;   // 区分大小写
+    bool         useRegex      = false;   // 查找按正则处理
+
+    bool         number        = false;   // 加序号
+    int          numberStart   = 1;       // 起始
+    int          numberStep    = 1;       // 步长
+    int          numberDigits  = 2;       // 位数
+    int          numberPos     = 0;       // 0 = 放后面，1 = 放前面
+    std::wstring numberSep     = L"-";    // 分隔符
+
+    int          extMode       = 0;       // 0 保留 / 1 改成 / 2 去掉
+    std::wstring extValue;                // 改成什么扩展名
+
+    int          caseMode      = 0;       // 0 保持 / 1 大写 / 2 小写 / 3 首字母
+    int          sortMode      = 0;       // 0 名称 / 1 时间 / 2 大小 / 3 自定义顺序
+    bool         sortReverse   = false;   // 倒序
+};
+
 class BatchRenameDialog
 {
 public:
@@ -110,12 +142,37 @@ private:
 
     void EnableRuleControls();
 
+    // ---- 模板（保存 / 载入 / 删除）----
+    void LoadTemplatesFromDisk();
+    void SaveTemplatesToDisk() const;
+    void RefreshTemplateCombo();
+    void CaptureCurrentRules(RenameTemplate& out) const;   // 把界面上的规则收成一份模板
+    void ApplyTemplateToControls(const RenameTemplate& tpl); // 把模板回填到控件
+
+    // ---- 拖动排序（在预览列表里手动排）----
+    void BeginListDrag(int itemIndex);
+    void UpdateListDrag(int clientY);
+    void FinishListDrag();
+
+    // 正则下拉里的内置常用写法（下标 0 表示"不用"）
+    static size_t RegexPresetCount();
+    static const wchar_t* RegexPresetName(size_t index);
+    static const wchar_t* RegexPresetPattern(size_t index);
+
 private:
     HWND m_hWnd   = nullptr;
     HWND m_hOwner = nullptr;
 
     std::vector<BatchRenameItem> m_items;
     std::vector<PreviewRow>      m_rows;
+    std::vector<size_t>          m_order;      // 当前显示顺序（元素是 m_items 的下标）
+
+    // ---- 正则 ----
+    bool m_regexValid = true;   // 当前正则能不能编译通过
+
+    // 一次性回填很多控件时（载入模板）先把这个置 true，
+    // 免得每设一个框都触发一遍重算
+    bool m_suppressRecalculate = false;
 
     // ---- 控件句柄 ----
     HWND m_hList = nullptr;         // 预览列表（report 模式的 ListView）
@@ -125,6 +182,21 @@ private:
     HWND m_hFind = nullptr;         // 查找
     HWND m_hReplace = nullptr;      // 替换为
     HWND m_hCaseSensitive = nullptr; // 区分大小写（复选框）
+    HWND m_hRegex = nullptr;        // 查找按正则处理（复选框）
+    HWND m_hRegexPreset = nullptr;  // 常用正则下拉（选中就把写法填进"查找"）
+
+    // ---- 模板栏 ----
+    HWND m_hTemplateCombo = nullptr;   // 模板名（可编辑，输新名字就是新建）
+    RECT m_templateLoadRect = {};      // 「载入」
+    RECT m_templateSaveRect = {};      // 「保存」
+    RECT m_templateDeleteRect = {};    // 「删除」
+    bool m_hotTemplateLoad = false;
+    bool m_hotTemplateSave = false;
+    bool m_hotTemplateDelete = false;
+    bool m_pressedTemplateLoad = false;
+    bool m_pressedTemplateSave = false;
+    bool m_pressedTemplateDelete = false;
+    std::vector<RenameTemplate> m_templates;
 
     HWND m_hNumberEnable = nullptr; // 加序号（复选框）
     HWND m_hNumberStart = nullptr;  // 起始
@@ -138,8 +210,14 @@ private:
 
     HWND m_hCaseMode = nullptr;     // 大小写：保持 / 大写 / 小写 / 首字母大写
 
-    HWND m_hSortMode = nullptr;     // 排序：名称 / 修改时间 / 大小
+    HWND m_hSortMode = nullptr;     // 排序：名称 / 修改时间 / 大小 / 自定义顺序
     HWND m_hSortReverse = nullptr;  // 反向（复选框）
+
+    // ---- 预览列表的拖动排序状态 ----
+    bool                m_dragging      = false;  // 正拖着
+    std::vector<size_t> m_dragRows;               // 被拖的行（m_rows 的下标）
+    int                 m_dropRow       = -1;     // 要插到第几行前面（-1 = 没算出位置）
+    bool                m_dropAfter     = false;  // 插在该行后面
 
     // ---- 自绘按钮 ----
     RECT m_cancelRect = {};
@@ -149,6 +227,9 @@ private:
     bool m_hotApply   = false;
     bool m_pressedApply  = false;
     bool m_trackingLeave = false;
+
+    // 底部统计文字的矩形（每次只重画这一块，避免整窗闪）
+    RECT m_statsRect = {};
 
     // ---- 字体 ----
     HFONT m_font       = nullptr;
