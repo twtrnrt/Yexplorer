@@ -577,20 +577,20 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
 
     // 先看这一项要不要淡化。淡化和选中互不影响 —— 选中着也要变灰，
     // 这样"图标半透明"和"文字变灰"同时发生，不会出现图标淡了字还黑着：
-    //   · 隐藏的文件和文件夹、受保护的系统文件 → RGB(160,160,160)
-    //   · 被剪切的项目                        → RGB(100,100,100)
+    //   · 隐藏的文件和文件夹、受保护的系统文件 → RGB(100,100,100)
+    //   · 被剪切的项目                        → RGB(160,160,160)
     const bool dimByAttribute = (entry.isHidden || entry.isSystemFile);
     const bool dimByCut       = (!dimByAttribute && IsCutPath(entry.fullPath));
 
     if (dimByAttribute)
     {
-        nameColor = RGB(160, 160, 160);
-        infoColor = RGB(160, 160, 160);
+        nameColor = RGB(100, 100, 100);
+        infoColor = RGB(100, 100, 100);
     }
     else if (dimByCut)
     {
-        nameColor = RGB(100, 100, 100);
-        infoColor = RGB(100, 100, 100);
+        nameColor = RGB(160, 160, 160);
+        infoColor = RGB(160, 160, 160);
     }
 
     if (selected)
@@ -1757,8 +1757,8 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             // ---- 隐藏项 / 系统文件 / 剪切项：文字画淡 ----
             //
             // 图标已经走半透明（IconIndexForEntry 里统一处理），这里只管文字颜色：
-            //   · 隐藏的文件和文件夹、受保护的系统文件 → 160 灰（两者观感一样）
-            //   · 被剪切的项目                        → 100 灰（比隐藏项深，便于区分）
+            //   · 隐藏的文件和文件夹、受保护的系统文件 → 100 灰（两者观感一样）
+            //   · 被剪切的项目                        → 160 灰（比隐藏项淡，便于区分）
             //
             // 和"选中"无关：选中着也要变灰。剪切、改成隐藏这些动作发生时，
             // 用户往往正把那一项选中着，如果非要等它被取消选中才变灰，
@@ -1769,13 +1769,13 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
                 if (entry.isHidden || entry.isSystemFile)
                 {
-                    customDraw->clrText = RGB(160, 160, 160);
+                    customDraw->clrText = RGB(100, 100, 100);
                     return CDRF_NEWFONT;   // 告诉控件按我改的颜色画
                 }
 
                 if (IsCutPath(entry.fullPath))
                 {
-                    customDraw->clrText = RGB(100, 100, 100);
+                    customDraw->clrText = RGB(160, 160, 160);
                     return CDRF_NEWFONT;
                 }
             }
