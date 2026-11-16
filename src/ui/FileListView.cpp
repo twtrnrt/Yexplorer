@@ -558,6 +558,60 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
     return iconIndex;
 }
 
+// ============================================================================
+// 平铺格子里"名字"文字块的位置
+//
+// 画名字和弹编辑框都用这一个函数算，编辑框才能正好压在名字上、把它盖住。
+//   · 驱动器卡片（有容量信息）：名字固定一行，在格子上沿往下 11px
+//   · 普通项：名字最多 3 行，按字体行高算，整体在格子里垂直居中
+// 传入的 dc 必须已经选好列表字体，否则测出来的行高不对。
+// ============================================================================
+RECT FileListView::ComputeTileNameRect(HDC dc, const RECT& tileRect,
+                                       const shell::ShellEntry& entry) const
+{
+    const int textLeft = tileRect.left + 62;
+
+    if (entry.diskTotal > 0)
+    {
+        // 驱动器卡片：名字一行 + 容量 + 进度条，名字位置是固定的
+        RECT single = { textLeft, tileRect.top + 11, tileRect.right - 6, tileRect.top + 31 };
+        return single;
+    }
+
+    // 量一下当前字体一行多高，用它算"3 行"的上限
+    TEXTMETRICW metrics = {};
+    int lineHeight = 19;
+    if (::GetTextMetricsW(dc, &metrics))
+    {
+        lineHeight = static_cast<int>(metrics.tmHeight) + 2;
+    }
+
+    const int nameWidth = tileRect.right - 6 - textLeft;
+
+    // 先按实际换行算出这段名字要占多高，再封顶到 3 行
+    RECT measure = { 0, 0, nameWidth, 0 };
+    ::DrawTextW(dc, entry.name.c_str(), -1, &measure,
+                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+
+    int nameHeight = static_cast<int>(measure.bottom - measure.top);
+    const int maxNameHeight = lineHeight * 3;
+
+    if (nameHeight > maxNameHeight)
+    {
+        nameHeight = maxNameHeight;
+    }
+    if (nameHeight < lineHeight)
+    {
+        nameHeight = lineHeight;
+    }
+
+    // 文字块在格子里垂直居中
+    const int blockTop = tileRect.top + ((tileRect.bottom - tileRect.top) - nameHeight) / 2;
+
+    RECT nameRect = { textLeft, blockTop, textLeft + nameWidth, blockTop + nameHeight };
+    return nameRect;
+}
+
 void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool selected)
 {
     if (m_result == nullptr || index >= m_result->entries.size())
@@ -671,52 +725,24 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     // 有容量信息的项（磁盘、网络盘）名字只占一行，把下面留给容量文字和进度条；
     // 普通文件和文件夹没有那两行，整格高度都能用来放名字
     // （格高 68，3 行大约 57，装得下）。
+    //
+    // 正在改名的这一行不画名字：控件在那个位置挂了一个编辑框，
+    // 我们再画一遍会和框里的文字叠在一起（平铺是自绘的，控件不知道那儿有字）。
     const bool hasDiskInfo = (entry.diskTotal > 0);
 
-    if (!hasDiskInfo)
+    if (static_cast<int>(index) != m_editingIndex)
     {
-        // 量一下当前字体一行多高，用它算"3 行"的上限
-        TEXTMETRICW metrics = {};
-        int lineHeight = 19;
-        if (::GetTextMetricsW(dc, &metrics))
-        {
-            lineHeight = static_cast<int>(metrics.tmHeight) + 2;
-        }
+        const RECT nameRect = ComputeTileNameRect(dc, tileRect, entry);
 
-        const int nameWidth = tileRect.right - 6 - textLeft;
-
-        // 先按实际换行算出这段名字要占多高，再封顶到 3 行
-        RECT measure = { 0, 0, nameWidth, 0 };
-        ::DrawTextW(dc, entry.name.c_str(), -1, &measure,
-                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
-
-        int nameHeight = static_cast<int>(measure.bottom - measure.top);
-        const int maxNameHeight = lineHeight * 3;
-
-        if (nameHeight > maxNameHeight)
-        {
-            nameHeight = maxNameHeight;
-        }
-        if (nameHeight < lineHeight)
-        {
-            nameHeight = lineHeight;
-        }
-
-        // 文字块在格子里垂直居中
-        const int blockTop = tileRect.top + ((tileRect.bottom - tileRect.top) - nameHeight) / 2;
-
-        RECT nameRect = { textLeft, blockTop, textLeft + nameWidth, blockTop + nameHeight };
         ::SetTextColor(dc, nameColor);
-        ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
-                    DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-    }
-    else
-    {
-        // 驱动器卡片：名字一行，下面接容量和进度条
-        RECT nameRect = { textLeft, tileRect.top + 11, tileRect.right - 6, tileRect.top + 31 };
-        ::SetTextColor(dc, nameColor);
-        ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
-                    DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        const DWORD nameFlags = hasDiskInfo
+            ? (DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX)
+            : (DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        // 单行时 DrawText 从矩形顶部开始排版，这里这些矩形本身已经是算好的位置
+        RECT drawRect = nameRect;
+        ::DrawTextW(dc, entry.name.c_str(), -1, &drawRect, nameFlags);
     }
 
     // ---- 第二行 + 进度条：只有查得到容量时才画（网络盘、空光驱没有）----
@@ -1412,36 +1438,16 @@ void FileListView::BeginRenameSelected()
     ::SetFocus(m_hWnd);
     HWND edit = ListView_EditLabel(m_hWnd, static_cast<UINT>(selectedIndex));
 
-    // 详情 / 列表 / 大图标：控件自己会把编辑框摆到位、名字也会自动带出来，不用我们插手
-    if (m_viewMode != ViewMode::Tiles || edit == nullptr)
+    // 控件没能开始编辑（比如这一行是分组标题，BEGINLABELEDIT 里已经拒掉了）
+    if (edit == nullptr)
     {
         return;
     }
 
-    // ---- 平铺视图得我们自己收拾这个编辑框，两件事 ----
-    //
-    // 1）框里没有名字：为了格子高度不被长名字撑高（会压到下一行），平铺视图交给控件的
-    //    名称列是空串，控件就把编辑框的初始文本也当成空了。这里把真名字灌回去。
-    // 2）位置不对：控件的编辑框是按"图标视图的 label 区"（图标正下方）摆的，
-    //    平铺的布局是"图标在左、名字在右"，所以要挪到右边文字的位置。
     const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(selectedIndex)];
 
-    ::SetWindowTextW(edit, entry.name.c_str());
-
-    RECT itemRect = {};
-    if (ListView_GetItemRect(m_hWnd, selectedIndex, &itemRect, LVIR_BOUNDS))
-    {
-        const int textLeft = itemRect.left + 62;   // 和 DrawTile 里的文字起点保持一致
-        const int editWidth = itemRect.right - 6 - textLeft;
-
-        if (editWidth > 40)
-        {
-            ::SetWindowPos(edit, nullptr, textLeft, itemRect.top + 10, editWidth, 22,
-                           SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-    }
-
-    // 只选中主文件名、不选扩展名（和资源管理器一致）；文件夹没有扩展名，整段选中
+    // ---- 只选中主文件名、不选扩展名（和资源管理器一致）----
+    // 所有视图都要，控件的编辑框默认是全选的
     int selectEnd = static_cast<int>(entry.name.size());
     if (!entry.isFolder)
     {
@@ -1451,6 +1457,61 @@ void FileListView::BeginRenameSelected()
             selectEnd = static_cast<int>(dot);
         }
     }
+
+    // ---- 平铺视图还要额外收拾编辑框 ----
+    //
+    // 1）框里没有名字：为了格子高度不被长名字撑高（会压到下一行），平铺视图交给控件的
+    //    名称列是空串，控件就把编辑框的初始文本也当成空了。这里把真名字灌回去。
+    // 2）位置不对：控件的编辑框是按"图标视图的 label 区"（图标正下方）摆的，
+    //    平铺的布局是"图标在左、名字在右"，所以要按着我们画名字的矩形去摆，
+    //    让框正好压住原来那行名字。
+    // 3）名字得先擦掉：平铺是自绘的，控件不知道那儿有字，不擦会和框里的文字叠在一起。
+    //    BEGINLABELEDIT 里已经把 m_editingIndex 设成这一行，DrawTile 会跳过名字。
+    if (m_viewMode == ViewMode::Tiles)
+    {
+        ::SetWindowTextW(edit, entry.name.c_str());
+
+        RECT itemRect = {};
+        if (ListView_GetItemRect(m_hWnd, selectedIndex, &itemRect, LVIR_BOUNDS))
+        {
+            // 格子高度按行距夹一下（和自绘时的口径一致）
+            const DWORD spacing = static_cast<DWORD>(
+                ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+            const int rowHeight = static_cast<int>(HIWORD(spacing));
+
+            if (rowHeight > 0 && (itemRect.bottom - itemRect.top) > rowHeight)
+            {
+                itemRect.bottom = itemRect.top + rowHeight;
+            }
+
+            // 借一个选好字体的 dc，算出名字文字块的位置（和 DrawTile 用的是同一个函数）
+            HDC measureDc = ::GetDC(m_hWnd);
+            if (measureDc != nullptr)
+            {
+                HGDIOBJ oldFont = ::SelectObject(measureDc, m_hFont);
+                const RECT nameRect = ComputeTileNameRect(measureDc, itemRect, entry);
+
+                ::SelectObject(measureDc, oldFont);
+                ::ReleaseDC(m_hWnd, measureDc);
+
+                const int editWidth = nameRect.right - nameRect.left;
+                if (editWidth > 40)
+                {
+                    ::SetWindowPos(edit, nullptr, nameRect.left, nameRect.top,
+                                   editWidth, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+
+                // 先把这一格重画一遍（名字已经被跳过，不再画），再让编辑框自己画一次，
+                // 否则自绘的白底会盖到编辑框上，或者旧名字残留在旁边
+                ::InvalidateRect(m_hWnd, &itemRect, FALSE);
+                ::UpdateWindow(m_hWnd);
+
+                ::InvalidateRect(edit, nullptr, TRUE);
+                ::UpdateWindow(edit);
+            }
+        }
+    }
+
     ::SendMessageW(edit, EM_SETSEL, 0, static_cast<LPARAM>(selectEnd));
 }
 
@@ -2055,6 +2116,10 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         // 记住"现在正在改名"：目录监视的自动刷新要绕开这一小段时间
         m_editingLabel = true;
 
+        // 平铺是自绘的，控件不知道名字画在哪儿，没法自己把字擦掉。
+        // 记下正在编辑的行号，DrawTile 见到这一行就不画名字，把位置让给编辑框。
+        m_editingIndex = index;
+
         return FALSE;      // 返回假 = 允许编辑
     }
 
@@ -2066,6 +2131,31 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         NMLVDISPINFOW* info = reinterpret_cast<NMLVDISPINFOW*>(lParam);
 
         m_editingLabel = false;   // 改名结束了（不管有没有改成功）
+
+        // 把刚才让给编辑框的那一行重新画回来（名字要重新出现）
+        if (m_editingIndex >= 0)
+        {
+            const int editedIndex = m_editingIndex;
+            m_editingIndex = -1;
+
+            if (m_viewMode == ViewMode::Tiles)
+            {
+                RECT itemRect = {};
+                if (ListView_GetItemRect(m_hWnd, editedIndex, &itemRect, LVIR_BOUNDS))
+                {
+                    const DWORD spacing = static_cast<DWORD>(
+                        ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+                    const int rowHeight = static_cast<int>(HIWORD(spacing));
+
+                    if (rowHeight > 0 && (itemRect.bottom - itemRect.top) > rowHeight)
+                    {
+                        itemRect.bottom = itemRect.top + rowHeight;
+                    }
+
+                    ::InvalidateRect(m_hWnd, &itemRect, FALSE);
+                }
+            }
+        }
 
         if (info->item.pszText == nullptr)
         {

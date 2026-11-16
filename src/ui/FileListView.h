@@ -225,6 +225,10 @@ private:
     // 平铺视图：把一个格子（图标 + 名称 + 容量 + 进度条）整块画出来
     void DrawTile(HDC dc, const RECT& tileRect, size_t index, bool selected);
 
+    // 平铺视图：算出格子里"名字"文字块的位置。
+    // 画名字和弹编辑框都用它，编辑框才能正好压在名字上。
+    RECT ComputeTileNameRect(HDC dc, const RECT& tileRect, const shell::ShellEntry& entry) const;
+
     // 在表头上去掉所有排序箭头
     void ClearSortArrows();
 
@@ -291,6 +295,11 @@ private:
 
     // 是否正在原地改名（LVN_BEGINLABELEDIT 到 LVN_ENDLABELEDIT 之间）
     bool                      m_editingLabel = false;
+
+    // 正在改名的那一行（-1 表示没有）。
+    // 平铺是自绘的，控件不知道名字画在哪儿，所以改名时由我们跳过这一行的名字，
+    // 把位置让给控件的编辑框；改名结束后再画回来。
+    int                       m_editingIndex = -1;
 
     // 平铺视图"再点一下已选中项就进改名"用：上一次点中的是哪一项、什么时候点的。
     // 没有文字可比（owner-data 列表控件的 item 文本在平铺下是空的），只能靠时间判断
