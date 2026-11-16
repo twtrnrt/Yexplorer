@@ -369,9 +369,21 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     // 按"当前目录是什么类型"给出该用的默认视图
     FileListView::ViewMode DefaultViewModeForCurrentPath() const;
 
+    // 独立记忆视图的位置（此电脑 / 控制面板）：
+    // 是这类位置就返回它的内部标识，普通目录返回空串。
+    // 判定只看路径字符串，不查注册表、不调 COM、不探测文件。
+    std::wstring ViewLocationKeyForPath(const std::wstring& path) const;
+
+    // 某个位置该用的视图：配置里记过就用记的，没记过用它自己的默认（现在都是平铺）
+    FileListView::ViewMode DefaultViewModeForLocation(const std::wstring& key) const;
+
 private:
     HWND      m_hWnd      = nullptr;
     HINSTANCE m_hInstance = nullptr;
+
+    // 普通目录那套视图（"全局"）。进「此电脑」「控制面板」时会临时切到它们自己的模式，
+    // 出来后要按这个值恢复，否则会被那两处的记忆带跑。-1 表示还没定过。
+    int m_globalViewMode = -1;
 
     // 启动时命令行指定的目录（「在新窗口中打开」用它开新窗口）。
     // 空表示没指定，按上次停的目录启动。

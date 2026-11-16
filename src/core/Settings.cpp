@@ -259,6 +259,20 @@ bool Settings::Load()
             const nlohmann::json& view = json["view"];
             m_viewMode       = view.value("mode", -1);
             m_viewModeManual = view.value("manual", false);
+
+            // 按位置单独记的视图（此电脑 / 控制面板）
+            // 结构：{ "thispc": 4, "controlpanel": 4 }
+            if (view.contains("locations") && view["locations"].is_object())
+            {
+                m_viewByLocation.clear();
+                for (auto it = view["locations"].begin(); it != view["locations"].end(); ++it)
+                {
+                    if (it.value().is_number_integer())
+                    {
+                        m_viewByLocation[FromUtf8(it.key())] = it.value().get<int>();
+                    }
+                }
+            }
         }
 
         // ---------------- 上次停留的目录 ----------------
@@ -399,12 +413,32 @@ bool Settings::Save()
     }
 
     // ---------------- 查看模式 ----------------
-    if (m_viewMode >= 0)
+    // 全局那份（普通文件夹用）和按位置记的那份（此电脑 / 控制面板）写在同一段里，
+    // 位置那部分为空就不写，保持配置文件干净。
+    if (m_viewMode >= 0 || !m_viewByLocation.empty())
     {
         nlohmann::json view;
-        view["mode"]   = m_viewMode;
-        view["manual"] = m_viewModeManual;
-        json["view"]   = std::move(view);
+
+        // 全局那份只在内存里有值时才写。站在「此电脑」「控制面板」关闭时，
+        // 程序只更新位置那份，m_viewMode 可能是 -1（配置里本来就没记过全局），
+        // 这时候不能把 -1 写进文件。
+        if (m_viewMode >= 0)
+        {
+            view["mode"]   = m_viewMode;
+            view["manual"] = m_viewModeManual;
+        }
+
+        if (!m_viewByLocation.empty())
+        {
+            nlohmann::json locations = nlohmann::json::object();
+            for (const auto& item : m_viewByLocation)
+            {
+                locations[ToUtf8(item.first)] = item.second;
+            }
+            view["locations"] = std::move(locations);
+        }
+
+        json["view"] = std::move(view);
     }
 
     // ---------------- 上次停留的目录 ----------------
@@ -542,6 +576,24 @@ bool Settings::IsPinned(const std::wstring& path) const
     }
 
     return false;
+}
+
+// ============================================================================
+// 按位置单独记的查看模式（此电脑 / 控制面板）
+//
+// 只操作内存里的那张表，不碰磁盘：启动时一次性读进来，导航时查内存，
+// 关闭窗口时才 Save 写盘。所以切文件夹、弹右键菜单都没有 IO 开销。
+// ============================================================================
+
+int Settings::LocationViewMode(const std::wstring& key) const
+{
+    const auto it = m_viewByLocation.find(key);
+    return (it == m_viewByLocation.end()) ? -1 : it->second;
+}
+
+void Settings::SetLocationViewMode(const std::wstring& key, int mode)
+{
+    m_viewByLocation[key] = mode;
 }
 
 // ============================================================================

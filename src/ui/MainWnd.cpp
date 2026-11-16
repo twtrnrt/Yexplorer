@@ -3409,28 +3409,84 @@ void MainWindow::OnColumnClick(int column)
 // ============================================================================
 // 视图模式
 //
-// 三件事：
-//   1. 普通磁盘目录 → 详细信息（和资源管理器打开文件夹时一样）
-//   2. 此电脑 / 控制面板 / 网络 / 回收站 / 主文件夹这些「系统文件夹」→ 小图标
-//   3. 用户从右键「查看」里选过的，就不再自动改，一直按他选的来
+// 四件事：
+//   1. 「此电脑」「控制面板」这两处**单独记忆**，默认都是平铺，
+//      互不影响，也不跟普通文件夹的全局设置走（见下面 ViewLocationKeyForPath）
+//   2. 普通磁盘目录 → 详细信息（和资源管理器打开文件夹时一样）
+//   3. 其它系统文件夹（网络 / 回收站 / 主文件夹 / 顶层桌面）→ 小图标
+//   4. 普通目录里用户从右键「查看」里选过的，就不再自动改，一直按他选的来
 // ============================================================================
+
+namespace
+{
+// 控制面板根（分类首页）。它下面的子项（含「所有控制面板项」）解析名都以它开头，
+// 所以前缀匹配就能把整片控制面板当成同一处。
+constexpr const wchar_t* kControlPanelRootPath = L"::{26EE0668-A00A-44D7-9371-BEB064C98683}";
+
+// 写进配置文件的位置标识。用固定英文而不是路径：
+// 以后路径写法（GUID、shell:: 前缀）改了，配置里的记录也不会失效。
+constexpr const wchar_t* kViewLocThisPc       = L"thispc";
+constexpr const wchar_t* kViewLocControlPanel = L"controlpanel";
+}
+
+// ----------------------------------------------------------------------------
+// 当前路径属于哪个"独立记忆视图"的位置
+//
+// 只比字符串，不查注册表、不调 COM、不探测文件——切目录时也是零成本。
+// ----------------------------------------------------------------------------
+std::wstring MainWindow::ViewLocationKeyForPath(const std::wstring& path) const
+{
+    if (_wcsicmp(path.c_str(), shell::kThisPcPath) == 0)
+    {
+        return kViewLocThisPc;
+    }
+
+    const std::wstring root(kControlPanelRootPath);
+    if (path.size() >= root.size() &&
+        _wcsnicmp(path.c_str(), root.c_str(), root.size()) == 0)
+    {
+        return kViewLocControlPanel;
+    }
+
+    return std::wstring();
+}
+
+// ----------------------------------------------------------------------------
+// 某个位置该用的视图
+//
+// 配置里记过（用户在里面换过）就用记的；没记过就用它自己的默认 —— 平铺。
+// ----------------------------------------------------------------------------
+FileListView::ViewMode MainWindow::DefaultViewModeForLocation(const std::wstring& key) const
+{
+    const int saved = core::Settings::Instance().LocationViewMode(key);
+    if (saved >= 0)
+    {
+        return static_cast<FileListView::ViewMode>(saved);
+    }
+
+    // 第一次运行（配置里没有这条）：此电脑、控制面板都是平铺。
+    // 此电脑用平铺是为了显示磁盘名、容量和占用条，和系统自带的此电脑一致。
+    return FileListView::ViewMode::Tiles;
+}
 
 FileListView::ViewMode MainWindow::DefaultViewModeForCurrentPath() const
 {
     const std::wstring path = m_history.Current();
 
-    // 「此电脑」用平铺：显示磁盘名、容量文字和占用进度条（和系统自带的此电脑一致）
-    if (_wcsicmp(path.c_str(), shell::kThisPcPath) == 0)
+    // 1) 此电脑 / 控制面板：用它们自己的记忆，完全不看全局设置
+    const std::wstring locKey = ViewLocationKeyForPath(path);
+    if (!locKey.empty())
     {
-        return FileListView::ViewMode::Tiles;
+        return DefaultViewModeForLocation(locKey);
     }
 
-    // 其它 Shell 命名空间里的东西（"::" 开头的解析名、shell:xxx、以及那个顶层桌面）
-    // 都算「系统文件夹」——这些地方系统默认是小图标视图。
+    // 2) 其它 Shell 命名空间里的东西（"::" 开头的解析名、shell:xxx、以及那个顶层桌面）
+    //    都算「系统文件夹」——这些地方系统默认是小图标视图。
     const bool isShellNamespace = shell::IsTopDesktopPath(path) ||
                                   path.compare(0, 2, L"::") == 0 ||
                                   path.compare(0, 6, L"shell:") == 0;
 
+    // 3) 普通磁盘目录 → 详细信息
     return isShellNamespace ? FileListView::ViewMode::SmallIcon
                             : FileListView::ViewMode::Details;
 }
@@ -3439,10 +3495,30 @@ void MainWindow::ApplyViewMode(FileListView::ViewMode mode, bool modeIsUserChoic
 {
     m_viewMode = mode;
 
+    // 当前位置是不是「此电脑」「控制面板」这类独立记忆的位置。
+    // 只比路径字符串，零成本。
+    const std::wstring locKey = ViewLocationKeyForPath(m_history.Current());
+
+    if (locKey.empty())
+    {
+        // 普通目录：这就是"全局"那份视图，记下来，
+        // 从位置页回到普通目录时按它恢复。
+        m_globalViewMode = static_cast<int>(mode);
+    }
+
     if (modeIsUserChoice)
     {
-        // 用户亲自选的：以后进出目录都保持这个视图
-        m_viewModeManual = true;
+        // 用户从「查看」菜单亲手选的。记到哪儿取决于当前位置：
+        //   此电脑 / 控制面板 → 只记这一处，不动全局，也不影响另一处；
+        //   普通目录         → 锁住全局（原来那套行为完全不变）。
+        if (!locKey.empty())
+        {
+            core::Settings::Instance().SetLocationViewMode(locKey, static_cast<int>(mode));
+        }
+        else
+        {
+            m_viewModeManual = true;
+        }
     }
 
     m_fileListView.SetViewMode(mode);
@@ -3570,10 +3646,25 @@ void MainWindow::SaveWindowState()
     settings.SetColumns(columns);
 
     // ---- 查看模式 ----
-    settings.SetViewMode(static_cast<int>(m_fileListView.CurrentViewMode()), m_viewModeManual);
+    // 先看当前站在哪儿：此电脑 / 控制面板只更新它们自己那份，绝不写全局，
+    // 否则下次开普通文件夹也会跟着变成平铺或列表。
+    const std::wstring current = m_history.Current();
+    const std::wstring viewLocKey = ViewLocationKeyForPath(current);
+    if (!viewLocKey.empty())
+    {
+        settings.SetLocationViewMode(viewLocKey, static_cast<int>(m_fileListView.CurrentViewMode()));
+
+        // 站在位置页的时候 m_viewMode 已经是位置页那份了，不能拿它当全局写。
+        // 全局那份用 m_globalViewMode（普通目录时记下的）；没记过就不写，
+        // 免得把位置页的视图顺手写进全局。
+        settings.SetViewMode(m_globalViewMode, m_viewModeManual);
+    }
+    else
+    {
+        settings.SetViewMode(static_cast<int>(m_fileListView.CurrentViewMode()), m_viewModeManual);
+    }
 
     // ---- 上次停留的目录 ----
-    const std::wstring current = m_history.Current();
     if (!current.empty())
     {
         settings.SetLastFolder(current);
@@ -4098,6 +4189,14 @@ static void BuildThisPcGrouped(std::vector<shell::ShellEntry>& entries, int perR
 
     for (auto& entry : entries)
     {
+        // 幂等：传进来的可能是"上次已经分好组"的列表（含标题行和占位格）。
+        // 这里先剔掉它们再重新分，否则标题会被当成真实条目再插一遍——
+        // 列表视图下就会看到两行同名的「设备和驱动器」「网络位置」。
+        if (entry.isGroupHeader || entry.isSpacer)
+        {
+            continue;
+        }
+
         if (entry.driveType == DRIVE_REMOTE)
         {
             networkDrives.push_back(std::move(entry));
@@ -4274,14 +4373,16 @@ void MainWindow::OnEnumerationDone()
     // ------------------------------------------------------------
     int thisPcPerRow = 1;
 
-    if (_wcsicmp(result->path.c_str(), shell::kThisPcPath) == 0 &&
-        (result->entries.empty() || !result->entries.front().isGroupHeader))
+    // 每次都重建（BuildThisPcGrouped 自己会先剔掉上次插的标题和占位格，幂等）。
+    // 不再靠"第一项是不是标题"来判断：排序会把标题排到中间，判断会失效，
+    // 于是标题被当真实项再分一次，列表视图下就出现两行同名标题。
+    if (_wcsicmp(result->path.c_str(), shell::kThisPcPath) == 0)
     {
         // 视图是在这段之后才 ApplyViewMode 的，所以这里不能只看 m_viewMode，
         // 还要按"当前目录默认该用哪种视图"算一遍，否则首次进此电脑会按
         // 详细信息算，占位格就补错了。
         bool tilesView = (m_viewMode == FileListView::ViewMode::Tiles);
-        if (!m_viewModeManual && DefaultViewModeForCurrentPath() == FileListView::ViewMode::Tiles)
+        if (DefaultViewModeForCurrentPath() == FileListView::ViewMode::Tiles)
         {
             tilesView = true;
         }
@@ -4293,12 +4394,25 @@ void MainWindow::OnEnumerationDone()
 
     m_thisPcPerRow = thisPcPerRow;
 
-    // 进入/刷新目录时定一次视图：本机磁盘目录用详细信息，
-    // 此电脑和各种系统文件夹用小图标（和系统默认一致）。
-    // 用户从「查看」菜单手动选过之后就不再自动改，一直按他选的来。
-    if (!m_viewModeManual)
+    // 进入/刷新目录时定一次视图：
+    //   此电脑 / 控制面板 → 永远用它们自己那份记忆（不受全局"用户选过"影响）
+    //   普通目录         → 用户手动选过就按他那套（从位置页回来时恢复到全局那份），
+    //                      没选过就按目录类型给默认
+    const std::wstring viewLocKey = ViewLocationKeyForPath(m_history.Current());
+    if (!viewLocKey.empty())
     {
         ApplyViewMode(DefaultViewModeForCurrentPath(), false);
+    }
+    else if (!m_viewModeManual)
+    {
+        ApplyViewMode(DefaultViewModeForCurrentPath(), false);
+    }
+    else if (m_globalViewMode >= 0 &&
+             static_cast<int>(m_viewMode) != m_globalViewMode)
+    {
+        // 刚从「此电脑」/「控制面板」出来：m_viewMode 还是那两处的模式，
+        // 要按普通目录自己的那份恢复，否则会被带跑。
+        ApplyViewMode(static_cast<FileListView::ViewMode>(m_globalViewMode), false);
     }
 
     // ------------------------------------------------------------

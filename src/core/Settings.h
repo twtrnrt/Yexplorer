@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -156,6 +157,18 @@ public:
         m_viewModeManual = manual;
     }
 
+    // ---------------- 按位置单独记忆的查看模式 ----------------
+    //
+    // 「此电脑」「控制面板」这两处不跟全局的 view.mode 走，各有一份自己的模式，
+    // 互相之间也不影响（在控制面板里切视图不会把此电脑带跑）。
+    //
+    // key 用程序内部固定的英文标识（"thispc" / "controlpanel"），不用路径：
+    // 路径写法（GUID、shell:: 前缀）万一以后改，配置里的记录也不会失效。
+    //
+    // 返回 -1 表示这个位置还没记过，调用方用该位置自己的默认值（现在都是平铺）。
+    int  LocationViewMode(const std::wstring& key) const;
+    void SetLocationViewMode(const std::wstring& key, int mode);
+
     // 上次停留的目录（下次启动直接打开这里）
     const std::wstring& LastFolder() const { return m_lastFolder; }
     void                SetLastFolder(const std::wstring& path) { m_lastFolder = path; }
@@ -198,6 +211,10 @@ private:
     ColumnWidths  m_columns;
     int           m_viewMode       = -1;      // -1 = 没记过
     bool          m_viewModeManual = false;
+
+    // 按位置单独记的视图：位置标识 → FileListView::ViewMode 整数值
+    // 只在内存里查，导航时不开销（启动读一次，关闭写一次）
+    std::map<std::wstring, int> m_viewByLocation;
     std::wstring  m_lastFolder;
     bool          m_menuIcons      = false;   // 右键菜单是否显示图标（默认关）
 
