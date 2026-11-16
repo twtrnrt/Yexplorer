@@ -50,8 +50,8 @@ IDR_EXPLORER_PROXY RCDATA "explorer-proxy-x64.exe"
 // 2. 版本信息
 // ----------------------------------------------------------------------------
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION     1,1,0,0
- PRODUCTVERSION  1,1,0,0
+ FILEVERSION     1,1,2,0
+ PRODUCTVERSION  1,1,2,0
  FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
  FILEFLAGS       0
  FILEOS          VOS_NT_WINDOWS32
@@ -65,11 +65,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Personal Project"
             VALUE "FileDescription",  "File Explorer (custom implementation)"
-            VALUE "FileVersion",      "1.1.0.0"
+            VALUE "FileVersion",      "1.1.2.0"
             VALUE "InternalName",     "FileExplorer"
             VALUE "OriginalFilename", "FileExplorer.exe"
             VALUE "ProductName",      "File Explorer"
-            VALUE "ProductVersion",   "1.1.0.0"
+            VALUE "ProductVersion",   "1.1.2.0"
         END
     END
     BLOCK "VarFileInfo"
