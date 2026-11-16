@@ -165,6 +165,7 @@
     <ClCompile Include="src\ui\NavigationPane.cpp" />
     <ClCompile Include="src\ui\OpenWithDialog.cpp" />
     <ClCompile Include="src\ui\SettingsDialog.cpp" />
+    <ClCompile Include="src\ui\BatchRenameDialog.cpp" />
     <ClCompile Include="src\ui\MenuIcons.cpp" />
     <ClCompile Include="src\ui\WindowRelay.cpp" />
   </ItemGroup>
@@ -193,6 +194,7 @@
     <ClInclude Include="src\ui\NavigationPane.h" />
     <ClInclude Include="src\ui\OpenWithDialog.h" />
     <ClInclude Include="src\ui\SettingsDialog.h" />
+    <ClInclude Include="src\ui\BatchRenameDialog.h" />
     <ClInclude Include="src\ui\MenuIcons.h" />
     <ClInclude Include="src\ui\WindowRelay.h" />
   </ItemGroup>

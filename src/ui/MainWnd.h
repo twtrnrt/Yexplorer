@@ -94,6 +94,9 @@ static const int kCommandViewTiles   = 3305;  // 平铺（此电脑那种带容�
 // 重命名快捷键
 static const int kCommandRename     = 3109;  // F2
 
+// 批量重命名（选中多个时右键里那一条）
+static const int kCommandBatchRename = 3211;
+
 class MainWindow
 {
 public:
@@ -170,6 +173,9 @@ private:
     void DoPaste();         // Ctrl+V：复制/移动到家目录
     void DoDelete();        // Delete：删到回收站
     void DoNewFolder();     // Ctrl+Shift+N：新建文件夹
+
+    // 批量重命名（选中多个时右键「批量重命名」）
+    void DoBatchRename();
 
     // ---- 后台执行文件操作（避免复制大文件时界面卡住）----
     void RunFileOperationAsync(std::function<HRESULT()> operation);

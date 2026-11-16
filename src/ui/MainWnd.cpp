@@ -10,6 +10,7 @@
 
 #include "MainWnd.h"
 #include "ui/WindowRelay.h"
+#include "ui/BatchRenameDialog.h"
 #include "core/Format.h"
 #include "core/Logger.h"
 #include "core/Settings.h"
@@ -960,6 +961,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         case kCommandRename:
             m_fileListView.BeginRenameSelected();
             return 0;
+        case kCommandBatchRename:
+            DoBatchRename();
+            return 0;
         case kCommandViewLarge:
             ApplyViewMode(FileListView::ViewMode::LargeIcon, true);
             return 0;
@@ -1734,6 +1738,60 @@ void MainWindow::DoPaste()
     });
 }
 
+// ============================================================================
+// 批量重命名（右键「批量重命名」）
+//
+// 第一步：先把「批量重命名」窗口做出来（UI 阶段）。
+//   现在窗口里的预览、冲突检查都是真的，点「应用」把每一项目标文件名回传到这里；
+//   真正落盘的改名（含冲突时的不覆盖、失败回滚、撤销记录）放到下一步接。
+// ============================================================================
+void MainWindow::DoBatchRename()
+{
+    const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+    if (selected.size() < 2)
+    {
+        return;
+    }
+
+    // 只认文件系统里的真实文件/文件夹：控制面板、此电脑里的项没法改名
+    std::vector<std::wstring> paths;
+    paths.reserve(selected.size());
+
+    for (const auto& path : selected)
+    {
+        if (shell::IsFileSystemPath(path))
+        {
+            paths.push_back(path);
+        }
+    }
+
+    if (paths.size() < 2)
+    {
+        return;
+    }
+
+    BatchRenameDialog dialog;
+    std::vector<BatchRenameResult> results;
+
+    if (!dialog.ShowModal(m_hWnd, paths, results))
+    {
+        return;
+    }
+
+    // 界面阶段先把结果记进日志，看一眼规则算出来的名字对不对
+    Logger::Info(L"批量重命名：确认了 " + std::to_wstring(results.size()) + L" 项");
+
+    for (const auto& result : results)
+    {
+        Logger::Info(L"  " + result.oldPath + L"   →   " + result.newName);
+    }
+
+    ::MessageBoxW(m_hWnd,
+                  L"界面已确认，改名功能下一步接上（这一版点应用不会真的改文件）。",
+                  L"批量重命名", MB_OK | MB_ICONINFORMATION);
+}
+
 void MainWindow::DoDelete()
 {
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
@@ -2104,9 +2162,11 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPat
 //   ─────
 //   删除
 //   ─────
+//   批量重命名          （多个一起改名，系统的「重命名」对多选只改一个，这里给它更全的）
+//   ─────
 //   属性
 //
-// 没有重命名（系统也不给多选重命名），没有新建，没有打开方式。
+// 没有单个「重命名」（系统也不给多选逐个改名），没有新建，没有打开方式。
 // ---------------------------------------------------------------------------
 void MainWindow::BuildMultipleMenu(HMENU menu)
 {
@@ -2133,6 +2193,9 @@ void MainWindow::BuildMultipleMenu(HMENU menu)
     FillUndoItem(menu);
 
     ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandBatchRename, L"批量重命名(&R)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
