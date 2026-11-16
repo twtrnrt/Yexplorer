@@ -87,7 +87,7 @@ static void EnableDpiAwareness()
 //
 // 用途：右键「在新窗口中打开」时，本程序会带着一个目录参数重新启动自己。
 // lpCmdLine 不含程序名，可能长这样：
-//     "C:\Users\kf168\Desktop\owtest"
+//     "C:\Users\user\Desktop\owtest"
 //      C:\Windows
 // 这里把首尾空白和成对的引号去掉，剩下的当一个目录用。
 // ----------------------------------------------------------------------------

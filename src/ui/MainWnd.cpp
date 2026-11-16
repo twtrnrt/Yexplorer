@@ -1289,7 +1289,7 @@ void MainWindow::NavigateToPath(const std::wstring& path)
 // ----------------------------------------------------------------------------
 // 记下"这个目录是从哪儿点进来的、叫什么名字"
 // 只由列表里的双击调用。地址栏、后退、前进、左栏都不记，
-// 这样"从主文件夹点进文档"和"从 C:\Users\kf168 点进 Documents"互不干扰。
+// 这样"从主文件夹点进文档"和"从 C:\Users\user 点进 Documents"互不干扰。
 // ----------------------------------------------------------------------------
 void MainWindow::RecordNavigationOrigin(const std::wstring& path,
                                         const std::wstring& displayName,
@@ -1373,7 +1373,7 @@ void MainWindow::GoUp()
 
     // 先看"这个目录是从哪儿进来的"：
     //   从「主文件夹」双击进「文档」，向上就回「主文件夹」，
-    //   而不是它的真实父目录 C:\Users\kf168（系统资源管理器就是这么走的）。
+    //   而不是它的真实父目录 C:\Users\user（系统资源管理器就是这么走的）。
     {
         std::wstring key = current;
         for (wchar_t& ch : key)
@@ -1391,7 +1391,7 @@ void MainWindow::GoUp()
     }
 
     // 没有来源记录时，上一级交给 Shell 命名空间自己算（和资源管理器那个「向上」按钮同一套逻辑）：
-    //   下载 → kf168（用户主文件夹）→ 用户 → 本地磁盘 (C:) → 此电脑
+    //   下载 → user（用户主文件夹）→ 用户 → 本地磁盘 (C:) → 此电脑
     //   此电脑 → 顶层「桌面」（里面含此电脑、主文件夹、音乐、图片等）→ 再向上就没有了
     // 这里不能用 NavigationHistory::ParentPath 那种字符串截断：
     // 它对 "C:\" 只会原地返回，永远走不到「此电脑」和「桌面」这两层。

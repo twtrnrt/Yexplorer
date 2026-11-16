@@ -187,12 +187,12 @@ UI 层不直接调 Win32 Shell API，一律走 <code>shell/</code> 封装。</p>
 <h2>八、构建与验证</h2>
 
 <pre>
-编译器：MSVC v143（VS2022 17.14）    位置 C:\dev\vs2022
+编译器：MSVC v143（VS2022 17.14）    位置 <VS2022 安装目录>
 SDK   ：Windows SDK 10.0.26100.0
 git   ：C:\dev\git\bin\git.exe（不在 PATH）
 
 编译命令：
-  & "C:\dev\vs2022\MSBuild\Current\Bin\MSBuild.exe" `
+  & "<VS2022 安装目录>\MSBuild\Current\Bin\MSBuild.exe" `
     "C:\git\explorer\Explorer.sln" /p:Configuration=Debug /p:Platform=x64
 
 产物：bin\x64\Debug\FileExplorer.exe

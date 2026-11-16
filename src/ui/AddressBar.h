@@ -52,8 +52,8 @@ public:
     // 带"折叠前缀"的面包屑：path 位于 prefixPath 之内时，
     // 第一段显示 prefixLabel（点它回 prefixPath），后面再把 prefixPath
     // 之后的部分一段段切开。
-    //   例：path = C:\Users\kf168\Downloads\2025
-    //       prefixPath = C:\Users\kf168\Downloads，prefixLabel = 下载
+    //   例：path = C:\Users\user\Downloads\2025
+    //       prefixPath = C:\Users\user\Downloads，prefixLabel = 下载
     //       → 「下载 > 2025」，点「下载」回下载目录
     // 这种写法只用在系统已知文件夹（下载/图片/文档…）的子目录上；
     // 普通目录还是走 SetPath，显示完整路径。

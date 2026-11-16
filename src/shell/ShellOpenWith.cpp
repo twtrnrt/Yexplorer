@@ -487,7 +487,7 @@ std::wstring ReplaceAll(std::wstring text, const std::wstring& from, const std::
 // 拼命令行参数
 //
 // 三种模板形态（都是本机实测存在的）：
-//   "C:\…\Doubao.exe" --image-viewer-file="%1"      ← 引号在模板里
+//   "C:\…\Viewer.exe" --image-viewer-file="%1"      ← 引号在模板里
 //   "C:\…\photolaunch.exe" /photo /view "%1"        ← 引号在模板里
 //   "C:\…\msedge.exe" --single-argument %1          ← 不能给路径加引号
 //

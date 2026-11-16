@@ -97,7 +97,7 @@ bool IsPhysicalDesktopPath(const std::wstring& path)
 // ----------------------------------------------------------------------------
 // 去掉一级目录（纯字符串层面）
 //
-//   "C:\Users\kf168\Downloads" → "C:\Users\kf168"
+//   "C:\Users\user\Downloads" → "C:\Users\user"
 //   "C:\Users"                 → "C:\"
 //   "C:\"                      → "C:\"（已经是盘根，原样返回，由调用方决定去哪）
 // ----------------------------------------------------------------------------
@@ -827,15 +827,15 @@ std::wstring GetParentPath(const std::wstring& path)
     // ------------------------------------------------------------------
     // 2) 普通文件系统路径（C:\…）：按目录层级往上走，到盘根再往上 = 此电脑
     //
-    //    C:\Users\kf168\Downloads → C:\Users\kf168     （资源管理器就是这样）
-    //    C:\Users\kf168\Desktop   → C:\Users\kf168
-    //    C:\Users\kf168           → C:\Users
+    //    C:\Users\user\Downloads → C:\Users\user     （资源管理器就是这样）
+    //    C:\Users\user\Desktop   → C:\Users\user
+    //    C:\Users\user           → C:\Users
     //    C:\Users                 → C:\
     //    C:\                      → 此电脑
     //
     //    这里必须用路径层级，不能调 IShellItem::GetParent：
     //    系统把它算成「下载/桌面 → 桌面容器」，和资源管理器给出的目标不一致
-    //    （资源管理器状态下，下载的向上按钮明明白白写着「上移到 kf168」）。
+    //    （资源管理器状态下，下载的向上按钮明明白白写着「上移到 user」）。
     // ------------------------------------------------------------------
     if (IsDriveLetterPath(path))
     {

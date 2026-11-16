@@ -166,8 +166,8 @@ bool KnownFolderDisplayName(const std::wstring& path, std::wstring& displayName)
 // 找出 path 所属的"最深那个系统已知文件夹"（桌面 / 下载 / 文档 / 图片 / 音乐 / 视频）
 //
 // 地址栏折叠用：
-//   path = C:\Users\kf168\Downloads\2025  →  folderPath = ...\Downloads，displayName = 下载
-//   地址栏就能显示成「下载 > 2025」，而不是 C: > Users > kf168 > Downloads > 2025。
+//   path = C:\Users\user\Downloads\2025  →  folderPath = ...\Downloads，displayName = 下载
+//   地址栏就能显示成「下载 > 2025」，而不是 C: > Users > user > Downloads > 2025。
 //
 // 就是它自己也算命中（此时地址栏只有「下载」一段）。
 //
@@ -198,8 +198,8 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
 // 取「上一级」（就是资源管理器那个「向上」按钮走的那套逻辑）
 //
 // 关键点：这里不是把路径字符串砍掉最后一段，而是交给 Shell 命名空间去算父项：
-//   下载                     → kf168（用户主文件夹）    ← 字符串截断也会得到这个
-//   C:\Users\kf168\Desktop   → C:\Users\kf168
+//   下载                     → user（用户主文件夹）    ← 字符串截断也会得到这个
+//   C:\Users\user\Desktop   → C:\Users\user
 //   C:\                      → 此电脑（::{20D04FE0-...}）
 //   此电脑                   → 桌面（命名空间顶层那个「桌面」，里面含此电脑、
 //                              主文件夹、音乐、图片等）—— 字符串截断算不出这一层
