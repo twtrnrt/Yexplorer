@@ -199,6 +199,9 @@ public:
     static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
                                              LPARAM lParam, UINT_PTR id, DWORD_PTR refData);
 
+    // 单行改名框（小图标 / 列表）：输入内容变长时把框跟着往右加宽
+    void GrowRenameEditWidth();
+
     // 是否正在原地改名（列表上有个编辑框挂着）
     // 目录监视触发的自动刷新要避开这个时刻，否则编辑框会被冲掉
     bool IsEditingLabel() const { return m_editingLabel; }

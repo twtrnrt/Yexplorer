@@ -50,6 +50,13 @@ static const DWORD kTypeAheadTimeoutMs = 500;
 
 static const UINT kMsgFinishTileRename = WM_APP + 101;
 
+// 单行改名框（小图标 / 列表）的宽度 = 文字实际宽 + 这个值。
+// 里面包含：左右内边距各 3px、边框与光标位置约 5px，再按用户要求向右多留 9px。
+static const int kRenameEditExtraWidth = 17;
+
+// 单行改名框的高度：列表视图的行距也是 25，框正好贴满一行、不会压到上下邻居
+static const int kRenameEditHeight = 25;
+
 // ============================================================================
 // 小图标视图的列宽参数：
 //   名字能显示多宽 = 300，列与列之间空 20，图标 16 + 图标与文字之间 4
@@ -607,8 +614,17 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
 RECT FileListView::ComputeTileNameRect(HDC dc, const RECT& tileRect,
                                        const shell::ShellEntry& entry) const
 {
-    // 小图标的改名用的是控件自带的编辑框（单行、随内容加长），
-    // 这里只服务于平铺的自建多行编辑框，所以只算平铺的名字矩形。
+    // 小图标 / 列表：16px 图标在左，名字从图标右边开始，单行、整格垂直居中。
+    // 右边留白和小图标一致（小图标让出列间距留 8，列表一行占满只留 2）
+    if (m_viewMode == ViewMode::SmallIcon || m_viewMode == ViewMode::List)
+    {
+        // 注意不能把变量叫 small：Windows 头文件里 small 是个宏（展开成 char）
+        const int rightPad = (m_viewMode == ViewMode::SmallIcon) ? 8 : 2;
+        RECT nameBox = { tileRect.left + 22, tileRect.top + 1,
+                         tileRect.right - rightPad, tileRect.bottom - 1 };
+        return nameBox;
+    }
+
     const int textLeft = tileRect.left + 62;
 
     if (entry.diskTotal > 0)
@@ -921,17 +937,17 @@ void FileListView::LayoutListWidth()
         itemWidth = 100;
     }
 
-    // 行高 20：和系统列表视图一样，一行一个，紧挨着排。
+    // 行高 25：和小图标视图统一（两边改名框都是 25 高，框正好贴满一行、不压邻居）。
     // 宽度没变就别重复设：拖窗口时 Resize 会连续来，重复 SetIconSpacing 会让控件反复重排
     const DWORD currentSpacing = static_cast<DWORD>(
         ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
     if (static_cast<int>(LOWORD(currentSpacing)) == itemWidth &&
-        static_cast<int>(HIWORD(currentSpacing)) == 20)
+        static_cast<int>(HIWORD(currentSpacing)) == 25)
     {
         return;
     }
 
-    ListView_SetIconSpacing(m_hWnd, itemWidth, 20);
+    ListView_SetIconSpacing(m_hWnd, itemWidth, 25);
 }
 
 void FileListView::Resize(int x, int y, int width, int height)
@@ -1558,9 +1574,10 @@ void FileListView::BeginRenameSelected()
         return;
     }
 
-    // 只有平铺走自己建的编辑框（自带的那个是单行框，做不出"三行高 + 字贴左上"）。
-    // 小图标仍旧用控件自带的编辑框：单行、宽度随内容自动加长，跟以前一样。
-    if (m_viewMode == ViewMode::Tiles)
+    // 这三个视图都是"图标在左、名字在右"，控件自带编辑框按"图标正下方"摆，
+    // 位置和大小都对不上，所以统一用自己建的编辑框
+    if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon ||
+        m_viewMode == ViewMode::List)
     {
         BeginTileRename(selectedIndex);
         return;
@@ -1661,26 +1678,88 @@ void FileListView::BeginTileRename(int index)
     ::SelectObject(measureDc, oldFont);
     ::ReleaseDC(m_hWnd, measureDc);
 
-    const int editWidth = nameRect.right - nameRect.left;
+    // 平铺：多行框，高度按名字文字块给（最多三行），再多给 4px 余量，少给就会把字挤扁。
+    // 小图标 / 列表：单行框，高度就一行字，框内可以左右滚（输入长了以后再自动加宽）。
+    const bool singleLine = (m_viewMode == ViewMode::SmallIcon || m_viewMode == ViewMode::List);
+
+    int editWidth = nameRect.right - nameRect.left;
+
+    // 单行框（小图标 / 列表）：宽度按内容给 —— 文字多宽，框就多宽（+左右边距，再向右多 9px），
+    // 不占用整格。短名字就是个小框，长名字往后拉，到控件右边界为止。
+    if (singleLine)
+    {
+        int textWidth = 0;
+
+        HDC textDc = ::GetDC(m_hWnd);
+        if (textDc != nullptr)
+        {
+            HGDIOBJ oldTextFont = (m_hFont != nullptr) ? ::SelectObject(textDc, m_hFont) : nullptr;
+            SIZE textSize = {};
+            if (::GetTextExtentPoint32W(textDc, entry.name.c_str(),
+                                        static_cast<int>(entry.name.size()), &textSize))
+            {
+                textWidth = static_cast<int>(textSize.cx);
+            }
+            if (oldTextFont != nullptr)
+            {
+                ::SelectObject(textDc, oldTextFont);
+            }
+            ::ReleaseDC(m_hWnd, textDc);
+        }
+
+        editWidth = textWidth + kRenameEditExtraWidth;
+
+        // 上限：不能超过控件自己的客户区右边界（超出去的部分会被控件裁掉、看不见）
+        RECT clientRect = {};
+        ::GetClientRect(m_hWnd, &clientRect);
+        const int limitWidth = static_cast<int>(clientRect.right) - static_cast<int>(nameRect.left);
+        if (limitWidth > 0 && editWidth > limitWidth)
+        {
+            editWidth = limitWidth;
+        }
+
+        if (editWidth < 40)
+        {
+            editWidth = 40;   // 空名字这种极端情况给个最小宽度
+        }
+    }
+
     if (editWidth <= 40)
     {
         return;
     }
 
-    // 平铺 / 小图标：高度按名字文字块给（平铺可能三行，小图标一行），
-    // 再多给 4px 余量，少给就会把字挤扁
     int editHeight = static_cast<int>(nameRect.bottom - nameRect.top) + 4;
+    int editTop    = nameRect.top;
+
+    if (singleLine)
+    {
+        // 单行框高度统一 25（列表视图的行距也是 25，正好贴满一行、不会压到上下邻居；
+        // 小图标的行距 24，多出的 1px 看不出来）
+        editHeight = kRenameEditHeight;
+
+        // 在名字那块里垂直居中摆，再整体上抬 1px（按用户要求）
+        const int available = static_cast<int>(nameRect.bottom - nameRect.top);
+        editTop = nameRect.top + (available > editHeight ? (available - editHeight) / 2 : 0);
+        editTop -= 1;
+    }
 
     HINSTANCE instance = reinterpret_cast<HINSTANCE>(
         ::GetWindowLongPtrW(m_hWnd, GWLP_HINSTANCE));
 
-    // 多行编辑框：ES_MULTILINE 让它自己换行、文字靠左上，ES_AUTOVSCROLL 处理超长名字
+    // 这两种框用同一套消息处理（回车提交、Esc 取消、失焦提交）：
+    //   平铺 = 多行框（ES_MULTILINE + ES_AUTOVSCROLL），文字靠左上、能装三行；
+    //   小图标 / 列表 = 单行框（ES_AUTOHSCROLL），宽度随输入内容自动加长
+    const DWORD editStyle = (singleLine)
+        ? (WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_LEFT | ES_AUTOHSCROLL)
+        : (WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL);
+
     m_hEdit = ::CreateWindowExW(
         0,
         L"EDIT",
         entry.name.c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL,
-        nameRect.left, nameRect.top, editWidth, editHeight,
+        editStyle,
+        nameRect.left, editTop, editWidth, editHeight,
         m_hWnd,
         nullptr,
         instance,
@@ -1724,6 +1803,78 @@ void FileListView::BeginTileRename(int index)
     // 先把这一格重画一遍（名字已经被跳过，不再画），再把新框露出来
     ::InvalidateRect(m_hWnd, &itemRect, FALSE);
     ::UpdateWindow(m_hWnd);
+}
+
+// ============================================================================
+// 单行改名框跟着输入内容伸缩
+//
+// 小图标 / 列表的改名框宽度是"文字宽 + 边距"算出来的：
+// 打字变长就往后拉、删字就收回来。上限是列表控件自己的客户区右边界
+// （再往外就被控件裁掉，看不见）。
+// ============================================================================
+
+void FileListView::GrowRenameEditWidth()
+{
+    if (m_hEdit == nullptr || m_hWnd == nullptr || m_editingIndex < 0 ||
+        m_result == nullptr || m_editingIndex >= static_cast<int>(m_result->entries.size()))
+    {
+        return;
+    }
+
+    // 多行框（平铺）宽度固定，换行就行，不用伸缩
+    if (m_viewMode == ViewMode::Tiles)
+    {
+        return;
+    }
+
+    // 当前输入的文字有多宽
+    wchar_t buffer[512] = {};
+    ::GetWindowTextW(m_hEdit, buffer, static_cast<int>(std::size(buffer)));
+
+    RECT editRect = {};
+    ::GetWindowRect(m_hEdit, &editRect);
+    ::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<POINT*>(&editRect), 2);
+
+    RECT clientRect = {};
+    ::GetClientRect(m_hWnd, &clientRect);
+
+    int currentWidth = static_cast<int>(editRect.right - editRect.left);
+    int textWidth    = 0;
+
+    HDC dc = ::GetDC(m_hWnd);
+    if (dc != nullptr)
+    {
+        HGDIOBJ oldFont  = (m_hFont != nullptr) ? ::SelectObject(dc, m_hFont) : nullptr;
+        SIZE    textSize = {};
+        if (::GetTextExtentPoint32W(dc, buffer, static_cast<int>(::wcslen(buffer)), &textSize))
+        {
+            textWidth = static_cast<int>(textSize.cx);
+        }
+        if (oldFont != nullptr)
+        {
+            ::SelectObject(dc, oldFont);
+        }
+        ::ReleaseDC(m_hWnd, dc);
+    }
+
+    // 文字宽 + 边距；不超过控件客户区右边界；也不缩到 40 以下
+    int wantWidth = textWidth + kRenameEditExtraWidth;
+    const int limitWidth = static_cast<int>(clientRect.right) - static_cast<int>(editRect.left);
+    if (limitWidth > 0 && wantWidth > limitWidth)
+    {
+        wantWidth = limitWidth;
+    }
+    if (wantWidth < 40)
+    {
+        wantWidth = 40;
+    }
+
+    // 变长变短都要跟（删字时框收回来，才和"按内容"一致）
+    if (wantWidth != currentWidth)
+    {
+        ::SetWindowPos(m_hEdit, nullptr, 0, 0, wantWidth, static_cast<int>(editRect.bottom - editRect.top),
+                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 // ============================================================================
@@ -1913,6 +2064,14 @@ LRESULT CALLBACK FileListView::ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM 
     {
         // 平铺改名框失焦后排队回来的收尾（提交）
         self->FinishTileRename(true);
+        return 0;
+    }
+    else if (msg == WM_COMMAND && self != nullptr && self->m_hEdit != nullptr &&
+             HIWORD(wParam) == EN_CHANGE &&
+             reinterpret_cast<HWND>(lParam) == self->m_hEdit)
+    {
+        // 单行改名框：输入内容变长就把框跟着加长（多行框不动）
+        self->GrowRenameEditWidth();
         return 0;
     }
 
