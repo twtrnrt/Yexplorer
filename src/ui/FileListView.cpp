@@ -575,6 +575,24 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     COLORREF nameColor = ::GetSysColor(COLOR_WINDOWTEXT);
     COLORREF infoColor = RGB(96, 96, 96);
 
+    // 先看这一项要不要淡化。淡化和选中互不影响 —— 选中着也要变灰，
+    // 这样"图标半透明"和"文字变灰"同时发生，不会出现图标淡了字还黑着：
+    //   · 隐藏的文件和文件夹、受保护的系统文件 → RGB(160,160,160)
+    //   · 被剪切的项目                        → RGB(100,100,100)
+    const bool dimByAttribute = (entry.isHidden || entry.isSystemFile);
+    const bool dimByCut       = (!dimByAttribute && IsCutPath(entry.fullPath));
+
+    if (dimByAttribute)
+    {
+        nameColor = RGB(160, 160, 160);
+        infoColor = RGB(160, 160, 160);
+    }
+    else if (dimByCut)
+    {
+        nameColor = RGB(100, 100, 100);
+        infoColor = RGB(100, 100, 100);
+    }
+
     if (selected)
     {
         const bool focused = (::GetFocus() == m_hWnd);
@@ -589,7 +607,8 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
                 focused ? LISS_SELECTED : LISS_SELECTEDNOTFOCUS,
                 &tileRect, nullptr));
 
-            if (painted)
+            // 只有"没淡化"的项才用主题文字色，淡化项保持上面定好的灰字
+            if (painted && !dimByAttribute && !dimByCut)
             {
                 COLORREF themeText = 0;
                 if (SUCCEEDED(::GetThemeColor(theme, LVP_LISTITEM, LISS_SELECTED,
@@ -613,8 +632,11 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
                 ::DeleteObject(backBrush);
             }
 
-            nameColor = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
-            infoColor = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+            if (!dimByAttribute && !dimByCut)
+            {
+                nameColor = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+                infoColor = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+            }
         }
     }
     else
@@ -624,17 +646,6 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
         {
             ::FillRect(dc, &tileRect, backBrush);
             ::DeleteObject(backBrush);
-        }
-
-        // 没选中才做淡化，规则和列表视图一致：
-        // 隐藏项 / 系统文件 120 灰，剪切项 150 灰
-        if (entry.isHidden || entry.isSystemFile)
-        {
-            nameColor = RGB(120, 120, 120);
-        }
-        else if (IsCutPath(entry.fullPath))
-        {
-            nameColor = RGB(150, 150, 150);
         }
     }
 
@@ -1746,30 +1757,25 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             // ---- 隐藏项 / 系统文件 / 剪切项：文字画淡 ----
             //
             // 图标已经走半透明（IconIndexForEntry 里统一处理），这里只管文字颜色：
-            //   · 隐藏的文件和文件夹、受保护的系统文件 → 120 灰（两者观感一样）
-            //   · 被剪切的项目 → 150 灰（比隐藏项浅一点，便于区分）
-            // 选中时不改色：选中行是浅蓝底，文字要跟正常项一样用主题的深色，
-            // 和资源管理器一致（否则蓝底上压一行灰字，看着像禁用）。
-            // 选中状态必须问控件，不能读 uItemState：
-            // owner-data（虚拟）列表里 CDIS_SELECTED 位不可靠，会把每一行都当成选中，
-            // 结果就是"只有没选中的行才改色"这个条件永远不成立，文字一直不变灰。
-            const bool itemSelected =
-                (ListView_GetItemState(m_hWnd, static_cast<int>(index), LVIS_SELECTED) &
-                 LVIS_SELECTED) != 0;
-
-            if (!itemSelected && m_result != nullptr && index < m_result->entries.size())
+            //   · 隐藏的文件和文件夹、受保护的系统文件 → 160 灰（两者观感一样）
+            //   · 被剪切的项目                        → 100 灰（比隐藏项深，便于区分）
+            //
+            // 和"选中"无关：选中着也要变灰。剪切、改成隐藏这些动作发生时，
+            // 用户往往正把那一项选中着，如果非要等它被取消选中才变灰，
+            // 就会出现"图标立刻淡了、文字还黑着"的割裂感。
+            if (m_result != nullptr && index < m_result->entries.size())
             {
                 const shell::ShellEntry& entry = m_result->entries[index];
 
                 if (entry.isHidden || entry.isSystemFile)
                 {
-                    customDraw->clrText = RGB(120, 120, 120);
+                    customDraw->clrText = RGB(160, 160, 160);
                     return CDRF_NEWFONT;   // 告诉控件按我改的颜色画
                 }
 
                 if (IsCutPath(entry.fullPath))
                 {
-                    customDraw->clrText = RGB(150, 150, 150);
+                    customDraw->clrText = RGB(100, 100, 100);
                     return CDRF_NEWFONT;
                 }
             }
