@@ -21,6 +21,13 @@
 //   System32\explorer.exe 只有在“确认是我们自己放的”时才覆盖或删除；
 //   一旦发现是别人的文件，只弹提醒、绝不动手。
 //   认亲依据是代理 exe 的版本资源 ProductName = "Yexplorer Launcher" + OriginalFilename = "explorer.exe"。
+//
+// 代理文件从哪来（重要）：
+//   代理的二进制已经作为 RCDATA 资源焊在主程序里（res\app.rc 的 IDR_EXPLORER_PROXY，
+//   内容来自 res\explorer-proxy-x64.exe），所以发布包只需要一个 FileExplorer.exe，
+//   不用再额外带 explorer-proxy.exe。
+//   部署时先从资源里取出字节、写到临时文件，复制进 System32，然后把临时文件删掉。
+//   万一是没有该资源的老构建，才退回找同目录的 explorer-proxy.exe。
 // ============================================================================
 
 #pragma once

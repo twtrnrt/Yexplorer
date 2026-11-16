@@ -83,9 +83,23 @@ OriginalFilename = "explorer.exe"
 这两个值是固定标记，写死在文件里，不依赖注册表，重装、换目录都认得出来。
 判断逻辑见 `src/shell/ExplorerProxy.cpp` 的 `IsOursProxy`。
 
-**需要的前置文件**：主程序同目录下的 `explorer-proxy.exe`
-（编译时由 `Explorer.vcxproj` 的 PostBuild 自动从 `bin\launcher\x64\explorer.exe` 复制过去；
-发布压缩包里必须带上它，否则点注册会提示“找不到自带的代理文件”）。
+**代理从哪来：已经焊在主程序里，发布包不带额外文件**
+
+代理的二进制作为 RCDATA 资源嵌进了 `FileExplorer.exe`
+（`res\app.rc` 的 `IDR_EXPLORER_PROXY`，ID 定义在 `res\resource.h`，
+payload 文件是 `res\explorer-proxy-x64.exe`）。
+部署时程序自己释放：`FindResource` → 写 `%TEMP%\Yexplorer\explorer-proxy-x64.exe`
+→ `CopyFile` 到 System32 → 删掉临时文件。
+
+所以：
+
+- 发布压缩包**只有一个 exe**，不需要（也不应该）再附带 `explorer-proxy.exe`；
+- 主程序体积 +176 KB，这是把代理焊进去的代价（文件总数少了）；
+- 改过代理源码后，要先跑 `tools\update-proxy-payload.ps1` 刷新 payload，
+  否则焊进去的还是旧代理（脚本会打印当前 payload 的版本标记供核对）。
+
+万一某个构建没有这个资源，程序会退回老做法：找同目录的 `explorer-proxy.exe`，
+找到就部署，找不到才提示失败。
 
 **第一次的特殊情况**：如果以前手工往 System32 复制过一份**没有版本标记**的旧代理，
 程序认不出它，会弹「不是本程序放的」提醒。这时手动删掉
@@ -113,6 +127,13 @@ bin\launcher\x86\explorer.exe   →  复制到  C:\Windows\SysWOW64\explorer.exe
 ```
 MSBuild Launcher.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
 MSBuild Launcher.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32
+```
+
+编完之后如果内嵌要跟着更新，跑一次：
+
+```
+pwsh -File tools\update-proxy-payload.ps1          # 复制现有产物到 res
+pwsh -File tools\update-proxy-payload.ps1 -Build   # 先编 x64 代理再复制
 ```
 
 ## 怎么确认生效

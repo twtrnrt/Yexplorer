@@ -24,6 +24,8 @@
 
 #include "core/Logger.h"
 
+#include "../../res/resource.h"   // IDR_EXPLORER_PROXY：内嵌在主程序里的代理二进制
+
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -200,9 +202,152 @@ bool SameFileContents(const std::wstring& a, const std::wstring& b)
     return same;
 }
 
-// 找本程序自带的代理文件（编译产物 / 发布包里都会有）
-// 候选顺序：
-//   1) exe 同目录\explorer-proxy.exe             ← 编译后 PostBuild 复制过来的（发布包也是这个）
+// ----------------------------------------------------------------------------
+// 内嵌在主程序里的代理二进制（RCDATA 资源 IDR_EXPLORER_PROXY）
+//
+// 为什么要内嵌：发布包只想要一个 FileExplorer.exe，不想再附带 explorer-proxy.exe。
+// 部署时把资源取出来写到临时文件，再复制进 System32，用完删掉临时文件。
+// 资源内容来自 res\explorer-proxy-x64.exe（Launcher.vcxproj 的产物副本），
+// 代理代码改过之后要跑 tools\update-proxy-payload.ps1 刷新。
+// ----------------------------------------------------------------------------
+
+// 从自身资源里取出代理二进制；没有这个资源（比如用老的构建）就返回 false
+bool LoadEmbeddedProxy(std::vector<BYTE>& outData)
+{
+    HINSTANCE module = ::GetModuleHandleW(nullptr);
+    if (module == nullptr)
+    {
+        return false;
+    }
+
+    const HRSRC resource =
+        ::FindResourceW(module, MAKEINTRESOURCEW(IDR_EXPLORER_PROXY), RT_RCDATA);
+    if (resource == nullptr)
+    {
+        return false;
+    }
+
+    const DWORD size = ::SizeofResource(module, resource);
+    if (size == 0)
+    {
+        return false;
+    }
+
+    const HGLOBAL handle = ::LoadResource(module, resource);
+    if (handle == nullptr)
+    {
+        return false;
+    }
+
+    const void* data = ::LockResource(handle);
+    if (data == nullptr)
+    {
+        return false;
+    }
+
+    // 资源在进程生命周期内一直有效，这里拷一份，调用方随便用
+    const BYTE* begin = static_cast<const BYTE*>(data);
+    outData.assign(begin, begin + size);
+    return true;
+}
+
+// 把代理字节写到临时文件，成功后 outPath 是文件全路径（调用方负责删除）
+bool WriteProxyToTempFile(const std::vector<BYTE>& data, std::wstring& outPath)
+{
+    wchar_t tempDir[MAX_PATH] = {};
+    if (::GetTempPathW(ARRAYSIZE(tempDir), tempDir) == 0)
+    {
+        return false;
+    }
+
+    // %TEMP%\Yexplorer\ 目录，已存在时 CreateDirectory 会失败，忽略即可
+    std::wstring dir = std::wstring(tempDir) + L"Yexplorer";
+    ::CreateDirectoryW(dir.c_str(), nullptr);
+
+    outPath = dir + L"\\explorer-proxy-x64.exe";
+
+    HANDLE file = ::CreateFileW(outPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        outPath.clear();
+        return false;
+    }
+
+    const DWORD size    = static_cast<DWORD>(data.size());
+    DWORD       written = 0;
+    const bool  ok      = ::WriteFile(file, data.data(), size, &written, nullptr) != FALSE &&
+                          written == size;
+
+    ::CloseHandle(file);
+
+    if (!ok)
+    {
+        ::DeleteFileW(outPath.c_str());
+        outPath.clear();
+    }
+    return ok;
+}
+
+// 目标文件的内容是否和内存里的代理完全一致（大小先比，再分块比字节）
+bool SameFileAsMemory(const std::wstring& path, const std::vector<BYTE>& data)
+{
+    WIN32_FILE_ATTRIBUTE_DATA info = {};
+    if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info))
+    {
+        return false;
+    }
+    if (info.nFileSizeHigh != 0 ||
+        info.nFileSizeLow != static_cast<DWORD>(data.size()))
+    {
+        return false;
+    }
+
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    const DWORD      kChunk = 8192;
+    std::vector<BYTE> buffer(kChunk);
+    size_t           offset = 0;
+    bool             same   = true;
+
+    for (;;)
+    {
+        DWORD read = 0;
+        if (::ReadFile(file, buffer.data(), kChunk, &read, nullptr) == FALSE)
+        {
+            same = false;
+            break;
+        }
+        if (read == 0)
+        {
+            break;
+        }
+        if (offset + read > data.size() ||
+            ::memcmp(buffer.data(), data.data() + offset, read) != 0)
+        {
+            same = false;
+            break;
+        }
+        offset += read;
+    }
+
+    if (offset != data.size())
+    {
+        same = false;
+    }
+
+    ::CloseHandle(file);
+    return same;
+}
+
+// 找本程序自带的代理文件（编译产物 / 旧版发布包里才会有）
+// 现在正常路径是「内嵌资源」，这个函数只作为兜底：
+//   1) exe 同目录\explorer-proxy.exe             ← 老发布包 / PostBuild 复制
 //   2) exe 同目录\launcher\explorer.exe           ← 如果按目录分开放
 //   3) exe 同目录\..\..\launcher\x64\explorer.exe ← 开发树：bin\x64\Release → bin\launcher\x64
 std::wstring FindLocalProxyPath()
@@ -296,6 +441,15 @@ ProxyState QuerySystemProxyState()
     }
 
     // 是我们的。再和当前自带的代理比一下，判断要不要替换
+    // 正常的构建里代理是内嵌资源，直接拿内存里的字节和目标文件比；
+    // 万一没有资源（老的构建），退回按外部文件比较。
+    std::vector<BYTE> embedded;
+    if (LoadEmbeddedProxy(embedded))
+    {
+        return SameFileAsMemory(target, embedded) ? ProxyState::OursUpToDate
+                                                 : ProxyState::OursOutdated;
+    }
+
     const std::wstring source = FindLocalProxyPath();
     if (source.empty())
     {
@@ -397,18 +551,44 @@ int RunProxyCommandLine(bool remove)
         return 0;
     }
 
-    const std::wstring source = FindLocalProxyPath();
-    if (source.empty())
+    // 先把代理的字节准备好：
+    //   正常情况从内嵌资源里取（发布包只有一个 exe，靠的就是这条）；
+    //   万一没有资源，退回老做法：找同目录的 explorer-proxy.exe。
+    std::vector<BYTE> embedded;
+    std::wstring      sourcePath;
+    std::wstring      tempPath;
+    bool              fromTemp = false;
+
+    if (LoadEmbeddedProxy(embedded))
+    {
+        if (!WriteProxyToTempFile(embedded, tempPath))
+        {
+            ::MessageBoxW(nullptr,
+                          L"释放内嵌的代理失败（临时目录不可写？）。",
+                          L"文件管理器", MB_ICONERROR | MB_OK);
+            return 2;
+        }
+        sourcePath = tempPath;
+        fromTemp   = true;
+    }
+    else
+    {
+        sourcePath = FindLocalProxyPath();
+    }
+
+    if (sourcePath.empty())
     {
         ::MessageBoxW(nullptr,
-                      L"找不到自带的代理文件 explorer-proxy.exe（安装目录可能不完整）。\n"
-                      L"请重新安装或重新下载完整压缩包。",
+                      L"程序里没有内嵌代理资源，同目录也找不到 explorer-proxy.exe\n"
+                      L"（安装文件可能不完整）。\n"
+                      L"请重新下载完整压缩包。",
                       L"文件管理器", MB_ICONERROR | MB_OK);
         return 2;
     }
 
     if (FileExists(target) && !IsOursProxy(target))
     {
+        if (fromTemp) { ::DeleteFileW(tempPath.c_str()); }
         ::MessageBoxW(nullptr,
                       L"C:\\Windows\\System32 里已有一个不是本程序放的 explorer.exe，"
                       L"为了安全没有替换。",
@@ -416,9 +596,17 @@ int RunProxyCommandLine(bool remove)
         return 1;
     }
 
-    if (!::CopyFileW(source.c_str(), target.c_str(), FALSE))
+    const bool copied = ::CopyFileW(sourcePath.c_str(), target.c_str(), FALSE) != FALSE;
+    const DWORD error = copied ? 0 : ::GetLastError();
+
+    // 临时文件用完就删，不在磁盘上留东西
+    if (fromTemp)
     {
-        const DWORD error = ::GetLastError();
+        ::DeleteFileW(tempPath.c_str());
+    }
+
+    if (!copied)
+    {
         ::MessageBoxW(nullptr,
                       (L"复制失败（错误码 " + std::to_wstring(error) + L"）。\n"
                        L"常见原因：文件正被占用（重启后再试），或被安全软件拦截（请加白名单）。").c_str(),
@@ -426,7 +614,8 @@ int RunProxyCommandLine(bool remove)
         return 2;
     }
 
-    Logger::Info(L"代理已部署到 System32：" + target + L"（来源：" + source + L"）");
+    Logger::Info(L"代理已部署到 System32：" + target +
+                 (fromTemp ? L"（来源：主程序内嵌资源）" : L"（来源：" + sourcePath + L"）"));
     ::MessageBoxW(nullptr,
                   L"已部署 explorer.exe 代理到 C:\\Windows\\System32。\n\n"
                   L"之后微信、批量打印软件等点「打开所在文件夹」就会用本程序打开。",

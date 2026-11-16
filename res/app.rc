@@ -29,6 +29,24 @@
 IDI_APPICON ICON "app.ico"
 
 // ----------------------------------------------------------------------------
+// 3. Embedded explorer.exe thin proxy (RCDATA binary resource)
+//
+//    Why embed it:
+//      The release package must be a single FileExplorer.exe, without an extra
+//      explorer-proxy.exe (users tend to delete it, packagers tend to miss it).
+//      The proxy binary is welded into the main program, and at deploy time it is
+//      extracted with FindResource/LoadResource, written to a temp file, copied
+//      into System32, and the temp file is deleted.
+//
+//    Payload file: res\explorer-proxy-x64.exe (copy of bin\launcher\x64\explorer.exe).
+//                  After changing the proxy (Launcher.vcxproj), run
+//                  tools\update-proxy-payload.ps1 to refresh the payload,
+//                  then rebuild the main program.
+//    The resource ID is shared with C++ via res\resource.h (IDR_EXPLORER_PROXY).
+// ----------------------------------------------------------------------------
+IDR_EXPLORER_PROXY RCDATA "explorer-proxy-x64.exe"
+
+// ----------------------------------------------------------------------------
 // 2. 版本信息
 // ----------------------------------------------------------------------------
 VS_VERSION_INFO VERSIONINFO

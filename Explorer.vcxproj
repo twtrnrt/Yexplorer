@@ -95,15 +95,13 @@
       <AdditionalDependencies>comctl32.lib;ole32.lib;shell32.lib;shlwapi.lib;comdlg32.lib;user32.lib;gdi32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <!--
-      编译完把 explorer.exe 薄代理复制到输出目录，命名 explorer-proxy.exe。
-      「注册为默认文件管理器」时会把它部署到 C:\Windows\System32\explorer.exe；
-      发布压缩包也靠这个文件，不能漏。
-      （代理本身用 Launcher.vcxproj 单独编译，产物在 bin\launcher\x64）
+      代理（explorer.exe 薄代理）不再作为单独文件随发布包分发：
+      它的二进制已经作为 RCDATA 资源嵌进主程序（res\app.rc 的 IDR_EXPLORER_PROXY），
+      部署时由主程序自己释放到临时文件、再复制进 System32。
+      代理本身仍用 Launcher.vcxproj 单独编译（产物 bin\launcher\x64\explorer.exe），
+      改完代理后跑一次 tools\update-proxy-payload.ps1 刷新 res\explorer-proxy-x64.exe，
+      再重新编译主程序即可把新代理焊进去。
     -->
-    <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)bin\launcher\x64\explorer.exe" (copy /Y "$(ProjectDir)bin\launcher\x64\explorer.exe" "$(OutDir)explorer-proxy.exe") else (echo [提示] 代理还没编译，跳过复制)</Command>
-      <Message>复制 explorer.exe 代理到输出目录</Message>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
 
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -130,10 +128,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>comctl32.lib;ole32.lib;shell32.lib;shlwapi.lib;comdlg32.lib;user32.lib;gdi32.lib;uuid.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)bin\launcher\x64\explorer.exe" (copy /Y "$(ProjectDir)bin\launcher\x64\explorer.exe" "$(OutDir)explorer-proxy.exe") else (echo [提示] 代理还没编译，跳过复制)</Command>
-      <Message>复制 explorer.exe 代理到输出目录</Message>
-    </PostBuildEvent>
+    <!-- 代理已内嵌进主程序（见上面 Debug 配置里的说明），Release 也不再复制外部文件 -->
   </ItemDefinitionGroup>
 
   <!--
