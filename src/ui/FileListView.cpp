@@ -54,8 +54,8 @@ static const UINT kMsgFinishTileRename = WM_APP + 101;
 // 里面包含：左右内边距各 3px、边框与光标位置约 5px，再按用户要求向右多留 9px。
 static const int kRenameEditExtraWidth = 17;
 
-// 单行改名框的高度：列表视图的行距也是 25，框正好贴满一行、不会压到上下邻居
-static const int kRenameEditHeight = 25;
+// 单行改名框的高度：列表视图的行距也是 24（和小图标一致），框正好贴满一行
+static const int kRenameEditHeight = 24;
 
 // ============================================================================
 // 小图标视图的列宽参数：
@@ -706,7 +706,9 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
 
     if (selected)
     {
-        const bool focused = (::GetFocus() == m_hWnd);
+        // 改名时焦点在编辑框上、列表本身失焦，这时不要把选中项画成"灰底"
+        // （系统失焦选中是浅灰），保持和有焦点时一样的颜色
+        const bool focused = (::GetFocus() == m_hWnd) || (m_hEdit != nullptr);
 
         bool painted = false;
 
@@ -937,17 +939,17 @@ void FileListView::LayoutListWidth()
         itemWidth = 100;
     }
 
-    // 行高 25：和小图标视图统一（两边改名框都是 25 高，框正好贴满一行、不压邻居）。
+    // 行高 24：和小图标视图一致（两边改名框都是 24 高，框正好贴满一行、不压邻居）。
     // 宽度没变就别重复设：拖窗口时 Resize 会连续来，重复 SetIconSpacing 会让控件反复重排
     const DWORD currentSpacing = static_cast<DWORD>(
         ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
     if (static_cast<int>(LOWORD(currentSpacing)) == itemWidth &&
-        static_cast<int>(HIWORD(currentSpacing)) == 25)
+        static_cast<int>(HIWORD(currentSpacing)) == 24)
     {
         return;
     }
 
-    ListView_SetIconSpacing(m_hWnd, itemWidth, 25);
+    ListView_SetIconSpacing(m_hWnd, itemWidth, 24);
 }
 
 void FileListView::Resize(int x, int y, int width, int height)
