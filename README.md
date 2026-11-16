@@ -1,84 +1,151 @@
-# 文件管理器（自研 Explorer 替代品）
+# Yexplorer —— 自研 Windows 文件管理器
 
-用 C++17 + Win32 API + Shell COM 手写的 Windows 文件管理器，目标是日常替代系统自带的
-文件资源管理器（`explorer.exe` 的**窗口**部分），同时保留 `explorer.exe` 负责桌面与任务栏。
+用 C++17 + Win32 API + Shell COM 手写的文件管理器，目标是日常替代系统自带的
+文件资源管理器**窗口部分**，同时保留 `explorer.exe` 负责桌面、任务栏、开始菜单。
 
-> 说明：不替换 `explorer.exe` 进程本身。Windows 的桌面、任务栏、开始菜单都由
-> `explorer.exe` 提供，强行替换属于不受支持的黑改方案，稳定性极差。
-> 本项目的做法是：注册表接管「打开文件夹」动作，让双击文件夹时启动本程序。
+> **不替换 `explorer.exe` 进程本身。** 桌面和任务栏假死、蓝屏这类事故基本都来自
+> 强行杀掉/替换 `explorer.exe`。本项目的做法是：在注册表里接管「双击文件夹 / 双击磁盘」
+> 这一个动作，让双击文件夹时启动本程序；随时可以在设置里一键恢复系统默认。
 
-## 技术选型
+## 主要功能
 
-| 项目 | 选择 | 理由 |
-|---|---|---|
-| 语言 | C++17 | 操作 Shell COM 最顺手，生态案例最多 |
-| 界面 | Win32 + ComCtl32 原生控件 | 交互贴近系统原生 |
-| 目录枚举 | `IShellFolder` | 和资源管理器同底层，支持此电脑/回收站/网络等虚拟文件夹 |
-| 文件列表 | ListView 虚拟模式（`LVS_OWNERDATA`） | 十万级文件不卡顿 |
-| 文件操作 | `IFileOperation` | 复用系统原生复制/删除/回收站/撤销/冲突弹窗 |
-| 编译器 | MSVC v143（VS2022） | 已在本机验证可用 |
-| 第三方库 | 仅 header-only 小库（WRL、WIL、nlohmann/json、spdlog） | 运行时代价几乎为零，产物仍是单 exe |
+**界面与导航**
+
+- 原生 ListView 虚拟模式（`LVS_OWNERDATA`）文件列表，十万级条目不卡顿
+- 地址栏面包屑，按目录类型分三档：
+  - 虚拟命名空间（此电脑、控制面板）→ 整条显示系统名字
+  - 系统文件夹（桌面 / 下载 / 文档 / 图片 / 音乐 / 视频）及其子目录 → 折叠成 `下载 › 2025`
+  - 普通目录 → 完整可点路径 `C: › Users › Public › Documents`，每段都能点
+- 导航：后退 / 前进 / 向上，左侧导航栏（快速访问 + 此电脑）
+- 表头排序、视图模式切换、窗口大小与位置记忆
+
+**文件操作**
+
+- 复制 / 剪切 / 粘贴 / 删除（进回收站）/ 重命名 / 新建文件夹
+- 走 `IFileOperation`，复用系统的进度条、冲突对话框、回收站
+- 拖放：程序内拖动、与系统之间拖动都支持，拖到子文件夹上会高亮
+- 剪贴板与系统互通：在系统资源管理器里复制的文件，能在本程序里粘贴，反之亦然
+- **多级撤销 / 恢复**（`Ctrl+Z` / `Ctrl+Y`，最多 50 级），文案与系统一致：
+  「撤销 删除」「撤销 重命名」「撤销 移动」「撤销 复制」「撤销 新建」
+
+**右键菜单（按场景拆分，共 6 种）**
+
+| 场景 | 菜单内容 |
+| --- | --- |
+| 空白处 | 查看 / 刷新 ┃ 粘贴 ┃ 撤销、恢复 ┃ 新建文件夹、新建 ┃ 属性 |
+| 单文件 | 打开、打开方式 ┃ 剪切、复制、复制文件路径 ┃ 撤销、恢复 ┃ 删除 ┃ 重命名 ┃ 属性 |
+| 单文件夹 | 打开、在新窗口中打开 ┃ 剪切、复制、复制文件路径 ┃ 撤销、恢复 ┃ 删除 ┃ 重命名 ┃ 属性 |
+| 多选 | 打开 ┃ 剪切、复制、复制文件路径 ┃ 撤销、恢复 ┃ 删除 ┃ 属性（系统原生「多个项目属性」） |
+| 盘符 / 虚拟项 | 打开、在新窗口中打开、属性 |
+| 组标题 / 分隔行 | 不弹菜单 |
+
+- 「新建」是二级菜单，条目和图标从系统取（与系统右键「新建」对齐），
+  创建走系统自己的向导，建完自动进入重命名
+- 菜单弹出只读内存数据，**不查注册表、不调 COM、不探测文件**，右键零延迟
+
+**打开方式（不被第三方程序劫持）**
+
+- 自己维护一份「扩展名 → 程序列表」账本，不依赖系统关联，避免装个播放器就把所有
+  关联抢走
+- 添加程序：直接弹系统的 exe 选择框，选完自动取图标
+- 首次双击某扩展名的文件时，弹出选择窗口让你定程序，之后不再打扰
+- 账本里登记的程序被卸载了，对应条目直接消失（不置灰）
+- 文件类型的默认程序丢失时，自动弹「设置默认程序」窗口让你重选
+
+**其它**
+
+- 「此电脑」平铺分组：设备 / 网络分组标题行铺满整行，窗口宽度变化时自动重排
+- 容量单位统一 1024 进位：`KB → MB → GB → TB → PB → EB`，不会出现「1025 GB」
+- 菜单图标开关（设置里可关；关闭后用系统原生绘制，零开销）
+- 命令行参数支持目录和文件：传文件时打开它所在目录并选中、滚到可见处
+- 运行日志写在 exe 同目录 `FileExplorer.log`
+
+## 系统要求
+
+- Windows 10 x64（在 Win10 21H2 及以上验证过；Windows 11 未做完整验证）
+- Release 版是动态链接 MSVC 运行库，**需要安装
+  [Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)**；
+  没装的话双击会提示找不到 `VCRUNTIME140.dll`
+- Debug 版需要 Visual Studio 2022 的调试运行库（`VCRUNTIME140D.dll`），只适合开发机
+
+## 编译
+
+需要 Visual Studio 2022（MSVC v143，带「使用 C++ 的桌面开发」工作负载）。
+
+图形界面：打开 `Explorer.sln`，选 `Debug|x64` 或 `Release|x64`，`Ctrl+Shift+B` 编译。
+
+命令行（在「x64 Native Tools Command Prompt for VS 2022」里执行）：
+
+```powershell
+msbuild Explorer.sln /t:Build /p:Configuration=Release /p:Platform=x64
+```
+
+产物：`bin\x64\Release\FileExplorer.exe`（Debug 在 `bin\x64\Debug\`）。
+
+> 刻意命名为 `FileExplorer.exe` 而非 `Explorer.exe`，避免和系统进程同名造成混淆。
+
+## 快捷键
+
+| 快捷键 | 动作 |
+| --- | --- |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | 复制 / 剪切 / 粘贴 |
+| `Ctrl+Z` / `Ctrl+Y` | 撤销 / 恢复（多级） |
+| `Ctrl+Shift+C` | 复制选中项的完整路径（多选时一行一条） |
+| `Ctrl+A` | 全选 |
+| `F2` | 重命名 |
+| `F5` | 刷新 |
+| `Enter` | 打开选中项 |
+| `Delete` | 删除到回收站 |
 
 ## 目录结构
 
 ```
-explorer/
-├─ docs/                 架构与交接文档
+Yexplorer/
+├─ docs/                 架构总览、进度与状态、踩坑记录
 ├─ src/
-│  ├─ core/              程序骨架、配置、异步任务
-│  ├─ shell/             Shell COM 封装（IShellFolder / IContextMenu / IFileOperation）
-│  ├─ ui/                界面层（主窗口、地址栏、文件列表、工具栏）
-│  └─ main.cpp           程序入口
-├─ res/                  资源文件（manifest、rc、图标）
+│  ├─ core/              程序骨架、配置、日志、异步任务、目录监视
+│  ├─ shell/             Shell COM 封装（IShellFolder / IContextMenu / IFileOperation / 打开方式）
+│  ├─ ui/                界面层（主窗口、地址栏、文件列表、导航栏、设置、打开方式窗口）
+│  └─ main.cpp           入口，命令行参数解析
+├─ res/                  manifest、rc、图标
 ├─ third/                第三方 header-only 库
 ├─ Explorer.sln          VS2022 解决方案
 └─ Explorer.vcxproj      项目文件
 ```
 
-## 编译
+## 第三方库
 
-用 Visual Studio 2022 打开 `Explorer.sln`，选择 `Debug|x64` 或 `Release|x64`，直接 F5 / Ctrl+Shift+B。
+`third/` 下全部是 header-only 库，运行时代价几乎为零，产物仍是单 exe：
 
-命令行编译：
+| 库 | 版本 | 用途 | 许可 |
+| --- | --- | --- | --- |
+| [spdlog](https://github.com/gabime/spdlog) | 1.15.0 | 日志 | MIT |
+| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 | 配置文件 | MIT |
+| WIL | Windows SDK 自带 | COM 智能指针、HRESULT 工具 | MIT |
 
-```powershell
-& "C:\dev\vs2022\MSBuild\Current\Bin\MSBuild.exe" "C:\git\explorer\Explorer.sln" /p:Configuration=Debug /p:Platform=x64 /v:minimal
-```
-
-产物位置：`bin\x64\<Debug|Release>\FileExplorer.exe`
-
-> 刻意命名为 `FileExplorer.exe` 而不是 `Explorer.exe`，避免和系统进程同名造成混淆。
-
-## 当前进度
-
-- [x] 阶段 0：骨架自检（主窗口 + COM 初始化 + ComCtl32 v6 + 消息循环）
-- [x] 阶段 1：Shell 层封装，`IShellFolder` 目录枚举 + 后台线程
-- [x] 阶段 2：虚拟 ListView 文件列表（四列 + 双击进入目录）
-- [x] 阶段 3：导航栏（后退/前进/向上）+ 地址栏 + 状态栏 + 文件图标
-- [x] 阶段 3.5：左侧导航栏（快速访问 + 此电脑，简化版）
-- [ ] 阶段 4：文件操作（`IFileOperation`）
-
-**第二期（已确认要做，暂缓）**：缩略图（需保证不影响速度）、搜索
-- [ ] 阶段 4：系统原生文件操作（复制/剪切/粘贴/删除/回收站）
-- [ ] 阶段 5：原生右键菜单与 OLE 拖拽
-- [ ] 阶段 6：配置持久化、图标缓存、性能开关
-- [ ] 阶段 7：注册表接管、整体联调
-
-## 运行说明
-
-程序启动后会自动枚举 `C:\`，把结果显示在窗口上，同时写入 exe 同目录的
-`FileExplorer.log`。日志里有完整的条目清单和每一步的 HRESULT，排查问题先看它。
-
-## 第三方库（third/，全部 header-only，MIT 许可）
-
-| 库 | 版本 | 用途 |
-|---|---|---|
-| spdlog | 1.15.0 | 日志 |
-| WIL | 1.0.240803.1 | COM 智能指针、HRESULT 工具 |
-| nlohmann/json | 3.12.0 | 配置文件（阶段 6 使用） |
+其余全部是系统库（`comctl32`、`shell32`、`ole32`、`shlwapi` 等），无外部运行时依赖。
 
 ## 编码约定
 
-- 所有源码文件 UTF-8（无 BOM），编译加 `/utf-8`，保证中文注释正确解析
-- 注释使用中文，标识符使用英文
-- git 提交信息使用中文
+- 源码 UTF-8（无 BOM），编译加 `/utf-8`
+- 注释用中文，标识符用英文
+- git 提交信息用中文
+
+## 已知限制
+
+- 不接管 `Win+E`、任务栏的「文件资源管理器」、运行框输入路径，这些仍打开系统资源管理器
+- 「注册为默认文件管理器」只改 `HKCU` 下的 `Directory` / `Drive` 两类默认动词，
+  不动 `Folder` 类（桌面、控制面板、库）
+- 新建菜单的条目清单在程序启动时枚举一次，新装的软件需要重启本程序才出现在「新建」里
+- 搜索、缩略图尚未实现
+
+## 更多文档
+
+- [`docs/进度与状态.md`](docs/进度与状态.md)：每个阶段做了什么、为什么这么做
+- [`docs/踩坑记录.md`](docs/踩坑记录.md)：27 条 Win32 / Shell 实际踩到的坑与结论
+- [`docs/架构总览.html`](docs/架构总览.html)：模块划分与调用关系
+
+## 许可
+
+本项目暂未指定开源许可证（All rights reserved）。如需使用、分发或修改，
+请先与作者联系。
