@@ -6,10 +6,12 @@
 //
 // 【界面结构】
 //   上半部分：预览列表（原名 → 新名 → 状态），规则改一下列表立刻重算；
-//   下半部分：规则区，两栏：
-//       左栏  名称类：前缀 / 后缀 / 查找 / 替换为 / 区分大小写
-//       右栏  加工类：序号（起始、步长、位数、位置、分隔符）/ 扩展名 / 大小写 / 排序
-//   底部：左侧一行提示（共几项、改了几项、有没有冲突），右侧「取消 / 应用」两个自绘按钮。
+//   中间参数区，三行：
+//       行1  前缀 / 后缀 / 扩展名（不修改·修改 + 值）/ 大小写
+//       行2  查找（右边一个「普通 / 正则」按钮，点开弹菜单选查找方式）/ 替换为 /
+//            ☐含扩展名 / ☐区分大小写
+//       行3  ☐加序号 + 起始 / 步长 / 位数 / 位置 / 分隔符
+//   底部一条：左边排序 + ☐倒序，中间「共 N 项 · 会改动 M 项」，右边 取消 / 清空 / 保存 / 应用。
 //
 // 【风格】
 //   和「设置」「打开方式」两个窗口一套：白底无边框客户区，只有系统控件
@@ -78,7 +80,9 @@ struct RenameTemplate
     int          numberPos     = 0;       // 0 = 放后面，1 = 放前面
     std::wstring numberSep     = L"-";    // 分隔符
 
-    int          extMode       = 0;       // 0 保留 / 1 改成 / 2 去掉
+    // 扩展名：0 不修改 / 1 修改（右边那个框填什么就用什么，留空等于去掉扩展名）
+    // 2 是老模板里"去掉扩展名"那一项的旧值，界面上已经不提供了，读到就按"修改且清空"处理
+    int          extMode       = 0;
     std::wstring extValue;                // 改成什么扩展名
 
     int          caseMode      = 0;       // 0 保持 / 1 大写 / 2 小写 / 3 首字母
@@ -182,6 +186,10 @@ private:
     // 查找方式下拉里"自定义正则"那一项的编号（选它 = 用户在查找框里自己写正则）
     static const int kRegexCustomItem = 10;
 
+    // 查找方式（点「普通 / 正则」按钮弹出菜单，选一条就生效）
+    void OnRegexButtonClick();
+    void SetRegexPreset(int preset);   // 改查找方式（选了内置正则会顺手把写法填进「查找」）
+
     // 当前是不是按正则查找（除了「普通查找」以外都算）
     bool RegexOn() const;
 
@@ -209,7 +217,13 @@ private:
     HWND m_hReplace = nullptr;      // 替换为
     HWND m_hCaseSensitive = nullptr; // 区分大小写（复选框）
     HWND m_hIncludeExt = nullptr;   // 含扩展名（复选框：查找替换是否连扩展名一起处理）
-    HWND m_hRegexPreset = nullptr;  // 查找方式下拉：普通查找 / 9 条内置正则 / 自定义正则
+
+    // 查找方式（不再用下拉框，改成「普通 / 正则」按钮 + 弹出菜单）：
+    // 0 = 普通查找；1~9 = 内置正则；10 = 自定义正则
+    int  m_regexPreset       = 0;
+    RECT m_regexButtonRect   = {};
+    bool m_hotRegexButton    = false;
+    bool m_pressedRegexButton = false;
 
     // ---- 模板栏：固定 10 个自绘按钮，一行排满 ----
     std::vector<RenameTemplate> m_templates;        // 恒为 kTemplateSlotCount 条
@@ -238,8 +252,8 @@ private:
 
     HWND m_hCaseMode = nullptr;     // 大小写：保持 / 大写 / 小写 / 首字母大写
 
-    HWND m_hSortMode = nullptr;     // 排序：名称 / 修改时间 / 大小 / 自定义顺序
-    HWND m_hSortReverse = nullptr;  // 反向（复选框）
+    HWND m_hSortMode = nullptr;     // 排序：名称 / 修改时间 / 大小 / 自定义顺序（在底部一行）
+    HWND m_hSortReverse = nullptr;  // 反向（复选框，在底部一行）
 
     // ---- 预览列表的拖动排序状态 ----
     bool                m_dragging      = false;  // 正拖着
@@ -270,6 +284,7 @@ private:
     HFONT m_fontTitle  = nullptr;
     HFONT m_fontSmall  = nullptr;   // 底部提示用
     HBRUSH m_whiteBrush = nullptr;
+    HBRUSH m_disabledBrush = nullptr;   // 被禁用的输入框用这个灰底
 
     // ---- 结果 ----
     bool m_applied = false;    // 用户点了「应用」
