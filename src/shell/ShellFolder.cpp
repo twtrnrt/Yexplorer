@@ -574,6 +574,39 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             entry.name     = GetDisplayName(folder.get(), childPidl);
             FillExtraInfo(folder.get(), childPidl, entry);
 
+            // ----------------------------------------------------------
+            // 补查「真正的」隐藏 / 系统文件属性
+            //
+            // 上面那次 GetAttributesOf 里 SFGAO_SYSTEM 在 Shell 的含义是"系统对象"，
+            // 不是 FILE_ATTRIBUTE_SYSTEM —— pagefile.sys 这类受保护的系统文件用它
+            // 永远判不出来，结果"显示受保护的操作系统文件"这个开关形同虚设。
+            // 所以拿到绝对路径后再问一次文件属性（只对本地文件系统有意义，
+            // Shell 命名空间里的虚拟项路径为空，直接跳过）。
+            // ----------------------------------------------------------
+            if (needHidden && !entry.fullPath.empty())
+            {
+                const DWORD fileAttributes = ::GetFileAttributesW(entry.fullPath.c_str());
+
+                if (fileAttributes != INVALID_FILE_ATTRIBUTES)
+                {
+                    entry.isHidden     = entry.isHidden     || (fileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+                    entry.isSystemFile = entry.isSystemFile || (fileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0;
+
+                    // 按真实属性再判一次：前面那次判定拿不到系统位，
+                    // 会把 pagefile.sys 这种项当成普通文件放过去。
+                    const bool shouldShow = entry.isSystemFile
+                                                ? settings.ShowSystemFiles()
+                                                : (!entry.isHidden || settings.ShowHiddenFiles());
+                    if (!shouldShow)
+                    {
+                        ::CoTaskMemFree(childPidl);
+                        childPidl = nullptr;
+                        fetched   = 0;
+                        continue;
+                    }
+                }
+            }
+
             // 「主文件夹」里要把"系统项"和"桌面上的东西"分开排，先把标记算出来。
             // 其他目录里判断出来也都是 false，不影响原有排序。
             entry.isSystemItem = IsDesktopSystemItem(entry.fullPath);

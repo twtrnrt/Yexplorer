@@ -15,7 +15,8 @@
 #include "core/Logger.h"
 #include "core/PinyinInitials.h"   // 汉字 → 拼音首字母（按字母跳转时匹配中文名）
 
-#include <uxtheme.h>   // SetWindowTheme
+#include <uxtheme.h>   // SetWindowTheme / OpenThemeData / DrawThemeBackground
+#include <vssym32.h>  // 主题部件、状态、属性常量（LVP_LISTITEM、LISS_SELECTED、TMT_TEXTCOLOR）
 #include <algorithm>
 #include <cwctype>   // towlower
 
@@ -544,8 +545,12 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
         }
     }
 
-    // 被剪切（Ctrl+X）的项目：图标换成半透明版本
-    if (IsCutPath(entry.fullPath))
+    // 被剪切（Ctrl+X）的项目、隐藏项、系统文件：图标换成半透明版本
+    //
+    // 半透明图标不是"另存一份完整图标列表"，而是用到哪个图标才给哪个做一份
+    // 50% alpha 的副本，塞进同一个 image list 并按"原索引 → 淡索引"缓存
+    // （实现见 IconCache::GetDimmedIconIndex）。所以隐藏项接进来几乎不增加负担。
+    if (IsCutPath(entry.fullPath) || entry.isHidden || entry.isSystemFile)
     {
         iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex, iconSize);
     }
@@ -562,19 +567,75 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
 
     const shell::ShellEntry& entry = m_result->entries[index];
 
-    // ---- 整格背景（选中是系统高亮色，否则白底）----
-    const COLORREF backColor   = selected ? ::GetSysColor(COLOR_HIGHLIGHT)
-                                          : ::GetSysColor(COLOR_WINDOW);
-    const COLORREF nameColor   = selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT)
-                                          : ::GetSysColor(COLOR_WINDOWTEXT);
-    const COLORREF infoColor   = selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT)
-                                          : RGB(96, 96, 96);
+    // ---- 整格背景 + 文字颜色 ----
+    //
+    // 平铺是自绘的：以前选中时直接填系统高亮色（深蓝 + 白字），
+    // 和详情/列表/大图标视图（Explorer 主题的浅蓝 + 深色文字）完全两样。
+    // 现在选中背景交给同一套主题去画，文字颜色也从主题里取，四种视图看起来一致。
+    COLORREF nameColor = ::GetSysColor(COLOR_WINDOWTEXT);
+    COLORREF infoColor = RGB(96, 96, 96);
 
-    HBRUSH backBrush = ::CreateSolidBrush(backColor);
-    if (backBrush != nullptr)
+    if (selected)
     {
-        ::FillRect(dc, &tileRect, backBrush);
-        ::DeleteObject(backBrush);
+        const bool focused = (::GetFocus() == m_hWnd);
+
+        bool painted = false;
+
+        HTHEME theme = ::OpenThemeData(m_hWnd, L"Listview");
+        if (theme != nullptr)
+        {
+            painted = SUCCEEDED(::DrawThemeBackground(
+                theme, dc, LVP_LISTITEM,
+                focused ? LISS_SELECTED : LISS_SELECTEDNOTFOCUS,
+                &tileRect, nullptr));
+
+            if (painted)
+            {
+                COLORREF themeText = 0;
+                if (SUCCEEDED(::GetThemeColor(theme, LVP_LISTITEM, LISS_SELECTED,
+                                              TMT_TEXTCOLOR, &themeText)))
+                {
+                    nameColor = themeText;
+                    infoColor = themeText;
+                }
+            }
+
+            ::CloseThemeData(theme);
+        }
+
+        if (!painted)
+        {
+            // 拿不到主题（理论上不会）就退回系统高亮色，至少选中是看得出来的
+            HBRUSH backBrush = ::CreateSolidBrush(::GetSysColor(COLOR_HIGHLIGHT));
+            if (backBrush != nullptr)
+            {
+                ::FillRect(dc, &tileRect, backBrush);
+                ::DeleteObject(backBrush);
+            }
+
+            nameColor = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+            infoColor = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+        }
+    }
+    else
+    {
+        HBRUSH backBrush = ::CreateSolidBrush(::GetSysColor(COLOR_WINDOW));
+        if (backBrush != nullptr)
+        {
+            ::FillRect(dc, &tileRect, backBrush);
+            ::DeleteObject(backBrush);
+        }
+
+        // 没选中才做淡化，规则和列表视图一致：
+        // 隐藏项 / 系统文件 120 灰，剪切项 150 灰
+        if (entry.isHidden || entry.isSystemFile)
+        {
+            nameColor = RGB(120, 120, 120);
+        }
+        else if (IsCutPath(entry.fullPath))
+        {
+            nameColor = RGB(150, 150, 150);
+        }
     }
 
     // ---- 左边 48px 图标 ----
@@ -794,8 +855,32 @@ void FileListView::MergeResult(std::shared_ptr<shell::EnumerateResult> result)
     size_t common  = 0;
     size_t smaller = (oldEntries.size() < newEntries.size()) ? oldEntries.size() : newEntries.size();
 
-    while (common < smaller &&
-           _wcsicmp(oldEntries[common].fullPath.c_str(), newEntries[common].fullPath.c_str()) == 0)
+    // 逐行比对，找第一个不一样的位置。
+    //
+    // 光比路径不够：同一个路径上"隐藏 / 系统文件标记、大小、修改时间"都可能在
+    // 目录之外被改掉（比如在资源管理器里把某个文件设成隐藏）。只比路径就会把
+    // 这种变化当成"这一行没变"，于是界面不重绘，隐藏项要等切目录再回来才变淡。
+    auto sameRow = [](const shell::ShellEntry& before, const shell::ShellEntry& after)
+    {
+        if (_wcsicmp(before.fullPath.c_str(), after.fullPath.c_str()) != 0)
+        {
+            return false;
+        }
+
+        if (before.isHidden != after.isHidden || before.isSystemFile != after.isSystemFile)
+        {
+            return false;
+        }
+
+        if (before.size != after.size)
+        {
+            return false;
+        }
+
+        return ::CompareFileTime(&before.modified, &after.modified) == 0;
+    };
+
+    while (common < smaller && sameRow(oldEntries[common], newEntries[common]))
     {
         ++common;
     }
@@ -1658,21 +1743,35 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                 return CDRF_SKIPDEFAULT;
             }
 
-            // ---- 隐藏项：文字画成浅灰（和资源管理器里隐藏项的观感一致）----
-            // 资源管理器是"图标半透明 + 文字略淡"，我们这里先只把文字调淡，
-            // 图标仍是正常图标（不额外做一份半透明图标列表，省一份内存和绘制工作）。
-            if (m_result != nullptr && index < m_result->entries.size() &&
-                m_result->entries[index].isHidden)
-            {
-                customDraw->clrText = RGB(120, 120, 120);
-                return CDRF_NEWFONT;
-            }
+            // ---- 隐藏项 / 系统文件 / 剪切项：文字画淡 ----
+            //
+            // 图标已经走半透明（IconIndexForEntry 里统一处理），这里只管文字颜色：
+            //   · 隐藏的文件和文件夹、受保护的系统文件 → 120 灰（两者观感一样）
+            //   · 被剪切的项目 → 150 灰（比隐藏项浅一点，便于区分）
+            // 选中时不改色：选中行是浅蓝底，文字要跟正常项一样用主题的深色，
+            // 和资源管理器一致（否则蓝底上压一行灰字，看着像禁用）。
+            // 选中状态必须问控件，不能读 uItemState：
+            // owner-data（虚拟）列表里 CDIS_SELECTED 位不可靠，会把每一行都当成选中，
+            // 结果就是"只有没选中的行才改色"这个条件永远不成立，文字一直不变灰。
+            const bool itemSelected =
+                (ListView_GetItemState(m_hWnd, static_cast<int>(index), LVIS_SELECTED) &
+                 LVIS_SELECTED) != 0;
 
-            if (m_result != nullptr && index < m_result->entries.size() &&
-                IsCutPath(m_result->entries[index].fullPath))
+            if (!itemSelected && m_result != nullptr && index < m_result->entries.size())
             {
-                customDraw->clrText = RGB(150, 150, 150);   // 浅灰
-                return CDRF_NEWFONT;                         // 告诉控件按我改的颜色画
+                const shell::ShellEntry& entry = m_result->entries[index];
+
+                if (entry.isHidden || entry.isSystemFile)
+                {
+                    customDraw->clrText = RGB(120, 120, 120);
+                    return CDRF_NEWFONT;   // 告诉控件按我改的颜色画
+                }
+
+                if (IsCutPath(entry.fullPath))
+                {
+                    customDraw->clrText = RGB(150, 150, 150);
+                    return CDRF_NEWFONT;
+                }
             }
 
             return CDRF_DODEFAULT;
