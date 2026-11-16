@@ -292,6 +292,12 @@ private:
     // 是否正在原地改名（LVN_BEGINLABELEDIT 到 LVN_ENDLABELEDIT 之间）
     bool                      m_editingLabel = false;
 
+    // 平铺视图"再点一下已选中项就进改名"用：上一次点中的是哪一项、什么时候点的。
+    // 没有文字可比（owner-data 列表控件的 item 文本在平铺下是空的），只能靠时间判断
+    // 这两下点击是"两下单点"还是"一次双击"。
+    int                       m_lastClickItem = -1;
+    ULONGLONG                 m_lastClickTick = 0;
+
     // 当前视图模式（默认详细信息，和资源管理器打开普通文件夹时一致）
     ViewMode                  m_viewMode = ViewMode::Details;
 };

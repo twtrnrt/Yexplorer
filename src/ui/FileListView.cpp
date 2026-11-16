@@ -666,11 +666,58 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
 
     HGDIOBJ oldFont = ::SelectObject(dc, m_hFont);
 
-    // ---- 第一行：名字 ----
-    RECT nameRect = { textLeft, tileRect.top + 11, tileRect.right - 6, tileRect.top + 31 };
-    ::SetTextColor(dc, nameColor);
-    ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
-                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    // ---- 名字：最多 3 行自动换行，放不下就在第三行末尾用省略号收住 ----
+    //
+    // 有容量信息的项（磁盘、网络盘）名字只占一行，把下面留给容量文字和进度条；
+    // 普通文件和文件夹没有那两行，整格高度都能用来放名字
+    // （格高 68，3 行大约 57，装得下）。
+    const bool hasDiskInfo = (entry.diskTotal > 0);
+
+    if (!hasDiskInfo)
+    {
+        // 量一下当前字体一行多高，用它算"3 行"的上限
+        TEXTMETRICW metrics = {};
+        int lineHeight = 19;
+        if (::GetTextMetricsW(dc, &metrics))
+        {
+            lineHeight = static_cast<int>(metrics.tmHeight) + 2;
+        }
+
+        const int nameWidth = tileRect.right - 6 - textLeft;
+
+        // 先按实际换行算出这段名字要占多高，再封顶到 3 行
+        RECT measure = { 0, 0, nameWidth, 0 };
+        ::DrawTextW(dc, entry.name.c_str(), -1, &measure,
+                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+
+        int nameHeight = static_cast<int>(measure.bottom - measure.top);
+        const int maxNameHeight = lineHeight * 3;
+
+        if (nameHeight > maxNameHeight)
+        {
+            nameHeight = maxNameHeight;
+        }
+        if (nameHeight < lineHeight)
+        {
+            nameHeight = lineHeight;
+        }
+
+        // 文字块在格子里垂直居中
+        const int blockTop = tileRect.top + ((tileRect.bottom - tileRect.top) - nameHeight) / 2;
+
+        RECT nameRect = { textLeft, blockTop, textLeft + nameWidth, blockTop + nameHeight };
+        ::SetTextColor(dc, nameColor);
+        ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
+                    DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    else
+    {
+        // 驱动器卡片：名字一行，下面接容量和进度条
+        RECT nameRect = { textLeft, tileRect.top + 11, tileRect.right - 6, tileRect.top + 31 };
+        ::SetTextColor(dc, nameColor);
+        ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
+                    DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
 
     // ---- 第二行 + 进度条：只有查得到容量时才画（网络盘、空光驱没有）----
     if (entry.diskTotal > 0)
@@ -1351,19 +1398,60 @@ void FileListView::InsertEntry(const shell::ShellEntry& entry)
 
 void FileListView::BeginRenameSelected()
 {
-    if (m_hWnd == nullptr)
+    if (m_hWnd == nullptr || m_result == nullptr)
     {
         return;
     }
 
     int selectedIndex = ListView_GetNextItem(m_hWnd, -1, LVNI_SELECTED);
-    if (selectedIndex < 0)
+    if (selectedIndex < 0 || selectedIndex >= static_cast<int>(m_result->entries.size()))
     {
         return;
     }
 
     ::SetFocus(m_hWnd);
-    ListView_EditLabel(m_hWnd, selectedIndex);
+    HWND edit = ListView_EditLabel(m_hWnd, static_cast<UINT>(selectedIndex));
+
+    // 详情 / 列表 / 大图标：控件自己会把编辑框摆到位、名字也会自动带出来，不用我们插手
+    if (m_viewMode != ViewMode::Tiles || edit == nullptr)
+    {
+        return;
+    }
+
+    // ---- 平铺视图得我们自己收拾这个编辑框，两件事 ----
+    //
+    // 1）框里没有名字：为了格子高度不被长名字撑高（会压到下一行），平铺视图交给控件的
+    //    名称列是空串，控件就把编辑框的初始文本也当成空了。这里把真名字灌回去。
+    // 2）位置不对：控件的编辑框是按"图标视图的 label 区"（图标正下方）摆的，
+    //    平铺的布局是"图标在左、名字在右"，所以要挪到右边文字的位置。
+    const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(selectedIndex)];
+
+    ::SetWindowTextW(edit, entry.name.c_str());
+
+    RECT itemRect = {};
+    if (ListView_GetItemRect(m_hWnd, selectedIndex, &itemRect, LVIR_BOUNDS))
+    {
+        const int textLeft = itemRect.left + 62;   // 和 DrawTile 里的文字起点保持一致
+        const int editWidth = itemRect.right - 6 - textLeft;
+
+        if (editWidth > 40)
+        {
+            ::SetWindowPos(edit, nullptr, textLeft, itemRect.top + 10, editWidth, 22,
+                           SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    // 只选中主文件名、不选扩展名（和资源管理器一致）；文件夹没有扩展名，整段选中
+    int selectEnd = static_cast<int>(entry.name.size());
+    if (!entry.isFolder)
+    {
+        const size_t dot = entry.name.rfind(L'.');
+        if (dot != std::wstring::npos && dot > 0)
+        {
+            selectEnd = static_cast<int>(dot);
+        }
+    }
+    ::SendMessageW(edit, EM_SETSEL, 0, static_cast<LPARAM>(selectEnd));
 }
 
 // ============================================================================
@@ -1660,6 +1748,58 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             // 后者跟着本线程消息队列走，遇到注入的按键（自动化测试、远程桌面）会读到旧值。
             const bool ctrlHeld = (::GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             m_onActivate(static_cast<size_t>(hitIndex), ctrlHeld);
+        }
+        return 0;
+    }
+
+    // --------------------------------------------------------------
+    // 单击：平铺视图补"再点一下已经选中的那一项就进改名"
+    //
+    // 详情 / 列表 / 大图标这些视图是控件原生支持的（点中已选中项的名字就进编辑），
+    // 平铺是整格自绘的，控件不知道名字画在哪儿，所以自己判，判法很简单：
+    //   · 点中的这一项就是当前唯一选中的那一项；
+    //   · 和上一次点同一项之间隔了超过系统双击时间 —— 那就是两下单点，不是双击。
+    // 快速双击仍由 NM_DBLCLK 走"打开"，不会被这里抢走。
+    // --------------------------------------------------------------
+    case NM_CLICK:
+    {
+        if (m_viewMode == ViewMode::Tiles && m_result != nullptr)
+        {
+            const NMITEMACTIVATE* click = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+            const int hitIndex = (click != nullptr) ? click->iItem : -1;
+
+            if (hitIndex >= 0 && hitIndex < static_cast<int>(m_result->entries.size()))
+            {
+                const shell::ShellEntry& hit = m_result->entries[static_cast<size_t>(hitIndex)];
+                const bool isRealItem = (!hit.isGroupHeader && !hit.isSpacer);
+
+                const bool singleSelectedHere =
+                    isRealItem &&
+                    ListView_GetSelectedCount(m_hWnd) == 1 &&
+                    (ListView_GetItemState(m_hWnd, hitIndex, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+
+                const ULONGLONG now = ::GetTickCount64();
+
+                if (singleSelectedHere && m_lastClickItem == hitIndex &&
+                    (now - m_lastClickTick) > static_cast<ULONGLONG>(::GetDoubleClickTime()))
+                {
+                    // 隔了比双击时间更长：这是"又点了一下已经选中的项"，进改名
+                    m_lastClickItem = -1;
+                    m_lastClickTick = 0;
+                    BeginRenameSelected();
+                }
+                else
+                {
+                    // 记下来，等下一次点击时拿来算间隔
+                    m_lastClickItem = hitIndex;
+                    m_lastClickTick = now;
+                }
+            }
+            else
+            {
+                m_lastClickItem = -1;
+                m_lastClickTick = 0;
+            }
         }
         return 0;
     }
