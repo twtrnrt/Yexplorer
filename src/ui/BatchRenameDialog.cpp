@@ -44,8 +44,15 @@ const int kPadding      = 20;
 const int kListTop    = 78;
 const int kListHeight = 246;
 
-// 模板栏（预览列表和规则区之间那一条）
-const int kTemplateTop = 342;
+// 模板栏（预览列表和规则区之间那一条）：固定 10 个槽，一行排满
+const int kTemplateTop     = 342;
+const int kTemplateSlotW   = 80;   // 每个模板按钮宽
+const int kTemplateSlotGap = 8;    // 槽间距
+const int kTemplateSlotH   = 30;   // 槽高
+
+// 底部一排按钮（取消 / 清空 / 保存 / 应用）
+const int kBottomButtonW   = 90;
+const int kBottomButtonGap = 12;
 
 // 规则区：两栏，每栏 5 行
 const int kRuleTop      = 398;
@@ -80,14 +87,12 @@ enum : int
     kIdRegex         = 5017,   // 查找按正则处理
     kIdRegexPreset   = 5018,   // 常用正则下拉
 
-    kIdTemplateCombo  = 5020,  // 模板名（可编辑）
-    kIdTemplateLoad   = 5021,  // 载入模板（自绘按钮）
-    kIdTemplateSave   = 5022,  // 保存模板（自绘按钮）
-    kIdTemplateDelete = 5023,  // 删除模板（自绘按钮）
-
     kIdList          = 5100,   // 预览列表
     kIdCancel        = 5101,   // 取消（自绘按钮）
-    kIdApply         = 5102    // 应用（自绘按钮）
+    kIdApply         = 5102,   // 应用（自绘按钮）
+    kIdClear         = 5103,   // 清空（自绘按钮）
+    kIdSave          = 5104,   // 保存（自绘按钮，只在选中模板时出现）
+    kIdRenameEdit    = 5105    // 模板右键就地改名用的输入框
 };
 
 // 颜色（和「设置」窗口一套）
@@ -750,18 +755,7 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hRegexPreset, CB_SETCURSEL, 0, 0);
     }
 
-    // ---- 模板栏：模板名下拉（可编辑，输新名字就是新建）+ 载入 / 保存 / 删除 ----
-    m_hTemplateCombo = ::CreateWindowExW(0, L"COMBOBOX", L"",
-                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                         CBS_DROPDOWN | WS_VSCROLL,
-                                         0, 0, 0, 0, m_hWnd,
-                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdTemplateCombo)),
-                                         instance, nullptr);
-    if (m_hTemplateCombo != nullptr)
-    {
-        ::SendMessageW(m_hTemplateCombo, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-        ::SendMessageW(m_hTemplateCombo, CB_LIMITTEXT, 40, 0);
-    }
+    // ---- 模板栏：10 个槽全是自绘按钮，不需要子窗口（右键改名的输入框按需临时创建）----
 
     // ---- 右栏：序号 ----
     m_hNumberEnable = ::CreateWindowExW(0, L"BUTTON", L"加序号",
@@ -1024,46 +1018,49 @@ void BatchRenameDialog::Layout()
         }
     }
 
-    // ---- 模板栏：模板名下拉 + 载入 / 保存 / 删除 ----
+    // ---- 模板栏：10 个槽一行排满（全是自绘按钮）----
     {
-        const int top = Scale(kTemplateTop);
+        const int top  = Scale(kTemplateTop) - Scale(2);
+        const int left = Scale(kLeftColumnX);
 
-        if (m_hTemplateCombo != nullptr)
+        const int slotWidth  = Scale(kTemplateSlotW);
+        const int slotGap    = Scale(kTemplateSlotGap);
+        const int slotHeight = Scale(kTemplateSlotH);
+
+        m_templateRects.resize(BatchRenameDialog::kTemplateSlotCount);
+
+        for (size_t i = 0; i < m_templateRects.size(); ++i)
         {
-            ::MoveWindow(m_hTemplateCombo,
-                         Scale(kLeftColumnX) + Scale(48), top,
-                         Scale(220), Scale(24 * 8), TRUE);
+            RECT& rect = m_templateRects[i];
+
+            rect.left   = left + static_cast<int>(i) * (slotWidth + slotGap);
+            rect.top    = top;
+            rect.right  = rect.left + slotWidth;
+            rect.bottom = rect.top + slotHeight;
         }
-
-        const int templateButtonWidth  = Scale(88);
-        const int templateButtonHeight = Scale(28);
-
-        m_templateLoadRect.left   = Scale(kLeftColumnX) + Scale(48) + Scale(226);
-        m_templateLoadRect.top    = top - Scale(2);
-        m_templateLoadRect.right  = m_templateLoadRect.left + templateButtonWidth;
-        m_templateLoadRect.bottom = m_templateLoadRect.top + templateButtonHeight;
-
-        m_templateSaveRect.left   = m_templateLoadRect.right + Scale(8);
-        m_templateSaveRect.top    = m_templateLoadRect.top;
-        m_templateSaveRect.right  = m_templateSaveRect.left + templateButtonWidth;
-        m_templateSaveRect.bottom = m_templateLoadRect.bottom;
-
-        m_templateDeleteRect.left   = m_templateSaveRect.right + Scale(8);
-        m_templateDeleteRect.top    = m_templateLoadRect.top;
-        m_templateDeleteRect.right  = m_templateDeleteRect.left + templateButtonWidth;
-        m_templateDeleteRect.bottom = m_templateLoadRect.bottom;
     }
 
-    // ---- 底部两个按钮 ----
-    const int buttonWidth  = Scale(96);
+    // ---- 底部一排四个按钮：取消 / 清空 / 保存 / 应用（右对齐，应用在最右）----
+    const int buttonWidth  = Scale(kBottomButtonW);
     const int buttonHeight = Scale(32);
+    const int buttonGap    = Scale(kBottomButtonGap);
 
     m_applyRect.right  = clientRect.right - padding;
     m_applyRect.left   = m_applyRect.right - buttonWidth;
     m_applyRect.bottom = clientRect.bottom - Scale(16);
     m_applyRect.top    = m_applyRect.bottom - buttonHeight;
 
-    m_cancelRect.right  = m_applyRect.left - Scale(10);
+    m_saveRect.right   = m_applyRect.left - buttonGap;
+    m_saveRect.left    = m_saveRect.right - buttonWidth;
+    m_saveRect.bottom  = m_applyRect.bottom;
+    m_saveRect.top     = m_applyRect.top;
+
+    m_clearRect.right  = m_saveRect.left - buttonGap;
+    m_clearRect.left   = m_clearRect.right - buttonWidth;
+    m_clearRect.bottom = m_applyRect.bottom;
+    m_clearRect.top    = m_applyRect.top;
+
+    m_cancelRect.right  = m_clearRect.left - buttonGap;
     m_cancelRect.left   = m_cancelRect.right - buttonWidth;
     m_cancelRect.bottom = m_applyRect.bottom;
     m_cancelRect.top    = m_applyRect.top;
@@ -1313,7 +1310,7 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
         m_templates.push_back(current);
     }
 
-    RefreshTemplateCombo();
+    EnsureTemplateSlots();
 }
 
 void BatchRenameDialog::SaveTemplatesToDisk() const
@@ -1361,55 +1358,285 @@ void BatchRenameDialog::SaveTemplatesToDisk() const
     ::fclose(file);
 }
 
-void BatchRenameDialog::RefreshTemplateCombo()
+// ============================================================================
+// 模板槽：固定 10 个
+//
+// 设计成"一排槽"而不是"用户自己新建"：
+//   · 打开窗口时 10 个槽都在，名字叫「模板1…模板10」，参数全空；
+//   · 左键点一个槽 = 高亮它 + 把它的参数载入规则区；
+//   · 右键点一个槽 = 在按钮上原地改名；
+//   · 改过参数没保存时「应用」是灰的，先点「保存」才能应用。
+// ============================================================================
+
+void BatchRenameDialog::EnsureTemplateSlots()
 {
-    if (m_hTemplateCombo == nullptr)
+    // 多的截掉，缺的补（文件被手工改坏、或者第一次用都会走到补这一步）
+    while (m_templates.size() > kTemplateSlotCount)
     {
-        return;
+        m_templates.pop_back();
     }
 
-    // 先记住当前选中/输入的名字，刷新后尽量还原
-    const std::wstring currentText = GetTextOf(m_hTemplateCombo);
-
-    ::SendMessageW(m_hTemplateCombo, CB_RESETCONTENT, 0, 0);
-
-    for (const auto& item : m_templates)
+    for (size_t i = m_templates.size(); i < kTemplateSlotCount; ++i)
     {
-        ::SendMessageW(m_hTemplateCombo, CB_ADDSTRING, 0,
-                       reinterpret_cast<LPARAM>(item.name.c_str()));
+        RenameTemplate slot = {};                 // 参数全默认，等于"什么都没设"
+        slot.name = L"模板" + std::to_wstring(i + 1);
+        m_templates.push_back(slot);
     }
 
-    if (!currentText.empty())
+    for (size_t i = 0; i < m_templates.size(); ++i)
     {
-        for (size_t i = 0; i < m_templates.size(); ++i)
+        if (m_templates[i].name.empty())
         {
-            if (m_templates[i].name == currentText)
-            {
-                ::SendMessageW(m_hTemplateCombo, CB_SETCURSEL, static_cast<WPARAM>(i), 0);
-                return;
-            }
+            m_templates[i].name = L"模板" + std::to_wstring(i + 1);
         }
+    }
+}
 
-        // 不在列表里（新名字）：留在输入框里，方便直接点保存
-        ::SetWindowTextW(m_hTemplateCombo, currentText.c_str());
+// 只比较"规则"，不比较名字：名字是标识，不算参数改动
+static bool SameRules(const RenameTemplate& a, const RenameTemplate& b)
+{
+    return a.prefix == b.prefix &&
+           a.suffix == b.suffix &&
+           a.find == b.find &&
+           a.replace == b.replace &&
+           a.caseSensitive == b.caseSensitive &&
+           a.useRegex == b.useRegex &&
+           a.number == b.number &&
+           a.numberStart == b.numberStart &&
+           a.numberStep == b.numberStep &&
+           a.numberDigits == b.numberDigits &&
+           a.numberPos == b.numberPos &&
+           a.numberSep == b.numberSep &&
+           a.extMode == b.extMode &&
+           a.extValue == b.extValue &&
+           a.caseMode == b.caseMode &&
+           a.sortMode == b.sortMode &&
+           a.sortReverse == b.sortReverse;
+}
+
+bool BatchRenameDialog::HasSlotChanges() const
+{
+    if (m_selectedTemplate < 0 || !m_hasBaseline)
+    {
+        return false;   // 没选模板就不谈"改没改"
+    }
+
+    RenameTemplate now = {};
+    CaptureCurrentRules(now);
+
+    return !SameRules(now, m_baseline);
+}
+
+bool BatchRenameDialog::ApplyButtonEnabled() const
+{
+    if (!m_regexValid || m_rows.empty())
+    {
+        return false;
+    }
+
+    for (const auto& row : m_rows)
+    {
+        if (row.state == 2)     // 有冲突
+        {
+            return false;
+        }
+    }
+
+    // 选中了模板又改过参数：必须先「保存」，否则改了也白改（模板下次载入还是老样子）
+    if (HasSlotChanges())
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void BatchRenameDialog::ClearAllRules()
+{
+    // 结构体默认值就是界面上"什么都没设"的样子，直接套一遍
+    RenameTemplate empty = {};
+    empty.numberSep = L"-";
+
+    ApplyTemplateToControls(empty);
+
+    m_order.clear();   // 手动排的顺序也一起清掉
+
+    Recalculate();
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+}
+
+bool BatchRenameDialog::SaveCurrentSlot()
+{
+    if (m_selectedTemplate < 0 ||
+        m_selectedTemplate >= static_cast<int>(m_templates.size()))
+    {
+        return false;   // 没选中模板，没什么可保存
+    }
+
+    RenameTemplate captured = {};
+    CaptureCurrentRules(captured);
+    captured.name = m_templates[m_selectedTemplate].name;
+
+    m_templates[m_selectedTemplate] = captured;   // 覆盖这个槽
+    m_baseline    = captured;                     // 存完就是"新的干净状态"
+    m_hasBaseline = true;
+
+    SaveTemplatesToDisk();
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+
+    return true;
+}
+
+bool BatchRenameDialog::ConfirmLeaveSlot()
+{
+    if (!HasSlotChanges())
+    {
+        return true;   // 没改过：一声不响就走
+    }
+
+    const std::wstring name = (m_selectedTemplate >= 0 &&
+                               m_selectedTemplate < static_cast<int>(m_templates.size()))
+                                  ? m_templates[m_selectedTemplate].name
+                                  : std::wstring(L"当前模板");
+
+    const std::wstring message =
+        L"模板「" + name + L"」的参数改过还没保存。\r\n\r\n"
+        L"是 = 先保存再继续\r\n"
+        L"否 = 不保存直接继续\r\n"
+        L"取消 = 留在这个模板继续改";
+
+    const int answer = ::MessageBoxW(m_hWnd, message.c_str(), L"批量重命名",
+                                     MB_YESNOCANCEL | MB_ICONQUESTION);
+
+    if (answer == IDCANCEL)
+    {
+        return false;
+    }
+    if (answer == IDYES)
+    {
+        SaveCurrentSlot();
+    }
+    return true;
+}
+
+void BatchRenameDialog::OnTemplateSlotClick(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_templates.size()))
+    {
         return;
     }
 
-    // 编辑框原本是空的、又有模板：默认选中第一个，
-    // 这样窗口一打开框里就显示模板名，点「载入」马上有效果（不用先展开下拉挑）
-    if (!m_templates.empty())
+    if (index == m_selectedTemplate)
     {
-        ::SendMessageW(m_hTemplateCombo, CB_SETCURSEL, 0, 0);
+        return;   // 已经选中的槽，再点不重复载入（免得把刚改的又刷回去）
     }
+
+    if (!ConfirmLeaveSlot())
+    {
+        return;   // 上一个模板还有没保存的修改，用户选择"留在"
+    }
+
+    m_selectedTemplate = index;
+    ApplyTemplateToControls(m_templates[index]);
+
+    m_baseline    = m_templates[index];
+    m_hasBaseline = true;
+
+    Recalculate();
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+}
+
+void BatchRenameDialog::BeginTemplateRename(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_templateRects.size()))
+    {
+        return;
+    }
+
+    if (m_hRenameEdit != nullptr)
+    {
+        CommitTemplateRename();   // 上一个还没收掉，先收
+    }
+
+    const RECT& rect = m_templateRects[index];
+
+    m_renameIndex = index;
+    m_hRenameEdit = ::CreateWindowExW(0, L"EDIT", m_templates[index].name.c_str(),
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                      rect.left, rect.top,
+                                      rect.right - rect.left, rect.bottom - rect.top,
+                                      m_hWnd,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdRenameEdit)),
+                                      ::GetModuleHandleW(nullptr), nullptr);
+
+    if (m_hRenameEdit != nullptr)
+    {
+        ::SendMessageW(m_hRenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SendMessageW(m_hRenameEdit, EM_SETSEL, 0, -1);   // 全选，直接打字就替换
+        ::SetFocus(m_hRenameEdit);
+
+        ::InvalidateRect(m_hWnd, &rect, FALSE);
+    }
+}
+
+void BatchRenameDialog::CommitTemplateRename()
+{
+    if (m_hRenameEdit == nullptr)
+    {
+        return;
+    }
+
+    // 先把句柄摘下来，DestroyWindow 会触发 EN_KILLFOCUS 再进来一次，靠它挡住
+    HWND edit = m_hRenameEdit;
+    const int index = m_renameIndex;
+
+    m_hRenameEdit = nullptr;
+    m_renameIndex = -1;
+
+    std::wstring text = GetTextOf(edit);
+    ::DestroyWindow(edit);
+
+    // 去掉首尾空格
+    const size_t first = text.find_first_not_of(L" \t\r\n");
+    const size_t last  = text.find_last_not_of(L" \t\r\n");
+
+    if (first == std::wstring::npos)
+    {
+        text.clear();
+    }
+    else
+    {
+        text = text.substr(first, last - first + 1);
+    }
+
+    if (index >= 0 && index < static_cast<int>(m_templates.size()) &&
+        !text.empty() && text != m_templates[index].name)
+    {
+        m_templates[index].name = text;
+        SaveTemplatesToDisk();
+    }
+
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+}
+
+void BatchRenameDialog::CancelTemplateRename()
+{
+    if (m_hRenameEdit == nullptr)
+    {
+        return;
+    }
+
+    HWND edit = m_hRenameEdit;
+    m_hRenameEdit = nullptr;
+    m_renameIndex = -1;
+
+    ::DestroyWindow(edit);
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
 }
 
 void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
 {
-    if (m_hTemplateCombo != nullptr)
-    {
-        out.name = GetTextOf(m_hTemplateCombo);
-    }
-
+    // 名字由调用方决定（槽名不跟着规则走）
     out.prefix  = GetTextOf(m_hPrefix);
     out.suffix  = GetTextOf(m_hSuffix);
     out.find    = GetTextOf(m_hFind);
@@ -1625,6 +1852,21 @@ void BatchRenameDialog::FinishListDrag()
         ::ReleaseCapture();
     }
 
+    // 先记住"哪些行原来是选中的"（按名字记，因为重排之后行号对应的东西就变了）
+    std::vector<std::wstring> selectedNames;
+
+    if (m_hList != nullptr)
+    {
+        for (int i = 0; i < ListView_GetItemCount(m_hList); ++i)
+        {
+            if ((ListView_GetItemState(m_hList, i, LVIS_SELECTED) & LVIS_SELECTED) != 0 &&
+                static_cast<size_t>(i) < m_rows.size())
+            {
+                selectedNames.push_back(m_rows[static_cast<size_t>(i)].oldName);
+            }
+        }
+    }
+
     // 收掉插入标记（iItem = -1 就是清除）
     if (m_hList != nullptr)
     {
@@ -1702,6 +1944,24 @@ void BatchRenameDialog::FinishListDrag()
     }
 
     Recalculate();
+
+    // 拖完顺序变了，原来选中的那几行按"原名"重新选上（不然选择会跳到别的文件上）
+    if (m_hList != nullptr && !selectedNames.empty())
+    {
+        const int rowCount = ListView_GetItemCount(m_hList);
+
+        for (int i = 0; i < rowCount; ++i)
+        {
+            const bool selected =
+                (static_cast<size_t>(i) < m_rows.size()) &&
+                std::find(selectedNames.begin(), selectedNames.end(),
+                          m_rows[static_cast<size_t>(i)].oldName) != selectedNames.end();
+
+            ListView_SetItemState(m_hList, i, selected ? LVIS_SELECTED : 0, LVIS_SELECTED);
+        }
+
+        ::SetFocus(m_hList);
+    }
 }
 
 // ============================================================================
@@ -2072,16 +2332,19 @@ void BatchRenameDialog::Recalculate()
     BuildPreviewRows();
     FillPreviewList();
 
-    // 只重画底部那一行统计文字：之前整窗 InvalidateRect，
+    // 只重画底部那一条：之前整窗 InvalidateRect，
     // 父窗口会先把整块刷白再等子控件重画，输入一个字就闪一下。
+    // 这一条要盖住"统计文字 + 冲突提示 + 四个按钮"，因为
+    // 「应用」的灰/亮、「保存」的出现都在这块里变。
     if (m_hWnd != nullptr)
     {
-        RECT statsRect = m_statsRect;
+        RECT bottomRect = m_statsRect;
 
-        // 冲突提示那一行在统计文字上面，一起带上
-        statsRect.top -= Scale(22);
+        bottomRect.top    -= Scale(22);
+        bottomRect.right   = m_applyRect.right;
+        bottomRect.bottom  = m_applyRect.bottom + Scale(8);
 
-        ::InvalidateRect(m_hWnd, &statsRect, FALSE);
+        ::InvalidateRect(m_hWnd, &bottomRect, FALSE);
         ::UpdateWindow(m_hWnd);
     }
 }
@@ -2091,12 +2354,18 @@ void BatchRenameDialog::Recalculate()
 // ============================================================================
 
 void BatchRenameDialog::DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
-                                   bool hot, bool pressed, bool primary)
+                                   bool hot, bool pressed, bool primary, bool enabled)
 {
     COLORREF face   = kButtonFace;
     COLORREF border = kButtonBorder;
 
-    if (primary)
+    if (!enabled)
+    {
+        // 不可点：浅灰底 + 灰字，一眼能看出"现在不能点"
+        face   = RGB(246, 247, 249);
+        border = RGB(219, 221, 225);
+    }
+    else if (primary)
     {
         face   = pressed ? kPrimaryDownFace : (hot ? kPrimaryHotFace : kPrimaryFace);
         border = kPrimaryBorder;
@@ -2131,7 +2400,15 @@ void BatchRenameDialog::DrawButton(HDC dc, const RECT& rect, const wchar_t* text
     HGDIOBJ oldFont = ::SelectObject(dc, m_font);
 
     ::SetBkMode(dc, TRANSPARENT);
-    ::SetTextColor(dc, primary ? RGB(255, 255, 255) : kTitleColor);
+
+    if (!enabled)
+    {
+        ::SetTextColor(dc, RGB(160, 163, 168));
+    }
+    else
+    {
+        ::SetTextColor(dc, primary ? RGB(255, 255, 255) : kTitleColor);
+    }
 
     RECT textRect = rect;
     ::DrawTextW(dc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2162,7 +2439,7 @@ void BatchRenameDialog::Draw(HDC dc)
     ::SetTextColor(dc, kHintColor);
 
     RECT hintRect = { padding, Scale(44), clientRect.right - padding, Scale(66) };
-    ::DrawTextW(dc, L"改下面的规则，上面的「新文件名」会立刻跟着变；确认没问题再点应用。",
+    ::DrawTextW(dc, L"改下面的规则，上面的「新文件名」会立刻跟着变；模板点一下载入、右键改名。",
                 -1, &hintRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // ---- 三条分隔线（列表上方 / 列表下方 / 模板栏下方）----
@@ -2181,44 +2458,17 @@ void BatchRenameDialog::Draw(HDC dc)
     ::SelectObject(dc, oldPen);
     ::DeleteObject(dividerPen);
 
-    // ---- 模板栏：标签 + 三个按钮 ----
-    ::SelectObject(dc, m_font);
-    ::SetTextColor(dc, kTitleColor);
-
+    // ---- 模板栏：10 个槽一行排满（左键载入、右键原地改名）----
     {
-        RECT labelRect = { padding, Scale(kTemplateTop) - Scale(2),
-                           padding + Scale(44), Scale(kTemplateTop) + Scale(28) };
-        ::DrawTextW(dc, L"模板", -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    DrawButton(dc, m_templateLoadRect,   L"载入", m_hotTemplateLoad,   m_pressedTemplateLoad,   false);
-    DrawButton(dc, m_templateSaveRect,   L"保存", m_hotTemplateSave,   m_pressedTemplateSave,   false);
-    DrawButton(dc, m_templateDeleteRect, L"删除", m_hotTemplateDelete, m_pressedTemplateDelete, false);
-
-    // 模板栏右边一行小字，说明怎么用（不影响规则区）
-    if (m_templates.empty())
-    {
-        ::SelectObject(dc, m_fontSmall);
-        ::SetTextColor(dc, kHintColor);
-
-        RECT tipRect = { m_templateDeleteRect.right + Scale(16), Scale(kTemplateTop) - Scale(2),
-                         clientRect.right - padding, Scale(kTemplateTop) + Scale(28) };
-        ::DrawTextW(dc, L"先把规则摆好，起个名字，点「保存」。",
-                    -1, &tipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
         ::SelectObject(dc, m_font);
-    }
-    else
-    {
-        ::SelectObject(dc, m_fontSmall);
-        ::SetTextColor(dc, kHintColor);
+        ::SetTextColor(dc, kTitleColor);
 
-        RECT tipRect = { m_templateDeleteRect.right + Scale(16), Scale(kTemplateTop) - Scale(2),
-                         clientRect.right - padding, Scale(kTemplateTop) + Scale(28) };
-        ::DrawTextW(dc, L"选一个名字点「载入」；换个新名字点「保存」就是新建。",
-                    -1, &tipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        for (size_t i = 0; i < m_templateRects.size(); ++i)
+        {
+            DrawTemplateSlot(dc, m_templateRects[i], static_cast<int>(i));
+        }
 
-        ::SelectObject(dc, m_font);
+        // 10 个槽正好占满一行，右边没有多余地方放说明，用法写在顶部副标题里
     }
 
     // ---- 左栏四个行首标签 ----
@@ -2313,9 +2563,82 @@ void BatchRenameDialog::Draw(HDC dc)
 
     ::SelectObject(dc, oldFont);
 
-    // ---- 两个按钮 ----
+    // ---- 底部四个按钮：取消 / 清空 / 保存 / 应用 ----
+    // 「保存」只在选中了某个模板槽时出现（没选中就没有"保存到哪"的说法）
     DrawButton(dc, m_cancelRect, L"取消", m_hotCancel, m_pressedCancel, false);
-    DrawButton(dc, m_applyRect,  L"应用", m_hotApply,  m_pressedApply,  true);
+    DrawButton(dc, m_clearRect,  L"清空", m_hotClear,  m_pressedClear,  false);
+
+    if (m_selectedTemplate >= 0)
+    {
+        DrawButton(dc, m_saveRect, L"保存", m_hotSave, m_pressedSave, false);
+    }
+
+    DrawButton(dc, m_applyRect, L"应用", m_hotApply, m_pressedApply, true, ApplyButtonEnabled());
+}
+
+// 画一个模板槽：选中的用蓝框 + 浅蓝底，鼠标悬停用浅灰底
+void BatchRenameDialog::DrawTemplateSlot(HDC dc, const RECT& rect, int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_templates.size()))
+    {
+        return;
+    }
+
+    const bool selected = (index == m_selectedTemplate);
+    const bool hot      = (index == m_hotTemplate);
+    const bool pressed  = (index == m_pressedTemplate);
+
+    COLORREF face   = kButtonFace;
+    COLORREF border = kButtonBorder;
+    COLORREF text   = kTitleColor;
+
+    if (selected)
+    {
+        face   = RGB(232, 240, 252);    // 浅蓝底
+        border = kPrimaryFace;          // 主色描边
+    }
+    else if (hot)
+    {
+        face   = kButtonHotFace;
+        border = kButtonHotBorder;
+    }
+
+    if (pressed)
+    {
+        face = kButtonDownFace;
+    }
+
+    HBRUSH brush = ::CreateSolidBrush(face);
+    HPEN   pen   = ::CreatePen(PS_SOLID, 1, border);
+
+    HGDIOBJ oldBrush = ::SelectObject(dc, brush);
+    HGDIOBJ oldPen   = ::SelectObject(dc, pen);
+
+    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+
+    ::SelectObject(dc, oldPen);
+    ::SelectObject(dc, oldBrush);
+    ::DeleteObject(pen);
+    ::DeleteObject(brush);
+
+    // 就地改名时按钮被输入框盖住，文字不用画
+    if (m_hRenameEdit != nullptr && index == m_renameIndex)
+    {
+        return;
+    }
+
+    HGDIOBJ oldFont = ::SelectObject(dc, m_font);
+    ::SetBkMode(dc, TRANSPARENT);
+    ::SetTextColor(dc, selected ? kPrimaryFace : text);
+
+    RECT textRect = rect;
+    textRect.left  += Scale(6);
+    textRect.right -= Scale(6);
+
+    ::DrawTextW(dc, m_templates[index].name.c_str(), -1, &textRect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    ::SelectObject(dc, oldFont);
 }
 
 // ============================================================================
@@ -2354,21 +2677,47 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         const int controlId = LOWORD(wParam);
         const int notification = HIWORD(wParam);
 
+        // ---- 模板就地改名的输入框 ----
+        if (controlId == kIdRenameEdit && m_hRenameEdit != nullptr)
+        {
+            if (notification == EN_KILLFOCUS)
+            {
+                CommitTemplateRename();   // 点到别处就算确认，不留悬空输入框
+            }
+            return 0;
+        }
+
         // 回车 / Esc（IsDialogMessage 会翻译成 IDOK / IDCANCEL）
         if (controlId == IDCANCEL)
         {
-            ::DestroyWindow(hWnd);
+            // 正在改模板名：Esc 只取消改名，不关窗口
+            if (m_hRenameEdit != nullptr)
+            {
+                CancelTemplateRename();
+                return 0;
+            }
+
+            if (ConfirmLeaveSlot())
+            {
+                ::DestroyWindow(hWnd);
+            }
             return 0;
         }
 
         if (controlId == IDOK)
         {
+            // 正在改模板名：回车就是确认改名，别顺手把窗口应用掉
+            if (m_hRenameEdit != nullptr)
+            {
+                CommitTemplateRename();
+                return 0;
+            }
+
             // 下拉列表正展开的时候，回车的意思是"收下拉"，不能顺手把窗口应用掉
             // （否则用户在「常用正则」里按回车选条目，窗口就被关掉了）
             const HWND combos[] =
             {
-                m_hRegexPreset, m_hTemplateCombo, m_hNumberPos,
-                m_hExtMode, m_hCaseMode, m_hSortMode
+                m_hRegexPreset, m_hNumberPos, m_hExtMode, m_hCaseMode, m_hSortMode
             };
 
             for (HWND combo : combos)
@@ -2390,127 +2739,35 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         {
             if (controlId == kIdCancel)
             {
-                ::DestroyWindow(hWnd);
+                if (ConfirmLeaveSlot())
+                {
+                    ::DestroyWindow(hWnd);
+                }
+                return 0;
+            }
+
+            if (controlId == kIdClear)
+            {
+                ClearAllRules();
+                return 0;
+            }
+
+            if (controlId == kIdSave)
+            {
+                SaveCurrentSlot();     // 没选中模板时这个按钮根本不显示，这里等于兜底
                 return 0;
             }
 
             if (controlId == kIdApply)
             {
-                // 有冲突就不让应用
-                bool hasConflict = false;
-                for (const auto& row : m_rows)
-                {
-                    if (row.state == 2)
-                    {
-                        hasConflict = true;
-                        break;
-                    }
-                }
-
-                if (!hasConflict && !m_rows.empty())
+                // 有冲突、正则在报错、或者"选了模板又改过参数没保存" → 一律不让应用
+                if (ApplyButtonEnabled())
                 {
                     m_applied = true;
                     ::DestroyWindow(hWnd);
                 }
                 return 0;
             }
-
-            // ---- 模板三个按钮 ----
-            if (controlId == kIdTemplateLoad)
-            {
-                const std::wstring name = GetTextOf(m_hTemplateCombo);
-
-                for (const auto& item : m_templates)
-                {
-                    if (item.name == name)
-                    {
-                        ApplyTemplateToControls(item);
-                        Recalculate();
-                        break;
-                    }
-                }
-                return 0;
-            }
-
-            if (controlId == kIdTemplateSave)
-            {
-                RenameTemplate captured = {};
-                CaptureCurrentRules(captured);
-
-                if (captured.name.empty())
-                {
-                    // 没写名字：拿"模板 N"顶一下，省得用户卡住
-                    captured.name = L"模板 " + std::to_wstring(m_templates.size() + 1);
-                }
-
-                // 同名覆盖，否则追加
-                bool replaced = false;
-                for (auto& item : m_templates)
-                {
-                    if (item.name == captured.name)
-                    {
-                        item       = captured;
-                        replaced   = true;
-                        break;
-                    }
-                }
-
-                if (!replaced)
-                {
-                    m_templates.push_back(captured);
-                }
-
-                SaveTemplatesToDisk();
-                RefreshTemplateCombo();
-                ::SetWindowTextW(m_hTemplateCombo, captured.name.c_str());
-                ::InvalidateRect(hWnd, nullptr, FALSE);
-                return 0;
-            }
-
-            if (controlId == kIdTemplateDelete)
-            {
-                const std::wstring name = GetTextOf(m_hTemplateCombo);
-
-                for (size_t i = 0; i < m_templates.size(); ++i)
-                {
-                    if (m_templates[i].name == name)
-                    {
-                        // 删除是不可逆的，先问一句
-                        const int answer =
-                            ::MessageBoxW(hWnd, (L"要删除模板「" + name + L"」吗？").c_str(),
-                                          L"批量重命名", MB_YESNO | MB_ICONQUESTION);
-
-                        if (answer != IDYES)
-                        {
-                            return 0;
-                        }
-
-                        m_templates.erase(m_templates.begin() + static_cast<ptrdiff_t>(i));
-                        SaveTemplatesToDisk();
-                        RefreshTemplateCombo();
-                        ::InvalidateRect(hWnd, nullptr, FALSE);
-                        break;
-                    }
-                }
-                return 0;
-            }
-        }
-
-        // 模板下拉里挑一个名字 → 直接套用（"单击模板一键载入"，不用再点按钮）
-        if (controlId == kIdTemplateCombo && notification == CBN_SELCHANGE)
-        {
-            const std::wstring name = GetTextOf(m_hTemplateCombo);
-
-            for (const auto& item : m_templates)
-            {
-                if (item.name == name)
-                {
-                    ApplyTemplateToControls(item);
-                    Recalculate();
-                    break;
-                }
-            }
-            return 0;
         }
 
         // 常用正则下拉：选中一条 → 填进「查找」并勾上正则
@@ -2553,6 +2810,14 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
         return 0;
     }
+
+    case WM_CLOSE:
+        // 右上角 ×：同样要照顾"模板改过没保存"
+        if (ConfirmLeaveSlot())
+        {
+            ::DestroyWindow(hWnd);
+        }
+        return 0;
 
     case WM_DRAWITEM:
         return 0;
@@ -2628,25 +2893,36 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
         const bool overCancel = (x >= m_cancelRect.left && x < m_cancelRect.right &&
                                  y >= m_cancelRect.top  && y < m_cancelRect.bottom);
+        const bool overClear  = (x >= m_clearRect.left && x < m_clearRect.right &&
+                                 y >= m_clearRect.top  && y < m_clearRect.bottom);
+        const bool overSave   = (m_selectedTemplate >= 0 &&
+                                 x >= m_saveRect.left && x < m_saveRect.right &&
+                                 y >= m_saveRect.top  && y < m_saveRect.bottom);
         const bool overApply  = (x >= m_applyRect.left && x < m_applyRect.right &&
                                  y >= m_applyRect.top  && y < m_applyRect.bottom);
 
-        const bool overTplLoad = (x >= m_templateLoadRect.left && x < m_templateLoadRect.right &&
-                                  y >= m_templateLoadRect.top  && y < m_templateLoadRect.bottom);
-        const bool overTplSave = (x >= m_templateSaveRect.left && x < m_templateSaveRect.right &&
-                                  y >= m_templateSaveRect.top  && y < m_templateSaveRect.bottom);
-        const bool overTplDel  = (x >= m_templateDeleteRect.left && x < m_templateDeleteRect.right &&
-                                  y >= m_templateDeleteRect.top  && y < m_templateDeleteRect.bottom);
+        // 鼠标在哪个模板槽上
+        int overSlot = -1;
+        for (size_t i = 0; i < m_templateRects.size(); ++i)
+        {
+            const RECT& rect = m_templateRects[i];
 
-        if (overCancel != m_hotCancel || overApply != m_hotApply ||
-            overTplLoad != m_hotTemplateLoad || overTplSave != m_hotTemplateSave ||
-            overTplDel != m_hotTemplateDelete)
+            if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+            {
+                overSlot = static_cast<int>(i);
+                break;
+            }
+        }
+
+        if (overCancel != m_hotCancel || overClear != m_hotClear ||
+            overSave != m_hotSave || overApply != m_hotApply ||
+            overSlot != m_hotTemplate)
         {
             m_hotCancel = overCancel;
+            m_hotClear  = overClear;
+            m_hotSave   = overSave;
             m_hotApply  = overApply;
-            m_hotTemplateLoad   = overTplLoad;
-            m_hotTemplateSave   = overTplSave;
-            m_hotTemplateDelete = overTplDel;
+            m_hotTemplate = overSlot;
             ::InvalidateRect(hWnd, nullptr, FALSE);
         }
 
@@ -2661,8 +2937,8 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
 
         // 鼠标变手型，看着能点
-        if (m_hotCancel || m_hotApply || m_hotTemplateLoad ||
-            m_hotTemplateSave || m_hotTemplateDelete)
+        if (m_hotCancel || m_hotClear || m_hotSave ||
+            (m_hotApply && ApplyButtonEnabled()) || m_hotTemplate >= 0)
         {
             ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
         }
@@ -2671,44 +2947,64 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
     }
 
     case WM_MOUSELEAVE:
+    {
         m_trackingLeave = false;
 
-        if (m_hotCancel || m_hotApply || m_hotTemplateLoad ||
-            m_hotTemplateSave || m_hotTemplateDelete)
+        if (m_hotCancel || m_hotClear || m_hotSave || m_hotApply || m_hotTemplate >= 0)
         {
-            m_hotCancel = false;
-            m_hotApply  = false;
-            m_hotTemplateLoad   = false;
-            m_hotTemplateSave   = false;
-            m_hotTemplateDelete = false;
+            m_hotCancel   = false;
+            m_hotClear    = false;
+            m_hotSave     = false;
+            m_hotApply    = false;
+            m_hotTemplate = -1;
             ::InvalidateRect(hWnd, nullptr, FALSE);
         }
         return 0;
+    }
 
     case WM_LBUTTONDOWN:
     {
         const int x = GET_X_LPARAM(lParam);
         const int y = GET_Y_LPARAM(lParam);
 
+        // 模板槽：按下去先记着，松开再算"点中"
+        int hitSlot = -1;
+        for (size_t i = 0; i < m_templateRects.size(); ++i)
+        {
+            const RECT& rect = m_templateRects[i];
+
+            if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+            {
+                hitSlot = static_cast<int>(i);
+                break;
+            }
+        }
+
+        if (hitSlot >= 0)
+        {
+            m_pressedTemplate = hitSlot;
+            ::SetFocus(hWnd);            // 别让改名的输入框的失焦逻辑误伤
+            ::SetCapture(hWnd);
+            ::InvalidateRect(hWnd, nullptr, FALSE);
+            return 0;
+        }
+
         const bool overCancel = (x >= m_cancelRect.left && x < m_cancelRect.right &&
                                  y >= m_cancelRect.top  && y < m_cancelRect.bottom);
+        const bool overClear  = (x >= m_clearRect.left && x < m_clearRect.right &&
+                                 y >= m_clearRect.top  && y < m_clearRect.bottom);
+        const bool overSave   = (m_selectedTemplate >= 0 &&
+                                 x >= m_saveRect.left && x < m_saveRect.right &&
+                                 y >= m_saveRect.top  && y < m_saveRect.bottom);
         const bool overApply  = (x >= m_applyRect.left && x < m_applyRect.right &&
                                  y >= m_applyRect.top  && y < m_applyRect.bottom);
 
-        const bool overTplLoad = (x >= m_templateLoadRect.left && x < m_templateLoadRect.right &&
-                                  y >= m_templateLoadRect.top  && y < m_templateLoadRect.bottom);
-        const bool overTplSave = (x >= m_templateSaveRect.left && x < m_templateSaveRect.right &&
-                                  y >= m_templateSaveRect.top  && y < m_templateSaveRect.bottom);
-        const bool overTplDel  = (x >= m_templateDeleteRect.left && x < m_templateDeleteRect.right &&
-                                  y >= m_templateDeleteRect.top  && y < m_templateDeleteRect.bottom);
-
         m_pressedCancel = overCancel;
+        m_pressedClear  = overClear;
+        m_pressedSave   = overSave;
         m_pressedApply  = overApply;
-        m_pressedTemplateLoad   = overTplLoad;
-        m_pressedTemplateSave   = overTplSave;
-        m_pressedTemplateDelete = overTplDel;
 
-        if (overCancel || overApply || overTplLoad || overTplSave || overTplDel)
+        if (overCancel || overClear || overSave || overApply)
         {
             ::SetCapture(hWnd);
             ::InvalidateRect(hWnd, nullptr, FALSE);
@@ -2733,60 +3029,95 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
             ::ReleaseCapture();
         }
 
+        // ---- 模板槽：松开时还在同一个槽上才算点中 ----
+        const int wasSlot = m_pressedTemplate;
+        m_pressedTemplate = -1;
+
+        if (wasSlot >= 0)
+        {
+            int overSlot = -1;
+            for (size_t i = 0; i < m_templateRects.size(); ++i)
+            {
+                const RECT& rect = m_templateRects[i];
+
+                if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+                {
+                    overSlot = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            ::InvalidateRect(hWnd, nullptr, FALSE);
+
+            if (overSlot == wasSlot)
+            {
+                OnTemplateSlotClick(wasSlot);
+            }
+            return 0;
+        }
+
         const bool overCancel = (x >= m_cancelRect.left && x < m_cancelRect.right &&
                                  y >= m_cancelRect.top  && y < m_cancelRect.bottom);
+        const bool overClear  = (x >= m_clearRect.left && x < m_clearRect.right &&
+                                 y >= m_clearRect.top  && y < m_clearRect.bottom);
+        const bool overSave   = (m_selectedTemplate >= 0 &&
+                                 x >= m_saveRect.left && x < m_saveRect.right &&
+                                 y >= m_saveRect.top  && y < m_saveRect.bottom);
         const bool overApply  = (x >= m_applyRect.left && x < m_applyRect.right &&
                                  y >= m_applyRect.top  && y < m_applyRect.bottom);
 
-        const bool overTplLoad = (x >= m_templateLoadRect.left && x < m_templateLoadRect.right &&
-                                  y >= m_templateLoadRect.top  && y < m_templateLoadRect.bottom);
-        const bool overTplSave = (x >= m_templateSaveRect.left && x < m_templateSaveRect.right &&
-                                  y >= m_templateSaveRect.top  && y < m_templateSaveRect.bottom);
-        const bool overTplDel  = (x >= m_templateDeleteRect.left && x < m_templateDeleteRect.right &&
-                                  y >= m_templateDeleteRect.top  && y < m_templateDeleteRect.bottom);
-
         const bool wasCancel = m_pressedCancel;
+        const bool wasClear  = m_pressedClear;
+        const bool wasSave   = m_pressedSave;
         const bool wasApply  = m_pressedApply;
-        const bool wasTplLoad = m_pressedTemplateLoad;
-        const bool wasTplSave = m_pressedTemplateSave;
-        const bool wasTplDel  = m_pressedTemplateDelete;
 
         m_pressedCancel = false;
+        m_pressedClear  = false;
+        m_pressedSave   = false;
         m_pressedApply  = false;
-        m_pressedTemplateLoad   = false;
-        m_pressedTemplateSave   = false;
-        m_pressedTemplateDelete = false;
         ::InvalidateRect(hWnd, nullptr, FALSE);
 
         if (wasCancel && overCancel)
         {
             ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdCancel, BN_CLICKED), 0);
         }
+        else if (wasClear && overClear)
+        {
+            ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdClear, BN_CLICKED), 0);
+        }
+        else if (wasSave && overSave)
+        {
+            ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdSave, BN_CLICKED), 0);
+        }
         else if (wasApply && overApply)
         {
             ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdApply, BN_CLICKED), 0);
         }
-        else if (wasTplLoad && overTplLoad)
+        return 0;
+    }
+
+    case WM_RBUTTONUP:
+    {
+        // 模板槽右键 → 就地改名
+        const int x = GET_X_LPARAM(lParam);
+        const int y = GET_Y_LPARAM(lParam);
+
+        for (size_t i = 0; i < m_templateRects.size(); ++i)
         {
-            ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdTemplateLoad, BN_CLICKED), 0);
-        }
-        else if (wasTplSave && overTplSave)
-        {
-            ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdTemplateSave, BN_CLICKED), 0);
-        }
-        else if (wasTplDel && overTplDel)
-        {
-            ::SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(kIdTemplateDelete, BN_CLICKED), 0);
+            const RECT& rect = m_templateRects[i];
+
+            if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+            {
+                BeginTemplateRename(static_cast<int>(i));
+                return 0;
+            }
         }
         return 0;
     }
 
-    case WM_CLOSE:
-        ::DestroyWindow(hWnd);
-        return 0;
-
     case WM_DESTROY:
-        m_hWnd = nullptr;
+        m_hWnd        = nullptr;
+        m_hRenameEdit = nullptr;   // 子窗口跟着一起销毁了，别留野指针
         return 0;
 
     default:

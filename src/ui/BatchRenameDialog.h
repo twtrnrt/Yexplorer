@@ -110,7 +110,9 @@ private:
 
     // 整窗背景 + 标题 + 分隔线 + 底部按钮
     void Draw(HDC dc);
-    void DrawButton(HDC dc, const RECT& rect, const wchar_t* text, bool hot, bool pressed, bool primary);
+    void DrawButton(HDC dc, const RECT& rect, const wchar_t* text, bool hot, bool pressed,
+                    bool primary, bool enabled = true);
+    void DrawTemplateSlot(HDC dc, const RECT& rect, int index);
 
     int Scale(int value) const;
 
@@ -142,12 +144,26 @@ private:
 
     void EnableRuleControls();
 
-    // ---- 模板（保存 / 载入 / 删除）----
+    // ---- 模板（固定 10 个槽，点一下载入，右键就地改名，改过不许直接应用）----
+    static const size_t kTemplateSlotCount = 10;   // 模板槽固定 10 个，一行排满，不增不减
+
     void LoadTemplatesFromDisk();
     void SaveTemplatesToDisk() const;
-    void RefreshTemplateCombo();
+    void EnsureTemplateSlots();                            // 保证 m_templates 正好 10 条
     void CaptureCurrentRules(RenameTemplate& out) const;   // 把界面上的规则收成一份模板
     void ApplyTemplateToControls(const RenameTemplate& tpl); // 把模板回填到控件
+    void ClearAllRules();                                  // 「清空」：规则区全部回默认值
+
+    // 选中的槽改过没有（改过的话「应用」变灰、必须先把「保存」点亮）
+    bool HasSlotChanges() const;
+    bool ApplyButtonEnabled() const;
+    bool SaveCurrentSlot();            // 把规则区当前参数写进高亮的槽，成功返回 true
+    bool ConfirmLeaveSlot();           // 切槽/关窗前问一句：true = 可以继续，false = 留在原处
+
+    void OnTemplateSlotClick(int index);    // 左键点槽：高亮 + 载入
+    void BeginTemplateRename(int index);    // 右键点槽：在按钮上原地改名
+    void CommitTemplateRename();
+    void CancelTemplateRename();
 
     // ---- 拖动排序（在预览列表里手动排）----
     void BeginListDrag(int itemIndex);
@@ -185,18 +201,20 @@ private:
     HWND m_hRegex = nullptr;        // 查找按正则处理（复选框）
     HWND m_hRegexPreset = nullptr;  // 常用正则下拉（选中就把写法填进"查找"）
 
-    // ---- 模板栏 ----
-    HWND m_hTemplateCombo = nullptr;   // 模板名（可编辑，输新名字就是新建）
-    RECT m_templateLoadRect = {};      // 「载入」
-    RECT m_templateSaveRect = {};      // 「保存」
-    RECT m_templateDeleteRect = {};    // 「删除」
-    bool m_hotTemplateLoad = false;
-    bool m_hotTemplateSave = false;
-    bool m_hotTemplateDelete = false;
-    bool m_pressedTemplateLoad = false;
-    bool m_pressedTemplateSave = false;
-    bool m_pressedTemplateDelete = false;
-    std::vector<RenameTemplate> m_templates;
+    // ---- 模板栏：固定 10 个自绘按钮，一行排满 ----
+    std::vector<RenameTemplate> m_templates;        // 恒为 kTemplateSlotCount 条
+    std::vector<RECT>           m_templateRects;    // 10 个槽的矩形
+    int  m_hotTemplate     = -1;   // 鼠标悬停的槽（-1 = 没有）
+    int  m_pressedTemplate = -1;   // 正按下的槽
+    int  m_selectedTemplate = -1;  // 当前高亮（载入）的槽，-1 = 没选中任何模板
+
+    // 选中槽"上次保存/载入时的样子"，用来判断有没有改动（名字不参与比较）
+    RenameTemplate m_baseline;
+    bool           m_hasBaseline = false;
+
+    // 右键就地改名用的输入框（叠在槽按钮上，回车/失焦提交、Esc 放弃）
+    HWND m_hRenameEdit = nullptr;
+    int  m_renameIndex = -1;
 
     HWND m_hNumberEnable = nullptr; // 加序号（复选框）
     HWND m_hNumberStart = nullptr;  // 起始
@@ -219,12 +237,18 @@ private:
     int                 m_dropRow       = -1;     // 要插到第几行前面（-1 = 没算出位置）
     bool                m_dropAfter     = false;  // 插在该行后面
 
-    // ---- 自绘按钮 ----
+    // ---- 自绘按钮（底部一排：取消 / 清空 / 保存 / 应用）----
     RECT m_cancelRect = {};
+    RECT m_clearRect  = {};
+    RECT m_saveRect   = {};
     RECT m_applyRect  = {};
     bool m_hotCancel  = false;
-    bool m_pressedCancel = false;
+    bool m_hotClear   = false;
+    bool m_hotSave    = false;
     bool m_hotApply   = false;
+    bool m_pressedCancel = false;
+    bool m_pressedClear  = false;
+    bool m_pressedSave   = false;
     bool m_pressedApply  = false;
     bool m_trackingLeave = false;
 
