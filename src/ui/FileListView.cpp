@@ -1491,19 +1491,21 @@ void FileListView::BeginRenameSelected()
                 HGDIOBJ oldFont = ::SelectObject(measureDc, m_hFont);
                 const RECT nameRect = ComputeTileNameRect(measureDc, itemRect, entry);
 
+                // 编辑框只做"一行文字 + 上下各留一点"这么高，不跟着名字的行数拉高。
+                // 原因：ListView 挂的是单行编辑框，框比一行高的时候它一定把文字垂直居中，
+                // 我们没有手段让它贴顶。所以框本身不做高，字就自然贴在左上；
+                // 名字块下面那几行本来就不画（正在改名的那一行整块跳过名字），不会露出旧字。
+                TEXTMETRICW metrics = {};
+                int editHeight = 26;
+                if (::GetTextMetricsW(measureDc, &metrics))
+                {
+                    editHeight = static_cast<int>(metrics.tmHeight) + 8;
+                }
+
                 ::SelectObject(measureDc, oldFont);
                 ::ReleaseDC(m_hWnd, measureDc);
 
                 const int editWidth = nameRect.right - nameRect.left;
-
-                // 编辑框高度跟着名字文字块走：名字一行就是一行高，两行三行就是两三行高，
-                // 这样框能把原来那块名字全盖住。太扁的框（单行 19px）装不下字，
-                // 所以最少给 22。
-                int editHeight = static_cast<int>(nameRect.bottom - nameRect.top);
-                if (editHeight < 22)
-                {
-                    editHeight = 22;
-                }
 
                 if (editWidth > 40)
                 {
