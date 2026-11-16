@@ -68,6 +68,46 @@ static bool IsDriveRootPath(const std::wstring& path)
            path[2] == L'\\';
 }
 
+// 是不是真实文件系统里的路径（C:\... 或 \\server\share\...）。
+// 控制面板、"此电脑"里的那些虚拟项不是这种路径（它们是 CLSID 形式或空路径）。
+static bool IsFileSystemPath(const std::wstring& path)
+{
+    if (path.size() < 2)
+    {
+        return false;
+    }
+
+    // 盘符路径 X:\...
+    if (::iswalpha(static_cast<wint_t>(path[0])) != 0 && path[1] == L':')
+    {
+        return true;
+    }
+
+    // UNC 路径 \\server\share
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+    {
+        return true;
+    }
+
+    return false;
+}
+
+// 这个项要不要参与"淡化"（变灰 / 半透明）。
+//
+// 驱动器和控制面板这类特殊项一律不淡化：
+//   · 驱动器卷根常带 SYSTEM/HIDDEN 属性，但不是资源管理器里那个灰样子；
+//   · 控制面板项是虚拟命名空间里的对象（路径是 CLSID 或空），既不能真剪切、
+//     属性也带 SYSTEM，跟着变灰就完全不是资源管理器的样子了。
+static bool ShouldSkipDimming(const shell::ShellEntry& entry)
+{
+    if (IsDriveRootPath(entry.fullPath) || entry.diskTotal > 0)
+    {
+        return true;   // 驱动器 / 磁盘卡片
+    }
+
+    return !IsFileSystemPath(entry.fullPath);   // 控制面板、虚拟项等
+}
+
 // ============================================================================
 // 小图标视图的列宽参数：
 //   名字能显示多宽 = 300，列与列之间空 20，图标 16 + 图标与文字之间 4
@@ -606,10 +646,11 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
     // 半透明图标不是"另存一份完整图标列表"，而是用到哪个图标才给哪个做一份
     // 50% alpha 的副本，塞进同一个 image list 并按"原索引 → 淡索引"缓存
     // （实现见 IconCache::GetDimmedIconIndex）。所以隐藏项接进来几乎不增加负担。
-    // 驱动器（有容量信息的卷）不淡化：卷根的系统属性常常带 SYSTEM/HIDDEN。
-    if (IsCutPath(entry.fullPath) ||
-        (!IsDriveRootPath(entry.fullPath) && entry.diskTotal == 0 &&
-         (entry.isHidden || entry.isSystemFile)))
+    // 驱动器、控制面板这类特殊项不参与淡化（见 ShouldSkipDimming）。
+    const bool dimThisEntry = !ShouldSkipDimming(entry);
+
+    if (dimThisEntry &&
+        (IsCutPath(entry.fullPath) || entry.isHidden || entry.isSystemFile))
     {
         iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex, iconSize);
     }
@@ -704,12 +745,11 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     //   · 被剪切的项目                        → RGB(160,160,160)
     //   · 隐藏的文件和文件夹、受保护的系统文件 → RGB(100,100,100)
     // 剪切优先：一个隐藏项被剪切时，按"被剪切"的颜色显示。
-    const bool dimByCut       = IsCutPath(entry.fullPath);
-    // 淡化（灰掉）只看隐藏属性和"被剪切"两种情况。
-    // 驱动器（盘符根 D:\ 这种）和磁盘卡片不算：系统给卷根打的属性里常常带
-    // SYSTEM/HIDDEN，照它变灰就不是资源管理器的样子了。
-    const bool isDriveLike = IsDriveRootPath(entry.fullPath) || entry.diskTotal > 0;
-    const bool dimByAttribute = (!dimByCut && !isDriveLike &&
+    // 驱动器、控制面板这类特殊项不参与淡化（见 ShouldSkipDimming），
+    // 哪怕是剪贴板里刚 Ctrl+X 过它们也不变灰
+    const bool skipDim       = ShouldSkipDimming(entry);
+    const bool dimByCut      = (!skipDim && IsCutPath(entry.fullPath));
+    const bool dimByAttribute = (!skipDim && !dimByCut &&
                                  (entry.isHidden || entry.isSystemFile));
 
     if (dimByCut)
@@ -2548,15 +2588,19 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             {
                 const shell::ShellEntry& entry = m_result->entries[index];
 
+                // 驱动器、控制面板这类特殊项一律不淡化，被剪切也不变灰
+                if (ShouldSkipDimming(entry))
+                {
+                    return CDRF_DODEFAULT;
+                }
+
                 if (IsCutPath(entry.fullPath))
                 {
                     customDraw->clrText = RGB(160, 160, 160);
                     return CDRF_NEWFONT;   // 告诉控件按我改的颜色画
                 }
 
-                // 驱动器（盘符根 / 磁盘卡片）不淡化：卷根的系统属性常带 SYSTEM/HIDDEN
-                if (!IsDriveRootPath(entry.fullPath) && entry.diskTotal == 0 &&
-                    (entry.isHidden || entry.isSystemFile))
+                if (entry.isHidden || entry.isSystemFile)
                 {
                     customDraw->clrText = RGB(100, 100, 100);
                     return CDRF_NEWFONT;
