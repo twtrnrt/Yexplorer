@@ -57,6 +57,17 @@ static const int kRenameEditExtraWidth = 17;
 // 单行改名框的高度：列表视图的行距也是 24（和小图标一致），框正好贴满一行
 static const int kRenameEditHeight = 24;
 
+// 是不是"盘符根"路径（形如 D:\ 、V:\ ）。
+// 用来看某个项是不是驱动器卷：卷根的系统属性经常带 SYSTEM/HIDDEN，
+// 但资源管理器从不会把驱动器画成灰色/半透明，所以这类项一律不淡化。
+static bool IsDriveRootPath(const std::wstring& path)
+{
+    return path.size() == 3 &&
+           ::iswalpha(static_cast<wint_t>(path[0])) != 0 &&
+           path[1] == L':' &&
+           path[2] == L'\\';
+}
+
 // ============================================================================
 // 小图标视图的列宽参数：
 //   名字能显示多宽 = 300，列与列之间空 20，图标 16 + 图标与文字之间 4
@@ -595,7 +606,10 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
     // 半透明图标不是"另存一份完整图标列表"，而是用到哪个图标才给哪个做一份
     // 50% alpha 的副本，塞进同一个 image list 并按"原索引 → 淡索引"缓存
     // （实现见 IconCache::GetDimmedIconIndex）。所以隐藏项接进来几乎不增加负担。
-    if (IsCutPath(entry.fullPath) || entry.isHidden || entry.isSystemFile)
+    // 驱动器（有容量信息的卷）不淡化：卷根的系统属性常常带 SYSTEM/HIDDEN。
+    if (IsCutPath(entry.fullPath) ||
+        (!IsDriveRootPath(entry.fullPath) && entry.diskTotal == 0 &&
+         (entry.isHidden || entry.isSystemFile)))
     {
         iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex, iconSize);
     }
@@ -691,7 +705,12 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
     //   · 隐藏的文件和文件夹、受保护的系统文件 → RGB(100,100,100)
     // 剪切优先：一个隐藏项被剪切时，按"被剪切"的颜色显示。
     const bool dimByCut       = IsCutPath(entry.fullPath);
-    const bool dimByAttribute = (!dimByCut && (entry.isHidden || entry.isSystemFile));
+    // 淡化（灰掉）只看隐藏属性和"被剪切"两种情况。
+    // 驱动器（盘符根 D:\ 这种）和磁盘卡片不算：系统给卷根打的属性里常常带
+    // SYSTEM/HIDDEN，照它变灰就不是资源管理器的样子了。
+    const bool isDriveLike = IsDriveRootPath(entry.fullPath) || entry.diskTotal > 0;
+    const bool dimByAttribute = (!dimByCut && !isDriveLike &&
+                                 (entry.isHidden || entry.isSystemFile));
 
     if (dimByCut)
     {
@@ -2353,7 +2372,10 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
     // --------------------------------------------------------------
     case NM_CLICK:
     {
-        if (m_viewMode == ViewMode::Tiles && m_result != nullptr)
+        // 平铺 / 小图标 / 列表：单击"已经选中的那一项"就是进改名（和资源管理器一致）。
+        // 双击仍然走 NM_DBLCLK 打开文件，这里用"距上次点击是否超过双击时间"分开两种情况。
+        if ((m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon ||
+             m_viewMode == ViewMode::List) && m_result != nullptr)
         {
             const NMITEMACTIVATE* click = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
             const int hitIndex = (click != nullptr) ? click->iItem : -1;
@@ -2532,7 +2554,9 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                     return CDRF_NEWFONT;   // 告诉控件按我改的颜色画
                 }
 
-                if (entry.isHidden || entry.isSystemFile)
+                // 驱动器（盘符根 / 磁盘卡片）不淡化：卷根的系统属性常带 SYSTEM/HIDDEN
+                if (!IsDriveRootPath(entry.fullPath) && entry.diskTotal == 0 &&
+                    (entry.isHidden || entry.isSystemFile))
                 {
                     customDraw->clrText = RGB(100, 100, 100);
                     return CDRF_NEWFONT;
