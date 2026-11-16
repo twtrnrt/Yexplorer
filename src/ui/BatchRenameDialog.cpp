@@ -117,6 +117,19 @@ const COLORREF kPrimaryBorder     = RGB(0, 90, 170);
 
 const wchar_t* kTitleText = L"批量重命名";
 
+// ----------------------------------------------------------------------------
+// 只把一小块地方标成"待重画"。
+// 为什么不用 InvalidateRect(hWnd, nullptr)：那样整窗都要重画，
+// 列表、输入框、下拉跟着白一下，用户看到的就是"鼠标一滑满屏闪"。
+// ----------------------------------------------------------------------------
+inline void InvalidatePiece(HWND hWnd, const RECT& rect)
+{
+    if (hWnd != nullptr && rect.right > rect.left && rect.bottom > rect.top)
+    {
+        ::InvalidateRect(hWnd, &rect, FALSE);
+    }
+}
+
 // 文件名里不允许出现的字符（Windows 规则）
 const wchar_t* kInvalidChars = L"<>:\"/\\|?*";
 
@@ -612,7 +625,9 @@ bool BatchRenameDialog::CreateDialogWindow()
     m_hWnd = ::CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
                                kClassName,
                                L"批量重命名",
-                               WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                               // WS_CLIPCHILDREN 很关键：不然父窗口一重绘就连列表、
+                               // 输入框、下拉那些子控件的位置也一起刷白，看着就是整块闪
+                               WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
                                x, y, width, height,
                                m_hOwner,
                                nullptr,
@@ -1159,6 +1174,11 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
 {
     m_templates.clear();
 
+    // 先把 10 个默认空槽摆上，读到文件内容再一个个盖掉。
+    // 这一步必须放在读文件之前：文件不存在（第一次用）时下面会直接 return，
+    // 那时如果 m_templates 还是空的，模板按钮一个都画不出来、也点不动。
+    EnsureTemplateSlots();
+
     const std::wstring path = TemplateFilePath();
     if (path.empty())
     {
@@ -1168,7 +1188,7 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
     FILE* file = nullptr;
     if (::_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr)
     {
-        return;   // 第一次用，还没有这个文件，算正常
+        return;   // 第一次用，还没有这个文件，算正常（用刚补上的 10 个空槽）
     }
 
     std::string bytes;
@@ -1186,6 +1206,10 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
 
     RenameTemplate current = {};
     bool           hasCurrent = false;
+
+    // 文件里的模板先装在这里，读完再覆盖到固定的 10 个槽上
+    // （不能直接往 m_templates 后面 push，那会变成 20 个槽）
+    std::vector<RenameTemplate> loaded;
 
     size_t position = 0;
 
@@ -1206,7 +1230,7 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
         {
             if (hasCurrent && !current.name.empty())
             {
-                m_templates.push_back(current);
+                loaded.push_back(current);
             }
 
             current    = {};
@@ -1307,7 +1331,13 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
 
     if (hasCurrent && !current.name.empty())
     {
-        m_templates.push_back(current);
+        loaded.push_back(current);
+    }
+
+    // 读到的模板从上往下填进前几个槽，多出来的丢掉，缺的还是默认空槽
+    for (size_t i = 0; i < loaded.size() && i < m_templates.size(); ++i)
+    {
+        m_templates[i] = loaded[i];
     }
 
     EnsureTemplateSlots();
@@ -1461,8 +1491,9 @@ void BatchRenameDialog::ClearAllRules()
 
     m_order.clear();   // 手动排的顺序也一起清掉
 
+    // Recalculate 会把底部统计、冲突提示和四个按钮重画一遍；
+    // 高亮的是哪个模板没变，所以模板行不用单独刷
     Recalculate();
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
 }
 
 bool BatchRenameDialog::SaveCurrentSlot()
@@ -1482,7 +1513,9 @@ bool BatchRenameDialog::SaveCurrentSlot()
     m_hasBaseline = true;
 
     SaveTemplatesToDisk();
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+
+    // 保存完「应用」要从灰变回可点，Recalculate 会把底部那一条重画一遍
+    Recalculate();
 
     return true;
 }
@@ -1536,14 +1569,24 @@ void BatchRenameDialog::OnTemplateSlotClick(int index)
         return;   // 上一个模板还有没保存的修改，用户选择"留在"
     }
 
+    const int previous = m_selectedTemplate;
+
     m_selectedTemplate = index;
     ApplyTemplateToControls(m_templates[index]);
 
     m_baseline    = m_templates[index];
     m_hasBaseline = true;
 
+    // 底部（「保存」出现、统计变化）由 Recalculate 重画；
+    // 模板行只把"原来高亮的"和"现在高亮的"两个槽刷一遍，别整窗刷
     Recalculate();
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+
+    if (previous >= 0 && previous < static_cast<int>(m_templateRects.size()))
+    {
+        InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(previous)]);
+    }
+
+    InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(index)]);
 }
 
 void BatchRenameDialog::BeginTemplateRename(int index)
@@ -1616,7 +1659,15 @@ void BatchRenameDialog::CommitTemplateRename()
         SaveTemplatesToDisk();
     }
 
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+    // 只把改过名的那个槽刷一遍
+    if (index >= 0 && index < static_cast<int>(m_templateRects.size()))
+    {
+        InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(index)]);
+    }
+    else
+    {
+        ::InvalidateRect(m_hWnd, nullptr, FALSE);
+    }
 }
 
 void BatchRenameDialog::CancelTemplateRename()
@@ -1627,11 +1678,18 @@ void BatchRenameDialog::CancelTemplateRename()
     }
 
     HWND edit = m_hRenameEdit;
+    const int index = m_renameIndex;
+
     m_hRenameEdit = nullptr;
     m_renameIndex = -1;
 
     ::DestroyWindow(edit);
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+
+    // 取消改名：把那个槽的按钮重新画回来（只刷这一块）
+    if (index >= 0 && index < static_cast<int>(m_templateRects.size()))
+    {
+        InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(index)]);
+    }
 }
 
 void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
@@ -2653,7 +2711,58 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
     {
         PAINTSTRUCT paintStruct = {};
         HDC dc = ::BeginPaint(hWnd, &paintStruct);
-        Draw(dc);
+
+        // 双缓冲：先整块画到内存位图，再一次性贴到窗口。
+        // 这个窗口大半是自绘的（按钮、模板槽、统计文字），每个按钮都要新建
+        // 画刷和画笔，如果直接画到窗口上，鼠标滑过去就是清清楚楚一片白闪。
+        RECT client = {};
+        ::GetClientRect(hWnd, &client);
+
+        const int width  = client.right - client.left;
+        const int height = client.bottom - client.top;
+
+        HDC     memDc     = ::CreateCompatibleDC(dc);
+        HBITMAP bitmap    = nullptr;
+        HGDIOBJ oldBitmap = nullptr;
+
+        if (memDc != nullptr && width > 0 && height > 0)
+        {
+            bitmap = ::CreateCompatibleBitmap(dc, width, height);
+        }
+
+        if (bitmap != nullptr)
+        {
+            oldBitmap = ::SelectObject(memDc, bitmap);
+
+            // 内存位图先用白底铺满，保证没有上一帧的残影
+            ::FillRect(memDc, &client, m_whiteBrush);
+            Draw(memDc);
+
+            // 只把真正需要更新的那一块贴到屏幕上（有 WS_CLIPCHILDREN，
+            // 这块区域不会落在子控件上，所以不会盖掉列表和输入框）
+            const RECT& dirty = paintStruct.rcPaint;
+
+            if (dirty.right > dirty.left && dirty.bottom > dirty.top)
+            {
+                ::BitBlt(dc, dirty.left, dirty.top,
+                         dirty.right - dirty.left, dirty.bottom - dirty.top,
+                         memDc, dirty.left, dirty.top, SRCCOPY);
+            }
+
+            ::SelectObject(memDc, oldBitmap);
+            ::DeleteObject(bitmap);
+            ::DeleteDC(memDc);
+        }
+        else
+        {
+            // 退路：内存位图建不出来（极端情况），直接把内容画到窗口上
+            if (memDc != nullptr)
+            {
+                ::DeleteDC(memDc);
+            }
+            Draw(dc);
+        }
+
         ::EndPaint(hWnd, &paintStruct);
         return 0;
     }
@@ -2918,12 +3027,31 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
             overSave != m_hotSave || overApply != m_hotApply ||
             overSlot != m_hotTemplate)
         {
+            // 只刷"状态变了"的那一块，别整窗刷新（整窗刷会连带列表一起白闪）
+            if (overCancel != m_hotCancel) { InvalidatePiece(hWnd, m_cancelRect); }
+            if (overClear  != m_hotClear)  { InvalidatePiece(hWnd, m_clearRect); }
+            if (overSave   != m_hotSave)   { InvalidatePiece(hWnd, m_saveRect); }
+            if (overApply  != m_hotApply)  { InvalidatePiece(hWnd, m_applyRect); }
+
+            if (overSlot != m_hotTemplate)
+            {
+                if (m_hotTemplate >= 0 &&
+                    m_hotTemplate < static_cast<int>(m_templateRects.size()))
+                {
+                    InvalidatePiece(hWnd, m_templateRects[static_cast<size_t>(m_hotTemplate)]);
+                }
+
+                if (overSlot >= 0)
+                {
+                    InvalidatePiece(hWnd, m_templateRects[static_cast<size_t>(overSlot)]);
+                }
+            }
+
             m_hotCancel = overCancel;
             m_hotClear  = overClear;
             m_hotSave   = overSave;
             m_hotApply  = overApply;
             m_hotTemplate = overSlot;
-            ::InvalidateRect(hWnd, nullptr, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -2952,12 +3080,23 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
         if (m_hotCancel || m_hotClear || m_hotSave || m_hotApply || m_hotTemplate >= 0)
         {
+            // 同样只刷那几个恢复成普通样子的按钮
+            if (m_hotCancel) { InvalidatePiece(hWnd, m_cancelRect); }
+            if (m_hotClear)  { InvalidatePiece(hWnd, m_clearRect); }
+            if (m_hotSave)   { InvalidatePiece(hWnd, m_saveRect); }
+            if (m_hotApply)  { InvalidatePiece(hWnd, m_applyRect); }
+
+            if (m_hotTemplate >= 0 &&
+                m_hotTemplate < static_cast<int>(m_templateRects.size()))
+            {
+                InvalidatePiece(hWnd, m_templateRects[static_cast<size_t>(m_hotTemplate)]);
+            }
+
             m_hotCancel   = false;
             m_hotClear    = false;
             m_hotSave     = false;
             m_hotApply    = false;
             m_hotTemplate = -1;
-            ::InvalidateRect(hWnd, nullptr, FALSE);
         }
         return 0;
     }
@@ -2985,7 +3124,7 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
             m_pressedTemplate = hitSlot;
             ::SetFocus(hWnd);            // 别让改名的输入框的失焦逻辑误伤
             ::SetCapture(hWnd);
-            ::InvalidateRect(hWnd, nullptr, FALSE);
+            InvalidatePiece(hWnd, m_templateRects[static_cast<size_t>(hitSlot)]);
             return 0;
         }
 
@@ -3007,7 +3146,12 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (overCancel || overClear || overSave || overApply)
         {
             ::SetCapture(hWnd);
-            ::InvalidateRect(hWnd, nullptr, FALSE);
+
+            // 只刷按下去的那一个按钮
+            if (overCancel) { InvalidatePiece(hWnd, m_cancelRect); }
+            if (overClear)  { InvalidatePiece(hWnd, m_clearRect); }
+            if (overSave)   { InvalidatePiece(hWnd, m_saveRect); }
+            if (overApply)  { InvalidatePiece(hWnd, m_applyRect); }
         }
         return 0;
     }
@@ -3047,7 +3191,7 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
                 }
             }
 
-            ::InvalidateRect(hWnd, nullptr, FALSE);
+            InvalidatePiece(hWnd, m_templateRects[static_cast<size_t>(wasSlot)]);
 
             if (overSlot == wasSlot)
             {
@@ -3075,7 +3219,12 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         m_pressedClear  = false;
         m_pressedSave   = false;
         m_pressedApply  = false;
-        ::InvalidateRect(hWnd, nullptr, FALSE);
+
+        // 松开时只把刚才按下去的那个按钮刷回普通样子
+        if (wasCancel) { InvalidatePiece(hWnd, m_cancelRect); }
+        if (wasClear)  { InvalidatePiece(hWnd, m_clearRect); }
+        if (wasSave)   { InvalidatePiece(hWnd, m_saveRect); }
+        if (wasApply)  { InvalidatePiece(hWnd, m_applyRect); }
 
         if (wasCancel && overCancel)
         {
