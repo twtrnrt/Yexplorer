@@ -219,6 +219,10 @@ public:
 private:
     void ApplyColumns();
     void LayoutColumns();
+
+    // 列表视图（单列那种）：控件自己按"最长名字"算列宽，窗口变宽后它不会重算，
+    // 结果右边留一大片空白、名字还在老位置被截断。这里把每项宽度按客户区重设一遍。
+    void LayoutListWidth();
     void ApplyFont();
 
     // 按当前视图决定这项该用小图标还是大图标索引

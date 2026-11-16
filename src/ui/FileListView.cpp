@@ -278,7 +278,9 @@ void FileListView::SetViewMode(ViewMode mode)
     // 虚拟列表（LVS_OWNERDATA）配 LVS_SMALLICON 时，控件的列宽算不准 ——
     // 刚切过去会挤成一团、拉宽窗口反而只剩一列。用 LVS_ICON + 固定格子宽就稳定。
     case ViewMode::SmallIcon: viewStyle = LVS_ICON;      break;
-    case ViewMode::List:      viewStyle = LVS_LIST;      break;
+    // 列表也用图标布局：控件在 LVS_LIST 下按"最长名字"算列宽、窗口拉宽不重算，
+    // 右边一大片空白、名字还被截断。用 LVS_ICON + 格宽=客户区宽，一行一个，竖排照旧。
+    case ViewMode::List:      viewStyle = LVS_ICON;      break;
     case ViewMode::Details:
     default:                  viewStyle = LVS_REPORT;    break;
     }
@@ -347,6 +349,12 @@ void FileListView::SetViewMode(ViewMode mode)
     if (m_result != nullptr)
     {
         ListView_SetItemCount(m_hWnd, static_cast<int>(m_result->entries.size()));
+    }
+
+    // 列表视图：每项宽度按客户区重设（控件自己算的列宽在窗口变宽后不会更新）
+    if (mode == ViewMode::List)
+    {
+        LayoutListWidth();
     }
 
     ::RedrawWindow(m_hWnd, nullptr, nullptr,
@@ -599,14 +607,8 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
 RECT FileListView::ComputeTileNameRect(HDC dc, const RECT& tileRect,
                                        const shell::ShellEntry& entry) const
 {
-    // 小图标：16px 图标在左，名字从图标右边开始，单行、整格垂直居中
-    if (m_viewMode == ViewMode::SmallIcon)
-    {
-        // 注意不能把变量叫 small：Windows 头文件里 small 是个宏（展开成 char）
-        RECT nameBox = { tileRect.left + 22, tileRect.top + 1, tileRect.right - 8, tileRect.bottom - 1 };
-        return nameBox;
-    }
-
+    // 小图标的改名用的是控件自带的编辑框（单行、随内容加长），
+    // 这里只服务于平铺的自建多行编辑框，所以只算平铺的名字矩形。
     const int textLeft = tileRect.left + 62;
 
     if (entry.diskTotal > 0)
@@ -742,8 +744,8 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
         }
     }
 
-    // ---- 小图标：16px 图标在左、单行名字在右，整格垂直居中 ----
-    if (m_viewMode == ViewMode::SmallIcon)
+    // ---- 小图标 / 列表：16px 图标在左、单行名字在右，整格垂直居中 ----
+    if (m_viewMode == ViewMode::SmallIcon || m_viewMode == ViewMode::List)
     {
         HGDIOBJ oldFont = ::SelectObject(dc, m_hFont);
         ::SetBkMode(dc, TRANSPARENT);
@@ -757,12 +759,15 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
                              tileRect.left + 2, iconTop, ILD_TRANSPARENT);
         }
 
-        // 名字在图标右边：左起 22（图标 16 + 间距 4 + 2），右侧留 8
-        // 正在改名的那一行不画名字（位置让给自建编辑框）
+        // 名字在图标右边：左起 22（图标 16 + 间距 4 + 2）。
+        // 右边留白：小图标格宽固定，留 8 让出列间距；列表一行占满宽度，留 2 就够
+        const int rightPad = (m_viewMode == ViewMode::SmallIcon) ? 8 : 2;
+
+        // 正在改名的那一行不画名字（位置让给编辑框）
         if (static_cast<int>(index) != m_editingIndex)
         {
             RECT nameRect = { tileRect.left + 22, tileRect.top + 1,
-                              tileRect.right - 8, tileRect.bottom - 1 };
+                              tileRect.right - rightPad, tileRect.bottom - 1 };
 
             ::SetTextColor(dc, nameColor);
             ::DrawTextW(dc, entry.name.c_str(), -1, &nameRect,
@@ -892,6 +897,43 @@ void FileListView::DrawTile(HDC dc, const RECT& tileRect, size_t index, bool sel
 
 
 
+// 列表视图（单列那种）的每项宽度
+//
+// 控件自己在 LVS_LIST 下是按"这批里最长的名字"算列宽的，窗口拉宽以后它不会重算，
+// 于是右边留一大片空白、名字还在老宽度里被截断。虚拟列表（LVS_OWNERDATA）下更不准。
+//
+// 所以列表视图也改用 LVS_ICON：格子宽直接设成"客户区宽"，一行只有一个格子，
+// 看起来还是列表那种竖排，但每行占满宽度，名字能吃满整行。
+void FileListView::LayoutListWidth()
+{
+    if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    RECT clientRect = {};
+    ::GetClientRect(m_hWnd, &clientRect);
+
+    // 每行占满客户区，只扣掉竖直滚动条那一条（不然文字会顶到滚动条上）
+    int itemWidth = (clientRect.right - clientRect.left) - ::GetSystemMetrics(SM_CXVSCROLL);
+    if (itemWidth < 100)
+    {
+        itemWidth = 100;
+    }
+
+    // 行高 20：和系统列表视图一样，一行一个，紧挨着排。
+    // 宽度没变就别重复设：拖窗口时 Resize 会连续来，重复 SetIconSpacing 会让控件反复重排
+    const DWORD currentSpacing = static_cast<DWORD>(
+        ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+    if (static_cast<int>(LOWORD(currentSpacing)) == itemWidth &&
+        static_cast<int>(HIWORD(currentSpacing)) == 20)
+    {
+        return;
+    }
+
+    ListView_SetIconSpacing(m_hWnd, itemWidth, 20);
+}
+
 void FileListView::Resize(int x, int y, int width, int height)
 {
     if (m_hWnd == nullptr)
@@ -903,6 +945,12 @@ void FileListView::Resize(int x, int y, int width, int height)
                    SWP_NOZORDER | SWP_NOACTIVATE);
 
     LayoutColumns();
+
+    // 列表视图的名字占满宽度要跟着窗口走，否则拉宽窗口后右边一片空白、名字还是被截着
+    if (m_viewMode == ViewMode::List)
+    {
+        LayoutListWidth();
+    }
 
     // 平铺视图下格子宽度是固定的 300，这里不用跟着窗口改
 }
@@ -1510,8 +1558,9 @@ void FileListView::BeginRenameSelected()
         return;
     }
 
-    // 平铺和小图标都走自己建的编辑框（控件自带的那个位置和高度都不对）
-    if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon)
+    // 只有平铺走自己建的编辑框（自带的那个是单行框，做不出"三行高 + 字贴左上"）。
+    // 小图标仍旧用控件自带的编辑框：单行、宽度随内容自动加长，跟以前一样。
+    if (m_viewMode == ViewMode::Tiles)
     {
         BeginTileRename(selectedIndex);
         return;
@@ -2044,11 +2093,12 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         switch (displayInfo->item.iSubItem)
         {
         case 0:   // 名称
-            // 平铺和小图标都是整格自己画的，控件这里的文字只被它用来算格子大小：
+            // 平铺、小图标、列表都是整格自己画的，控件这里的文字只被它用来算格子大小：
             // 名字越长它把格子算得越高/越宽（平铺能算到 89 高，行距只有 68），
             // 自绘的背景就会溢出压到下一行、或者列宽被顶大。
             // 既然用不到，交空串，让格子尺寸只按图标算，稳定下来。
-            if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon)
+            if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon ||
+                m_viewMode == ViewMode::List)
             {
                 displayInfo->item.pszText = const_cast<wchar_t*>(L"");
             }
@@ -2269,10 +2319,11 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                 return CDRF_SKIPDEFAULT;   // 这一行已经画完了，别再让控件画
             }
 
-            // ---- 平铺 / 小图标：每个格子整块自己画 ----
-            // 平铺画 48px 图标 + 三行名字 + 容量进度条；小图标画 16px 图标 + 单行名字，
-            // 具体分支在 DrawTile 里按 m_viewMode 走
-            if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon)
+            // ---- 平铺 / 小图标 / 列表：每个格子整块自己画 ----
+            // 平铺画 48px 图标 + 三行名字 + 容量进度条；小图标画 16px 图标 + 单行名字；
+            // 列表一行占满宽度、也是 16px 图标 + 单行名字。具体分支在 DrawTile 里按 m_viewMode 走
+            if (m_viewMode == ViewMode::Tiles || m_viewMode == ViewMode::SmallIcon ||
+                m_viewMode == ViewMode::List)
             {
                 RECT tileRect = {};
                 if (ListView_GetItemRect(m_hWnd, static_cast<int>(index), &tileRect, LVIR_BOUNDS))
