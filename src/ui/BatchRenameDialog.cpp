@@ -89,6 +89,7 @@ enum RuleField
     kRfCaseSensitive,   // 区分大小写（复选框）
 
     kRfNumberEnable,    // 加序号（复选框）
+    kRfNumberReplace,   // 替换（复选框：序号直接当新名字，原文件名不要了）
     kRfNumberStart,     // 起始
     kRfNumberStep,      // 步长
     kRfNumberDigits,    // 位数
@@ -126,13 +127,14 @@ const RuleFieldSpec kRuleSpecs[kRfCount] =
     { nullptr,   -1, -1, 712,  90, 1, 22 },          // 含扩展名
     { nullptr,   -1, -1, 810, 110, 1, 22 },          // 区分大小写
 
-    // ---- 第 2 行：加序号（含三个数字）/ 位置 / 分隔符 ----
+    // ---- 第 2 行：加序号（含三个数字）/ 位置 / 分隔符 / 替换 ----
     { nullptr,   -1, -1,  20,  84, 2, 22 },          // 加序号
-    { L"起始",  112, 33, 148,  60, 2, 24 },          // 起始
-    { L"步长",  216, 33, 252,  60, 2, 24 },          // 步长
-    { L"位数",  320, 33, 356,  60, 2, 24 },          // 位数
-    { L"位  置", 424, 53, 480, 140, 2, 24 * 3 },     // 位置下拉（2 项）
-    { L"分隔符", 636, 53, 692, 140, 2, 24 }          // 分隔符
+    { nullptr,   -1, -1, 112,  53, 2, 22 },          // 替换（勾上就只剩序号，原名不要了）
+    { L"起始",  173, 33, 211,  60, 2, 24 },          // 起始
+    { L"步长",  279, 33, 317,  60, 2, 24 },          // 步长
+    { L"位数",  385, 33, 423,  60, 2, 24 },          // 位数
+    { L"位  置", 491, 53, 549, 140, 2, 24 * 3 },     // 位置下拉（2 项）
+    { L"分隔符", 697, 53, 755,  70, 2, 24 }          // 分隔符（70 宽，一般就填一个符号）
 };
 
 // 控件 ID
@@ -160,6 +162,7 @@ enum : int
     kIdRegex         = 5017,   // 预留（原来的"查找按正则处理"复选框，已并入查找方式）
     kIdRegexPreset   = 5018,   // 预留（查找方式从下拉改成自绘按钮 + 菜单，不再有窗口控件）
     kIdIncludeExt    = 5019,   // 含扩展名（查找替换是否连扩展名一起处理）
+    kIdNumberReplace = 5020,   // 替换（序号直接当新名字，原文件名不要了）
 
     kIdList          = 5100,   // 预览列表
     kIdCancel        = 5101,   // 取消（自绘按钮）
@@ -876,7 +879,24 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hNumberPos, CB_SETCURSEL, 0, 0);
     }
 
-    m_hNumberSep = createEdit(kIdNumberSep, L"-");
+    // 分隔符：默认就填一个「-」，跟结构体里的默认值一致；
+    // 清空它才是"序号和原名直接粘在一起"（提示文字写明这一点，免得看到框是空的又以为有 -
+    m_hNumberSep = createEdit(kIdNumberSep, L"空＝直接拼");
+    if (m_hNumberSep != nullptr)
+    {
+        ::SetWindowTextW(m_hNumberSep, L"-");
+    }
+
+    // 替换：勾上以后，原来那一长串文件名整个不要了，新名字就是序号本身
+    m_hNumberReplace = ::CreateWindowExW(0, L"BUTTON", L"替换",
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                         0, 0, 0, 0, m_hWnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNumberReplace)),
+                                         instance, nullptr);
+    if (m_hNumberReplace != nullptr)
+    {
+        ::SendMessageW(m_hNumberReplace, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+    }
 
     // ---- 扩展名：只有「不修改 / 修改」两项；选「修改」时右边那个框才启用 ----
     m_hExtMode = ::CreateWindowExW(0, L"COMBOBOX", L"",
@@ -978,6 +998,7 @@ void BatchRenameDialog::Layout()
         controls[kRfIncludeExt]   = m_hIncludeExt;
         controls[kRfCaseSensitive] = m_hCaseSensitive;
         controls[kRfNumberEnable] = m_hNumberEnable;
+        controls[kRfNumberReplace] = m_hNumberReplace;
         controls[kRfNumberStart]  = m_hNumberStart;
         controls[kRfNumberStep]   = m_hNumberStep;
         controls[kRfNumberDigits] = m_hNumberDigits;
@@ -1093,12 +1114,25 @@ void BatchRenameDialog::EnableRuleControls()
     const bool numberOn = (m_hNumberEnable != nullptr) &&
                           (::SendMessageW(m_hNumberEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
+    // 「替换」勾上 = 原文件名整个不要了，只剩序号，这时位置和分隔符都没意义
+    const bool replaceOn = (m_hNumberReplace != nullptr) &&
+                           (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
     for (HWND control : { m_hNumberStart, m_hNumberStep, m_hNumberDigits,
-                          m_hNumberPos, m_hNumberSep })
+                          m_hNumberReplace })
     {
         if (control != nullptr)
         {
             ::EnableWindow(control, numberOn ? TRUE : FALSE);
+        }
+    }
+
+    const bool attachOn = numberOn && !replaceOn;   // 序号要跟原名拼在一起时才用得上
+    for (HWND control : { m_hNumberPos, m_hNumberSep })
+    {
+        if (control != nullptr)
+        {
+            ::EnableWindow(control, attachOn ? TRUE : FALSE);
         }
     }
 
@@ -1298,6 +1332,10 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 {
                     current.number = (value == L"1");
                 }
+                else if (key == L"numberreplace")
+                {
+                    current.numberReplace = (value == L"1");
+                }
                 else if (key == L"start")
                 {
                     current.numberStart = ::_wtoi(value.c_str());
@@ -1392,6 +1430,7 @@ void BatchRenameDialog::SaveTemplatesToDisk() const
         // 老字段顺手写上：万一用户换回旧版程序，至少"是否按正则"还能对上
         text += std::wstring(L"regex=") + ((item.regexPreset != 0) ? L"1" : L"0") + L"\r\n";
         text += std::wstring(L"number=") + (item.number ? L"1" : L"0") + L"\r\n";
+        text += std::wstring(L"numberreplace=") + (item.numberReplace ? L"1" : L"0") + L"\r\n";
         text += L"start=" + std::to_wstring(item.numberStart) + L"\r\n";
         text += L"step=" + std::to_wstring(item.numberStep) + L"\r\n";
         text += L"digits=" + std::to_wstring(item.numberDigits) + L"\r\n";
@@ -1462,6 +1501,7 @@ static bool SameRules(const RenameTemplate& a, const RenameTemplate& b)
            a.includeExt == b.includeExt &&
            a.regexPreset == b.regexPreset &&
            a.number == b.number &&
+           a.numberReplace == b.numberReplace &&
            a.numberStart == b.numberStart &&
            a.numberStep == b.numberStep &&
            a.numberDigits == b.numberDigits &&
@@ -1762,9 +1802,11 @@ void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
 
     out.number       = (m_hNumberEnable != nullptr) &&
                        (::SendMessageW(m_hNumberEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    out.numberReplace = (m_hNumberReplace != nullptr) &&
+                        (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
     out.numberStart  = static_cast<int>(ReadInteger(m_hNumberStart, 1, 0));
     out.numberStep   = static_cast<int>(ReadInteger(m_hNumberStep, 1, 1));
-    out.numberDigits = static_cast<int>(ReadInteger(m_hNumberDigits, 1, 1));
+    out.numberDigits = static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1));
     out.numberPos    = ComboSelection(m_hNumberPos);
     out.numberSep    = GetTextOf(m_hNumberSep);
 
@@ -1822,6 +1864,11 @@ void BatchRenameDialog::ApplyTemplateToControls(const RenameTemplate& tpl)
     {
         ::SendMessageW(m_hNumberEnable, BM_SETCHECK,
                        tpl.number ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (m_hNumberReplace != nullptr)
+    {
+        ::SendMessageW(m_hNumberReplace, BM_SETCHECK,
+                       tpl.numberReplace ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     if (m_hNumberStart != nullptr)
     {
@@ -2317,19 +2364,32 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
     {
         const long long start  = ReadInteger(m_hNumberStart, 1, 0);
         const long long step   = ReadInteger(m_hNumberStep, 1, 1);
-        const int       digits = static_cast<int>(ReadInteger(m_hNumberDigits, 1, 1));
+        // 位数框空着就用 2（跟框里那句灰色提示一致，免得"提示写 2、实际出 1 位"）
+        const int       digits = static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1));
 
         const std::wstring numberText =
             FormatNumber(start + step * static_cast<long long>(index), digits);
-        const std::wstring separator = GetTextOf(m_hNumberSep);
 
-        if (ComboSelection(m_hNumberPos) == 1)
+        const bool replaceOn = (m_hNumberReplace != nullptr) &&
+                               (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+        if (replaceOn)
         {
-            stem = numberText + separator + stem;     // 放在名字前面
+            // 替换：原文件名整个不要了，新名字就是序号本身（前缀 / 后缀仍在下面加）
+            stem = numberText;
         }
         else
         {
-            stem = stem + separator + numberText;     // 放在名字后面
+            const std::wstring separator = GetTextOf(m_hNumberSep);
+
+            if (ComboSelection(m_hNumberPos) == 1)
+            {
+                stem = numberText + separator + stem;     // 放在名字前面
+            }
+            else
+            {
+                stem = stem + separator + numberText;     // 放在名字后面
+            }
         }
     }
 
@@ -3049,7 +3109,7 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
 
         // 规则控件的任何改动 → 重算预览（查找方式已经不是控件，走的是自绘按钮 + 菜单）
-        if (controlId >= kIdPrefix && controlId <= kIdIncludeExt)
+        if (controlId >= kIdPrefix && controlId <= kIdNumberReplace)
         {
             if (notification == EN_CHANGE || notification == CBN_SELCHANGE ||
                 notification == BN_CLICKED)

@@ -74,6 +74,7 @@ struct RenameTemplate
     int          regexPreset   = 0;
 
     bool         number        = false;   // 加序号
+    bool         numberReplace = false;   // 序号直接替换原名（勾上就只剩序号，不再拼原名）
     int          numberStart   = 1;       // 起始
     int          numberStep    = 1;       // 步长
     int          numberDigits  = 2;       // 位数
@@ -246,6 +247,7 @@ private:
     HWND m_hNumberDigits = nullptr; // 位数
     HWND m_hNumberPos = nullptr;    // 位置（前缀 / 后缀）
     HWND m_hNumberSep = nullptr;    // 分隔符
+    HWND m_hNumberReplace = nullptr; // 替换（序号直接当新名字，不要原名）
 
     HWND m_hExtMode = nullptr;      // 扩展名：保留 / 改为 / 删除
     HWND m_hExtValue = nullptr;     // 扩展名改成什么
