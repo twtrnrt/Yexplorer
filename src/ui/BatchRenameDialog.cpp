@@ -62,6 +62,81 @@ const int kLeftColumnW  = 430;
 const int kRightColumnX = 490;
 const int kRightColumnW = 430;
 
+// ----------------------------------------------------------------------------
+// 参数区（4 行）里每个字段的位置
+//
+// Layout 摆控件、Draw 画标签，两边都从这一份表里取坐标：
+// 以前是 Layout 写一遍、Draw 再写一遍，改一处忘一处，标签就跟输入框错位了。
+// 数值都是 100% 缩放下的逻辑像素，Layout 里统一 Scale 一遍。
+// label 为 nullptr 表示这一格只有控件、没有左边的文字标签。
+// ----------------------------------------------------------------------------
+enum RuleField
+{
+    kRfPrefix = 0,      // 前缀
+    kRfSuffix,          // 后缀
+    kRfExtMode,         // 扩展名（下拉）
+    kRfExtValue,        // 扩展名改成什么
+    kRfCaseMode,        // 大小写（下拉）
+
+    kRfFind,            // 查找
+    kRfRegexPreset,     // 查找方式（下拉：普通查找 / 内置正则 / 自定义正则）
+    kRfReplace,         // 替换为
+    kRfIncludeExt,      // 含扩展名（复选框）
+    kRfCaseSensitive,   // 区分大小写（复选框）
+
+    kRfNumberEnable,    // 加序号（复选框）
+    kRfNumberStart,     // 起始
+    kRfNumberStep,      // 步长
+    kRfNumberDigits,    // 位数
+    kRfNumberPos,       // 位置（下拉）
+    kRfNumberSep,       // 分隔符
+
+    kRfSortMode,        // 排序（下拉）
+    kRfSortReverse,     // 倒序（复选框）
+
+    kRfCount
+};
+
+struct RuleFieldSpec
+{
+    const wchar_t* label;      // 标签文字，nullptr = 没有标签
+    int            labelX;     // 标签左边缘
+    int            labelWidth; // 标签宽
+    int            x;          // 控件左边缘
+    int            width;      // 控件宽
+    int            row;         // 第几行（0 起）
+    int            height;     // 控件高（下拉要给展开后的高度）
+};
+
+const RuleFieldSpec kRuleSpecs[kRfCount] =
+{
+    // ---- 第 0 行：前缀 / 后缀 / 扩展名 / 大小写 ----
+    { L"前  缀", 20, 52,  76, 170, 0, 24 },          // 前缀
+    { L"后  缀", 254, 52, 310, 150, 0, 24 },         // 后缀
+    { L"扩展名", 468, 52, 524, 104, 0, 24 * 4 },     // 扩展名下拉（3 项）
+    { nullptr,   -1, -1, 632,  58, 0, 24 },          // 扩展名值（选"改成指定"时才用）
+    { L"大小写", 698, 52, 754, 166, 0, 24 * 5 },     // 大小写下拉（4 项）
+
+    // ---- 第 1 行：查找（带查找方式下拉）/ 替换为 / 两个复选框 ----
+    { L"查  找",  20, 52,  76, 222, 1, 24 },         // 查找
+    { nullptr,   -1, -1, 302, 126, 1, 24 * 12 },     // 查找方式下拉（11 项）
+    { L"替换为", 436, 52, 492, 200, 1, 24 },         // 替换为
+    { nullptr,   -1, -1, 704,  90, 1, 22 },          // 含扩展名
+    { nullptr,   -1, -1, 800, 120, 1, 22 },          // 区分大小写
+
+    // ---- 第 2 行：加序号（含三个数字）/ 位置 / 分隔符 ----
+    { nullptr,   -1, -1,  20,  84, 2, 22 },          // 加序号
+    { L"起始",  112, 32, 148,  48, 2, 24 },          // 起始
+    { L"步长",  204, 32, 240,  48, 2, 24 },          // 步长
+    { L"位数",  296, 32, 332,  48, 2, 24 },          // 位数
+    { L"位  置", 388, 52, 444, 126, 2, 24 * 3 },     // 位置下拉（2 项）
+    { L"分隔符", 578, 52, 634, 126, 2, 24 },         // 分隔符
+
+    // ---- 第 3 行：排序 / 倒序（统计文字和四个按钮在下面那条底线上）----
+    { L"排  序",  20, 52,  76, 150, 3, 24 * 5 },     // 排序下拉（4 项）
+    { nullptr,   -1, -1, 236,  90, 3, 22 }           // 倒序
+};
+
 // 控件 ID
 enum : int
 {
@@ -84,8 +159,9 @@ enum : int
     kIdSortMode      = 5015,   // 排序依据
     kIdSortReverse   = 5016,   // 反向
 
-    kIdRegex         = 5017,   // 查找按正则处理
-    kIdRegexPreset   = 5018,   // 常用正则下拉
+    kIdRegex         = 5017,   // 预留（原来的"查找按正则处理"复选框，已并入查找方式下拉）
+    kIdRegexPreset   = 5018,   // 查找方式下拉：普通查找 / 内置正则 / 自定义正则
+    kIdIncludeExt    = 5019,   // 含扩展名（查找替换是否连扩展名一起处理）
 
     kIdList          = 5100,   // 预览列表
     kIdCancel        = 5101,   // 取消（自绘按钮）
@@ -724,10 +800,10 @@ void BatchRenameDialog::CreateControls()
         return edit;
     };
 
-    m_hPrefix  = createEdit(kIdPrefix,  L"给名字前面加的内容");
-    m_hSuffix  = createEdit(kIdSuffix,  L"给名字后面加的内容（扩展名前）");
-    m_hFind    = createEdit(kIdFind,    L"要在名字里查找的文字");
-    m_hReplace = createEdit(kIdReplace, L"替换成什么（留空＝删掉查到的文字）");
+    m_hPrefix  = createEdit(kIdPrefix,  L"名字前面加什么");
+    m_hSuffix  = createEdit(kIdSuffix,  L"名字后面加什么");
+    m_hFind    = createEdit(kIdFind,    L"要查找的文字");
+    m_hReplace = createEdit(kIdReplace, L"替换成什么（空＝删除）");
 
     m_hCaseSensitive = ::CreateWindowExW(0, L"BUTTON", L"区分大小写",
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -739,18 +815,19 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hCaseSensitive, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
     }
 
-    // 「查找」按正则处理
-    m_hRegex = ::CreateWindowExW(0, L"BUTTON", L"查找按正则处理",
-                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                 0, 0, 0, 0, m_hWnd,
-                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdRegex)),
-                                 instance, nullptr);
-    if (m_hRegex != nullptr)
+    // 「含扩展名」：勾上以后查找替换连扩展名一起处理（默认不勾，只动主文件名）
+    m_hIncludeExt = ::CreateWindowExW(0, L"BUTTON", L"含扩展名",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                      0, 0, 0, 0, m_hWnd,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdIncludeExt)),
+                                      instance, nullptr);
+    if (m_hIncludeExt != nullptr)
     {
-        ::SendMessageW(m_hRegex, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SendMessageW(m_hIncludeExt, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
     }
 
-    // 常用正则下拉：选中一条就把写法填进「查找」并勾上正则，省得自己敲
+    // 查找方式下拉：第 1 项普通查找，中间 9 条内置正则，最后一项自定义正则。
+    // 选普通查找 = 按文字找；选其它任何一项都按正则解释。
     m_hRegexPreset = ::CreateWindowExW(0, L"COMBOBOX", L"",
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                        CBS_DROPDOWNLIST | WS_VSCROLL,
@@ -761,11 +838,18 @@ void BatchRenameDialog::CreateControls()
     {
         ::SendMessageW(m_hRegexPreset, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
 
-        for (size_t i = 0; i < RegexPresetCount(); ++i)
+        ::SendMessageW(m_hRegexPreset, CB_ADDSTRING, 0,
+                       reinterpret_cast<LPARAM>(RegexPresetName(0)));   // 普通查找
+
+        for (size_t i = 1; i < RegexPresetCount(); ++i)
         {
             ::SendMessageW(m_hRegexPreset, CB_ADDSTRING, 0,
                            reinterpret_cast<LPARAM>(RegexPresetName(i)));
         }
+
+        // 最后一项：自定义正则（用户在查找框里自己写）
+        ::SendMessageW(m_hRegexPreset, CB_ADDSTRING, 0,
+                       reinterpret_cast<LPARAM>(L"自定义正则（自己写）"));
 
         ::SendMessageW(m_hRegexPreset, CB_SETCURSEL, 0, 0);
     }
@@ -900,136 +984,43 @@ void BatchRenameDialog::Layout()
         ListView_SetColumnWidth(m_hList, 2, innerWidth * 16 / 100);
     }
 
-    // ---- 左栏 5 行：前缀 / 后缀 / 查找（右侧带常用正则下拉）/ 替换为 / 两个复选框 ----
-    const int labelWidth = Scale(66);
-    const int editX      = Scale(kLeftColumnX) + labelWidth + Scale(8);
-    const int editWidth  = Scale(kLeftColumnW) - labelWidth - Scale(8);
-    const int editHeight = Scale(24);
-
-    auto placeRow = [&](HWND control, int row, int width)
+    // ---- 参数区 4 行：坐标全部取自 kRuleSpecs，和 Draw 画标签用的是同一份表 ----
     {
-        if (control == nullptr)
+        // 控件句柄按 RuleField 的顺序排好，摆位置时只按下标取
+        HWND controls[kRfCount] = {};
+        controls[kRfPrefix]       = m_hPrefix;
+        controls[kRfSuffix]       = m_hSuffix;
+        controls[kRfExtMode]      = m_hExtMode;
+        controls[kRfExtValue]     = m_hExtValue;
+        controls[kRfCaseMode]     = m_hCaseMode;
+        controls[kRfFind]         = m_hFind;
+        controls[kRfRegexPreset]  = m_hRegexPreset;
+        controls[kRfReplace]      = m_hReplace;
+        controls[kRfIncludeExt]   = m_hIncludeExt;
+        controls[kRfCaseSensitive] = m_hCaseSensitive;
+        controls[kRfNumberEnable] = m_hNumberEnable;
+        controls[kRfNumberStart]  = m_hNumberStart;
+        controls[kRfNumberStep]   = m_hNumberStep;
+        controls[kRfNumberDigits] = m_hNumberDigits;
+        controls[kRfNumberPos]    = m_hNumberPos;
+        controls[kRfNumberSep]    = m_hNumberSep;
+        controls[kRfSortMode]     = m_hSortMode;
+        controls[kRfSortReverse]  = m_hSortReverse;
+
+        for (int i = 0; i < kRfCount; ++i)
         {
-            return;
-        }
+            HWND control = controls[i];
+            if (control == nullptr)
+            {
+                continue;
+            }
 
-        const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * row;
-        ::MoveWindow(control, editX, top + Scale(4), width, editHeight, TRUE);
-    };
+            const RuleFieldSpec& spec = kRuleSpecs[i];
+            const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * spec.row;
+            const int y   = top + Scale(4);
 
-    placeRow(m_hPrefix,  0, editWidth);
-    placeRow(m_hSuffix,  1, editWidth);
-
-    // 「查找」这一行右边挤出 132 放常用正则下拉（查找框相应变窄）
-    const int presetWidth = Scale(132);
-    placeRow(m_hFind,     2, editWidth - presetWidth - Scale(6));
-    placeRow(m_hReplace,  3, editWidth);
-
-    if (m_hRegexPreset != nullptr)
-    {
-        const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2;
-        ::MoveWindow(m_hRegexPreset,
-                     editX + editWidth - presetWidth, top + Scale(4),
-                     presetWidth, Scale(24 * 9), TRUE);
-    }
-
-    if (m_hCaseSensitive != nullptr)
-    {
-        const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * 4;
-        ::MoveWindow(m_hCaseSensitive, Scale(kLeftColumnX), top + Scale(5),
-                     Scale(130), Scale(22), TRUE);
-    }
-
-    if (m_hRegex != nullptr)
-    {
-        const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * 4;
-        ::MoveWindow(m_hRegex, Scale(kLeftColumnX) + Scale(140), top + Scale(5),
-                     Scale(150), Scale(22), TRUE);
-    }
-
-    // ---- 右栏 ----
-    const int rightX = Scale(kRightColumnX);
-    const int rowY   = Scale(kRuleTop);
-
-    // 第 0 行：加序号  起始[ ]  步长[ ]  位数[ ]
-    {
-        const int top = rowY + Scale(kRuleRowHeight) * 0;
-
-        if (m_hNumberEnable != nullptr)
-        {
-            ::MoveWindow(m_hNumberEnable, rightX, top + Scale(5), Scale(84), Scale(22), TRUE);
-        }
-
-        const int fieldX = rightX + Scale(92);
-        const int smallEditWidth = Scale(52);
-
-        ::MoveWindow(m_hNumberStart, fieldX + Scale(32), top + Scale(4),
-                     smallEditWidth, editHeight, TRUE);
-        ::MoveWindow(m_hNumberStep, fieldX + Scale(120), top + Scale(4),
-                     smallEditWidth, editHeight, TRUE);
-        ::MoveWindow(m_hNumberDigits, fieldX + Scale(208), top + Scale(4),
-                     smallEditWidth, editHeight, TRUE);
-    }
-
-    // 第 1 行：位置[▾]  分隔符[ ]
-    {
-        const int top = rowY + Scale(kRuleRowHeight) * 1;
-
-        if (m_hNumberPos != nullptr)
-        {
-            ::MoveWindow(m_hNumberPos, rightX + Scale(56), top + Scale(4),
-                         Scale(126), Scale(24 * 3), TRUE);
-        }
-
-        if (m_hNumberSep != nullptr)
-        {
-            ::MoveWindow(m_hNumberSep, rightX + Scale(260), top + Scale(4),
-                         Scale(52), editHeight, TRUE);
-        }
-    }
-
-    // 第 2 行：扩展名[▾]  改为[ ]
-    {
-        const int top = rowY + Scale(kRuleRowHeight) * 2;
-
-        if (m_hExtMode != nullptr)
-        {
-            ::MoveWindow(m_hExtMode, rightX + Scale(56), top + Scale(4),
-                         Scale(150), Scale(24 * 4), TRUE);
-        }
-
-        if (m_hExtValue != nullptr)
-        {
-            ::MoveWindow(m_hExtValue, rightX + Scale(258), top + Scale(4),
-                         Scale(100), editHeight, TRUE);
-        }
-    }
-
-    // 第 3 行：大小写[▾]
-    {
-        const int top = rowY + Scale(kRuleRowHeight) * 3;
-
-        if (m_hCaseMode != nullptr)
-        {
-            ::MoveWindow(m_hCaseMode, rightX + Scale(56), top + Scale(4),
-                         Scale(150), Scale(24 * 5), TRUE);
-        }
-    }
-
-    // 第 4 行：排序[▾]  倒序
-    {
-        const int top = rowY + Scale(kRuleRowHeight) * 4;
-
-        if (m_hSortMode != nullptr)
-        {
-            ::MoveWindow(m_hSortMode, rightX + Scale(56), top + Scale(4),
-                         Scale(150), Scale(24 * 4), TRUE);
-        }
-
-        if (m_hSortReverse != nullptr)
-        {
-            ::MoveWindow(m_hSortReverse, rightX + Scale(216), top + Scale(5),
-                         Scale(90), Scale(22), TRUE);
+            ::MoveWindow(control, Scale(spec.x), y,
+                         Scale(spec.width), Scale(spec.height), TRUE);
         }
     }
 
@@ -1112,11 +1103,13 @@ void BatchRenameDialog::EnableRuleControls()
 }
 
 // ============================================================================
-// 常用正则预设
+// 查找方式的 9 条内置正则
 //
 // 用户不太可能背得住正则语法，所以内置一批"日常改名真用得上"的写法，
-// 下拉里选一条就把写法填进「查找」并勾上正则，改一下替换为就能用。
-// 第 0 项是"不用"，后面才是真正的写法。
+// 在下拉的「查找方式」里选一条，就把写法直接填进「查找」。
+// 下拉第 1 项是「普通查找」（= 不按正则），第 2~10 项是下面这 9 条，
+// 最后第 11 项是「自定义正则」，让用户自己在查找框里写。
+// 除「普通查找」以外，一律按正则解释。
 // ============================================================================
 
 size_t BatchRenameDialog::RegexPresetCount()
@@ -1128,7 +1121,7 @@ const wchar_t* BatchRenameDialog::RegexPresetName(size_t index)
 {
     static const wchar_t* names[] =
     {
-        L"（不用，普通查找）",
+        L"普通查找",
         L"连续数字  \\d+",
         L"副本编号 (N)",
         L"开头编号 01_",
@@ -1206,6 +1199,7 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
 
     RenameTemplate current = {};
     bool           hasCurrent = false;
+    bool           legacyRegexChecked = false;   // 老格式里"查找按正则处理"那个勾的值
 
     // 文件里的模板先装在这里，读完再覆盖到固定的 10 个槽上
     // （不能直接往 m_templates 后面 push，那会变成 20 个槽）
@@ -1230,11 +1224,19 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
         {
             if (hasCurrent && !current.name.empty())
             {
+                // 老文件里只有 regex=1/0、没有 regexpreset：
+                // 勾过正则的槽按"自定义正则"恢复（查找框里的写法原样留着）
+                if (legacyRegexChecked && current.regexPreset == 0)
+                {
+                    current.regexPreset = kRegexCustomItem;
+                }
+
                 loaded.push_back(current);
             }
 
             current    = {};
             hasCurrent = false;
+            legacyRegexChecked = false;
         }
         else if (!line.empty())
         {
@@ -1270,9 +1272,19 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 {
                     current.caseSensitive = (value == L"1");
                 }
+                else if (key == L"inclext")
+                {
+                    current.includeExt = (value == L"1");
+                }
+                else if (key == L"regexpreset")
+                {
+                    current.regexPreset = ::_wtoi(value.c_str());
+                }
                 else if (key == L"regex")
                 {
-                    current.useRegex = (value == L"1");
+                    // 老格式（勾选框时代）只有 0/1，先在旁边记一笔，
+                    // 整条模板读完再看要不要按"自定义正则"处理
+                    legacyRegexChecked = (value == L"1");
                 }
                 else if (key == L"number")
                 {
@@ -1331,6 +1343,11 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
 
     if (hasCurrent && !current.name.empty())
     {
+        if (legacyRegexChecked && current.regexPreset == 0)
+        {
+            current.regexPreset = kRegexCustomItem;
+        }
+
         loaded.push_back(current);
     }
 
@@ -1361,7 +1378,11 @@ void BatchRenameDialog::SaveTemplatesToDisk() const
         text += L"find=" + item.find + L"\r\n";
         text += L"replace=" + item.replace + L"\r\n";
         text += std::wstring(L"caseSensitive=") + (item.caseSensitive ? L"1" : L"0") + L"\r\n";
-        text += std::wstring(L"regex=") + (item.useRegex ? L"1" : L"0") + L"\r\n";
+        text += std::wstring(L"inclext=") + (item.includeExt ? L"1" : L"0") + L"\r\n";
+        text += L"regexpreset=" + std::to_wstring(item.regexPreset) + L"\r\n";
+
+        // 老字段顺手写上：万一用户换回旧版程序，至少"是否按正则"还能对上
+        text += std::wstring(L"regex=") + ((item.regexPreset != 0) ? L"1" : L"0") + L"\r\n";
         text += std::wstring(L"number=") + (item.number ? L"1" : L"0") + L"\r\n";
         text += L"start=" + std::to_wstring(item.numberStart) + L"\r\n";
         text += L"step=" + std::to_wstring(item.numberStep) + L"\r\n";
@@ -1430,7 +1451,8 @@ static bool SameRules(const RenameTemplate& a, const RenameTemplate& b)
            a.find == b.find &&
            a.replace == b.replace &&
            a.caseSensitive == b.caseSensitive &&
-           a.useRegex == b.useRegex &&
+           a.includeExt == b.includeExt &&
+           a.regexPreset == b.regexPreset &&
            a.number == b.number &&
            a.numberStart == b.numberStart &&
            a.numberStep == b.numberStep &&
@@ -1722,8 +1744,13 @@ void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
 
     out.caseSensitive = (m_hCaseSensitive != nullptr) &&
                         (::SendMessageW(m_hCaseSensitive, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    out.useRegex = (m_hRegex != nullptr) &&
-                   (::SendMessageW(m_hRegex, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    // 英文 naming：includeExt 就是界面上「含扩展名」那个勾
+    out.includeExt = (m_hIncludeExt != nullptr) &&
+                     (::SendMessageW(m_hIncludeExt, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    // 查找方式下拉当前选的是哪一项：0 普通查找 / 1~9 内置正则 / 10 自定义正则
+    out.regexPreset = ComboSelection(m_hRegexPreset);
 
     out.number       = (m_hNumberEnable != nullptr) &&
                        (::SendMessageW(m_hNumberEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1767,10 +1794,21 @@ void BatchRenameDialog::ApplyTemplateToControls(const RenameTemplate& tpl)
         ::SendMessageW(m_hCaseSensitive, BM_SETCHECK,
                        tpl.caseSensitive ? BST_CHECKED : BST_UNCHECKED, 0);
     }
-    if (m_hRegex != nullptr)
+    if (m_hIncludeExt != nullptr)
     {
-        ::SendMessageW(m_hRegex, BM_SETCHECK,
-                       tpl.useRegex ? BST_CHECKED : BST_UNCHECKED, 0);
+        ::SendMessageW(m_hIncludeExt, BM_SETCHECK,
+                       tpl.includeExt ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (m_hRegexPreset != nullptr)
+    {
+        // 越界的值（老文件里是 0/1）夹到合法范围，免得下拉变成"什么都没选"
+        int preset = tpl.regexPreset;
+        if (preset < 0 || preset > kRegexCustomItem)
+        {
+            preset = 0;
+        }
+
+        ::SendMessageW(m_hRegexPreset, CB_SETCURSEL, static_cast<WPARAM>(preset), 0);
     }
     if (m_hNumberEnable != nullptr)
     {
@@ -2075,18 +2113,57 @@ int BatchRenameDialog::ComboSelection(HWND control) const
     return (selected < 0) ? 0 : selected;
 }
 
+// 查找是不是按正则走：下拉第 1 项「普通查找」以外，全都是正则
+bool BatchRenameDialog::RegexOn() const
+{
+    return ComboSelection(m_hRegexPreset) != 0;
+}
+
 std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring& originalName) const
 {
     std::wstring stem;
     std::wstring extension;
     SplitFileName(originalName, stem, extension);
 
+    // 0) 先把「扩展名」这个下拉定下来（保留 / 改成指定 / 去掉）
+    //    放在查找替换前面，是为了让勾了「含扩展名」的时候，查找看到的是"最终要用的那个扩展名"
+    switch (ComboSelection(m_hExtMode))
+    {
+    case 1:   // 改成指定扩展名
+    {
+        std::wstring value = GetTextOf(m_hExtValue);
+        if (!value.empty())
+        {
+            if (value[0] != L'.')
+            {
+                value.insert(value.begin(), L'.');
+            }
+            extension = value;
+        }
+        break;
+    }
+
+    case 2:   // 去掉扩展名
+        extension.clear();
+        break;
+
+    default:  // 保留原扩展名
+        break;
+    }
+
+    // 勾了「含扩展名」就把扩展名一起并进"要处理的那一段"；
+    // 不勾就只动主文件名（默认行为，扩展名原样保留）
+    const bool includeExt = (m_hIncludeExt != nullptr) &&
+                            (::SendMessageW(m_hIncludeExt, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    std::wstring working = includeExt ? (stem + extension) : stem;
+
     // 1) 查找替换（普通文字，或按正则处理）
     const std::wstring find = GetTextOf(m_hFind);
     if (!find.empty())
     {
-        const bool useRegex = (m_hRegex != nullptr) &&
-                              (::SendMessageW(m_hRegex, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        // 除了「普通查找」以外都按正则解释（内置预设和自定义正则都算）
+        const bool useRegex = RegexOn();
 
         const std::wstring replacement = GetTextOf(m_hReplace);
 
@@ -2097,7 +2174,7 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
             {
                 try
                 {
-                    stem = std::regex_replace(stem, g_regexCache.regex, replacement);
+                    working = std::regex_replace(working, g_regexCache.regex, replacement);
                 }
                 catch (const std::regex_error&)
                 {
@@ -2111,31 +2188,42 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
                 (m_hCaseSensitive != nullptr) &&
                 (::SendMessageW(m_hCaseSensitive, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-            stem = ReplaceAll(stem, find, replacement, caseSensitive);
+            working = ReplaceAll(working, find, replacement, caseSensitive);
         }
     }
 
-    // 2) 大小写
+    // 2) 大小写（作用范围跟查找替换一致）
     switch (ComboSelection(m_hCaseMode))
     {
     case 1:   // 全部大写
-        ::CharUpperBuffW(stem.data(), static_cast<DWORD>(stem.size()));
+        ::CharUpperBuffW(working.data(), static_cast<DWORD>(working.size()));
         break;
 
     case 2:   // 全部小写
-        ::CharLowerBuffW(stem.data(), static_cast<DWORD>(stem.size()));
+        ::CharLowerBuffW(working.data(), static_cast<DWORD>(working.size()));
         break;
 
     case 3:   // 首字母大写（其余转小写）
-        if (!stem.empty())
+        if (!working.empty())
         {
-            ::CharLowerBuffW(stem.data(), static_cast<DWORD>(stem.size()));
-            stem[0] = static_cast<wchar_t>(::towupper(stem[0]));
+            ::CharLowerBuffW(working.data(), static_cast<DWORD>(working.size()));
+            working[0] = static_cast<wchar_t>(::towupper(working[0]));
         }
         break;
 
     default:
         break;
+    }
+
+    if (includeExt)
+    {
+        // 替换可能把扩展名换掉、甚至把那个点删了，所以这里按处理后的结果重新拆一次
+        SplitFileName(working, stem, extension);
+    }
+    else
+    {
+        // 没勾「含扩展名」：extension 还是第 0 步算好的那份，主名直接用 working
+        stem = working;
     }
 
     // 3) 序号（只有勾了才加；编号按排序后的次序给）
@@ -2162,33 +2250,8 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
         }
     }
 
-    // 4) 前缀 / 后缀（加在整理好的主名两端）
+    // 4) 前缀 / 后缀（加在整理好的主名两端；扩展名始终留在最后，不参与这两项）
     stem = GetTextOf(m_hPrefix) + stem + GetTextOf(m_hSuffix);
-
-    // 5) 扩展名
-    switch (ComboSelection(m_hExtMode))
-    {
-    case 1:   // 改成指定扩展名
-    {
-        std::wstring value = GetTextOf(m_hExtValue);
-        if (!value.empty())
-        {
-            if (value[0] != L'.')
-            {
-                value.insert(value.begin(), L'.');
-            }
-            extension = value;
-        }
-        break;
-    }
-
-    case 2:   // 去掉扩展名
-        extension.clear();
-        break;
-
-    default:  // 保留原扩展名
-        break;
-    }
 
     return stem + extension;
 }
@@ -2199,8 +2262,7 @@ void BatchRenameDialog::BuildPreviewRows()
 
     // ---- 正则先验证一次：写法有误就整张表标红，别让用户以为能改 ----
     const std::wstring findText = GetTextOf(m_hFind);
-    const bool useRegex = (m_hRegex != nullptr) &&
-                          (::SendMessageW(m_hRegex, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const bool useRegex = RegexOn();
 
     m_regexValid = true;
 
@@ -2549,56 +2611,26 @@ void BatchRenameDialog::Draw(HDC dc)
         // 10 个槽正好占满一行，右边没有多余地方放说明，用法写在顶部副标题里
     }
 
-    // ---- 左栏四个行首标签 ----
+    // ---- 参数区标签：和 Layout 用同一份 kRuleSpecs，标签正好落在对应控件左边 ----
     ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kTitleColor);
 
-    const wchar_t* leftLabels[] = { L"前  缀", L"后  缀", L"查  找", L"替换为" };
-    const int labelWidth = Scale(66);
-
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < kRfCount; ++i)
     {
-        RECT labelRect = { padding, Scale(kRuleTop) + Scale(kRuleRowHeight) * i,
-                           padding + labelWidth, Scale(kRuleTop) + Scale(kRuleRowHeight) * (i + 1) };
-        ::DrawTextW(dc, leftLabels[i], -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // ---- 右栏行首标签 ----
-    const int rightX = Scale(kRightColumnX);
-
-    const wchar_t* rightLabels[] = { L"", L"位  置", L"扩展名", L"大小写", L"排  序" };
-    const wchar_t* numberFieldLabels[] = { L"起始", L"步长", L"位数" };
-
-    for (int i = 0; i < 5; ++i)
-    {
-        if (rightLabels[i][0] == L'\0')
+        const RuleFieldSpec& spec = kRuleSpecs[i];
+        if (spec.label == nullptr)
         {
             continue;
         }
 
-        RECT labelRect = { rightX, Scale(kRuleTop) + Scale(kRuleRowHeight) * i,
-                           rightX + Scale(56), Scale(kRuleTop) + Scale(kRuleRowHeight) * (i + 1) };
-        ::DrawTextW(dc, rightLabels[i], -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
+        const int rowTop = Scale(kRuleTop) + Scale(kRuleRowHeight) * spec.row;
 
-    // 序号那三个小标签（起点位置和 Layout 里一致：每组间隔 88，标签在框左边 32 宽）
-    {
-        const int fieldX = rightX + Scale(92);
-        const int width  = Scale(32);
+        RECT labelRect = { Scale(spec.labelX), rowTop,
+                           Scale(spec.labelX) + Scale(spec.labelWidth),
+                           rowTop + Scale(kRuleRowHeight) };
 
-        for (int i = 0; i < 3; ++i)
-        {
-            RECT labelRect = { fieldX + Scale(88) * i, Scale(kRuleTop),
-                               fieldX + Scale(88) * i + width,
-                               Scale(kRuleTop) + Scale(kRuleRowHeight) };
-            ::DrawTextW(dc, numberFieldLabels[i], -1, &labelRect,
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
-
-        // 「分隔符」在第二行右侧
-        RECT sepLabel = { rightX + Scale(196), Scale(kRuleTop) + Scale(kRuleRowHeight),
-                          rightX + Scale(256), Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 };
-        ::DrawTextW(dc, L"分隔符", -1, &sepLabel, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        ::DrawTextW(dc, spec.label, -1, &labelRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     // ---- 底部统计 ----
@@ -2899,32 +2931,31 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
             }
         }
 
-        // 常用正则下拉：选中一条 → 填进「查找」并勾上正则
+        // 查找方式下拉：选了内置预设就把那条写法填进「查找」；选普通/自定义则只改解释方式
         if (controlId == kIdRegexPreset && notification == CBN_SELCHANGE)
         {
-            const size_t presetIndex = static_cast<size_t>(ComboSelection(m_hRegexPreset));
+            const int presetIndex = ComboSelection(m_hRegexPreset);
 
-            if (presetIndex > 0)
+            // 1~9 是内置预设，选中就替用户把写法填好；
+            // 0（普通查找）和 10（自定义正则）都保留用户自己敲的内容，不动
+            if (presetIndex >= 1 && presetIndex < static_cast<int>(RegexPresetCount()))
             {
                 m_suppressRecalculate = true;
 
                 if (m_hFind != nullptr)
                 {
-                    ::SetWindowTextW(m_hFind, RegexPresetPattern(presetIndex));
-                }
-                if (m_hRegex != nullptr)
-                {
-                    ::SendMessageW(m_hRegex, BM_SETCHECK, BST_CHECKED, 0);
+                    ::SetWindowTextW(m_hFind, RegexPresetPattern(static_cast<size_t>(presetIndex)));
                 }
 
                 m_suppressRecalculate = false;
-                Recalculate();
             }
+
+            Recalculate();
             return 0;
         }
 
         // 规则控件的任何改动 → 重算预览
-        if (controlId >= kIdPrefix && controlId <= kIdRegex)
+        if (controlId >= kIdPrefix && controlId <= kIdIncludeExt)
         {
             if (notification == EN_CHANGE || notification == CBN_SELCHANGE ||
                 notification == BN_CLICKED)

@@ -65,7 +65,11 @@ struct RenameTemplate
     std::wstring find;          // 查找
     std::wstring replace;       // 替换为
     bool         caseSensitive = false;   // 区分大小写
-    bool         useRegex      = false;   // 查找按正则处理
+    bool         includeExt    = false;   // 查找替换是否连扩展名一起处理
+
+    // 查找方式：0 = 普通查找；1~9 = 内置正则预设；10 = 自定义正则
+    // （除了普通查找以外全都按正则解释）
+    int          regexPreset   = 0;
 
     bool         number        = false;   // 加序号
     int          numberStart   = 1;       // 起始
@@ -170,10 +174,16 @@ private:
     void UpdateListDrag(int clientY);
     void FinishListDrag();
 
-    // 正则下拉里的内置常用写法（下标 0 表示"不用"）
+    // 正则下拉里的内置常用写法（下标 0 表示"普通查找"，1~9 是预设）
     static size_t RegexPresetCount();
     static const wchar_t* RegexPresetName(size_t index);
     static const wchar_t* RegexPresetPattern(size_t index);
+
+    // 查找方式下拉里"自定义正则"那一项的编号（选它 = 用户在查找框里自己写正则）
+    static const int kRegexCustomItem = 10;
+
+    // 当前是不是按正则查找（除了「普通查找」以外都算）
+    bool RegexOn() const;
 
 private:
     HWND m_hWnd   = nullptr;
@@ -198,8 +208,8 @@ private:
     HWND m_hFind = nullptr;         // 查找
     HWND m_hReplace = nullptr;      // 替换为
     HWND m_hCaseSensitive = nullptr; // 区分大小写（复选框）
-    HWND m_hRegex = nullptr;        // 查找按正则处理（复选框）
-    HWND m_hRegexPreset = nullptr;  // 常用正则下拉（选中就把写法填进"查找"）
+    HWND m_hIncludeExt = nullptr;   // 含扩展名（复选框：查找替换是否连扩展名一起处理）
+    HWND m_hRegexPreset = nullptr;  // 查找方式下拉：普通查找 / 9 条内置正则 / 自定义正则
 
     // ---- 模板栏：固定 10 个自绘按钮，一行排满 ----
     std::vector<RenameTemplate> m_templates;        // 恒为 kTemplateSlotCount 条
