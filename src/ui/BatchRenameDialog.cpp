@@ -1559,9 +1559,29 @@ void BatchRenameDialog::OnTemplateSlotClick(int index)
         return;
     }
 
+    // 再点一次已经高亮的槽 = 取消选中，回到"没选任何模板"的状态
+    // （这时底部「保存」消失、「应用」恢复可点；规则区里已经填的参数原样留着，
+    //   用户可能是想摆脱模板束缚直接改一版去应用）
     if (index == m_selectedTemplate)
     {
-        return;   // 已经选中的槽，再点不重复载入（免得把刚改的又刷回去）
+        if (!ConfirmLeaveSlot())
+        {
+            return;   // 用户在三选里选了"取消"，那就保持选中不动
+        }
+
+        const int previous = m_selectedTemplate;
+
+        m_selectedTemplate = -1;
+        m_hasBaseline      = false;   // 没有模板了，也就不存在"改没改这个模板"
+
+        // 底部（「保存」消失、「应用」由灰变亮）交给 Recalculate
+        Recalculate();
+
+        if (previous >= 0 && previous < static_cast<int>(m_templateRects.size()))
+        {
+            InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(previous)]);
+        }
+        return;
     }
 
     if (!ConfirmLeaveSlot())
