@@ -1593,6 +1593,16 @@ void MainWindow::RefreshCurrentFolder()
 void MainWindow::DoCopy()
 {
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+    // 控制面板、"此电脑"里的控制项这类虚拟对象（没有真实文件系统路径）
+    // 不能复制：复制它们没有意义（粘不出东西），资源管理器里也是禁用的。
+    selected.erase(std::remove_if(selected.begin(), selected.end(),
+                                  [](const std::wstring& path)
+                                  {
+                                      return !shell::IsFileSystemPath(path);
+                                  }),
+                   selected.end());
+
     if (selected.empty())
     {
         return;
@@ -1651,6 +1661,18 @@ void MainWindow::DoCopyPath()
 void MainWindow::DoCut()
 {
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+    // 这里要踢掉两类项：
+    //   1. 驱动器（D:\ 这种盘符根）—— 资源管理器里驱动器不允许剪切（搬不走整盘）；
+    //   2. 控制面板等虚拟对象（没有真实文件系统路径）—— 既不能复制也不能剪切。
+    selected.erase(std::remove_if(selected.begin(), selected.end(),
+                                  [](const std::wstring& path)
+                                  {
+                                      return !shell::IsFileSystemPath(path) ||
+                                             shell::IsDriveRootPath(path);
+                                  }),
+                   selected.end());
+
     if (selected.empty())
     {
         return;
@@ -1978,6 +2000,24 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 //   ─────
 //   属性
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 菜单里「复制 / 剪切」能不能用
+//
+//   · 驱动器（D:\ 这种盘符根）不能剪切 —— 整盘搬不走，资源管理器里也是灰的；
+//   · 控制面板、"此电脑"里的控制项这类虚拟对象（没有真实文件系统路径）
+//     既不能复制也不能剪切。
+// 这些判断只查字符串，零成本（符合"右键菜单弹出不查注册表、不碰 COM"的要求）。
+// ---------------------------------------------------------------------------
+static bool CanCopyPath(const std::wstring& path)
+{
+    return shell::IsFileSystemPath(path);
+}
+
+static bool CanCutPath(const std::wstring& path)
+{
+    return shell::IsFileSystemPath(path) && !shell::IsDriveRootPath(path);
+}
+
 void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 {
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
@@ -1993,8 +2033,8 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
     }
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
-    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+    ::AppendMenuW(menu, MF_STRING | (CanCutPath(filePath) ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, MF_STRING | (CanCopyPath(filePath) ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
     // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
@@ -2028,14 +2068,14 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 //   ─────
 //   属性
 // ---------------------------------------------------------------------------
-void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& /*folderPath*/)
+void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath)
 {
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
     ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
-    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+    ::AppendMenuW(menu, MF_STRING | (CanCutPath(folderPath) ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, MF_STRING | (CanCopyPath(folderPath) ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
     // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
@@ -2073,8 +2113,19 @@ void MainWindow::BuildMultipleMenu(HMENU menu)
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandCut, L"剪切(&T)");
-    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+    // 多选：只要里面有一项不能复制/剪切（驱动器、控制面板等），整条就灰掉
+    const std::vector<std::wstring> selectedPaths = m_fileListView.GetSelectedPaths();
+    bool canCut  = !selectedPaths.empty();
+    bool canCopy = canCut;
+
+    for (const auto& path : selectedPaths)
+    {
+        canCut  = canCut  && CanCutPath(path);
+        canCopy = canCopy && CanCopyPath(path);
+    }
+
+    ::AppendMenuW(menu, MF_STRING | (canCut ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
+    ::AppendMenuW(menu, MF_STRING | (canCopy ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
     // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）

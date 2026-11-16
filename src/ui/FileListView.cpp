@@ -57,41 +57,6 @@ static const int kRenameEditExtraWidth = 17;
 // 单行改名框的高度：列表视图的行距也是 24（和小图标一致），框正好贴满一行
 static const int kRenameEditHeight = 24;
 
-// 是不是"盘符根"路径（形如 D:\ 、V:\ ）。
-// 用来看某个项是不是驱动器卷：卷根的系统属性经常带 SYSTEM/HIDDEN，
-// 但资源管理器从不会把驱动器画成灰色/半透明，所以这类项一律不淡化。
-static bool IsDriveRootPath(const std::wstring& path)
-{
-    return path.size() == 3 &&
-           ::iswalpha(static_cast<wint_t>(path[0])) != 0 &&
-           path[1] == L':' &&
-           path[2] == L'\\';
-}
-
-// 是不是真实文件系统里的路径（C:\... 或 \\server\share\...）。
-// 控制面板、"此电脑"里的那些虚拟项不是这种路径（它们是 CLSID 形式或空路径）。
-static bool IsFileSystemPath(const std::wstring& path)
-{
-    if (path.size() < 2)
-    {
-        return false;
-    }
-
-    // 盘符路径 X:\...
-    if (::iswalpha(static_cast<wint_t>(path[0])) != 0 && path[1] == L':')
-    {
-        return true;
-    }
-
-    // UNC 路径 \\server\share
-    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
-    {
-        return true;
-    }
-
-    return false;
-}
-
 // 这个项要不要参与"淡化"（变灰 / 半透明）。
 //
 // 驱动器和控制面板这类特殊项一律不淡化：
@@ -100,12 +65,13 @@ static bool IsFileSystemPath(const std::wstring& path)
 //     属性也带 SYSTEM，跟着变灰就完全不是资源管理器的样子了。
 static bool ShouldSkipDimming(const shell::ShellEntry& entry)
 {
-    if (IsDriveRootPath(entry.fullPath) || entry.diskTotal > 0)
+    if (shell::IsDriveRootPath(entry.fullPath) || entry.diskTotal > 0)
     {
         return true;   // 驱动器 / 磁盘卡片
     }
 
-    return !IsFileSystemPath(entry.fullPath);   // 控制面板、虚拟项等
+    // 控制面板、"此电脑"里的控制项等虚拟对象（没有真实文件系统路径）
+    return !shell::IsFileSystemPath(entry.fullPath);
 }
 
 // ============================================================================

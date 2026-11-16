@@ -888,6 +888,51 @@ bool KnownFolderAncestor(const std::wstring& path,
 // 最后把父项换成「绝对解析名」（形如 ::{GUID}\C:\ 或 ::{GUID}），
 // 这个字符串我们程序能直接拿去导航和枚举。
 // ============================================================================
+// ----------------------------------------------------------------------------
+// 盘符根判断："D:\" 这种三个字符的路径
+// ----------------------------------------------------------------------------
+bool IsDriveRootPath(const std::wstring& path)
+{
+    if (path.size() != 3)
+    {
+        return false;
+    }
+
+    if (path[1] != L':' || path[2] != L'\\')
+    {
+        return false;
+    }
+
+    return (path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z');
+}
+
+// ----------------------------------------------------------------------------
+// 真实文件系统路径判断：盘符路径（X:\...）或 UNC 路径（\\server\share）
+// 控制面板那类虚拟项走的是 "::{GUID}..."，这里会返回 false
+// ----------------------------------------------------------------------------
+bool IsFileSystemPath(const std::wstring& path)
+{
+    if (path.size() < 2)
+    {
+        return false;
+    }
+
+    // 盘符路径 X:\...
+    if (path[1] == L':')
+    {
+        return (path[0] >= L'A' && path[0] <= L'Z') ||
+               (path[0] >= L'a' && path[0] <= L'z');
+    }
+
+    // UNC 路径 \\server\share
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+    {
+        return true;
+    }
+
+    return false;
+}
+
 std::wstring GetParentPath(const std::wstring& path)
 {
     if (path.empty())
