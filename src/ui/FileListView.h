@@ -189,6 +189,16 @@ public:
     // 开始原地改名（F2）
     void BeginRenameSelected();
 
+    // 平铺视图的原地改名：自己建一个多行编辑框（自带的是单行框，做不到三行高 + 字贴左上）
+    void BeginTileRename(int index);
+
+    // 平铺改名收尾：commit=true 提交改名，false 取消
+    void FinishTileRename(bool commit);
+
+    // 自建编辑框的子类过程：回车提交、Esc 取消、失焦提交
+    static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                             LPARAM lParam, UINT_PTR id, DWORD_PTR refData);
+
     // 是否正在原地改名（列表上有个编辑框挂着）
     // 目录监视触发的自动刷新要避开这个时刻，否则编辑框会被冲掉
     bool IsEditingLabel() const { return m_editingLabel; }
@@ -300,6 +310,9 @@ private:
     // 平铺是自绘的，控件不知道名字画在哪儿，所以改名时由我们跳过这一行的名字，
     // 把位置让给控件的编辑框；改名结束后再画回来。
     int                       m_editingIndex = -1;
+
+    // 平铺视图自建的改名编辑框（多行框）；其它视图用控件自带的那个，这里保持 nullptr
+    HWND                      m_hEdit = nullptr;
 
     // 平铺视图"再点一下已选中项就进改名"用：上一次点中的是哪一项、什么时候点的。
     // 没有文字可比（owner-data 列表控件的 item 文本在平铺下是空的），只能靠时间判断

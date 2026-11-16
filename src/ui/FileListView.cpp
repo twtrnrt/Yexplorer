@@ -39,6 +39,18 @@ static const int kNameColumnMin    = 260;   // 名称列保底宽度
 // 这个值决定了"输入快的两个字母能不能连成一个词"：慢于半秒就当成两次独立的单字母跳转。
 static const DWORD kTypeAheadTimeoutMs = 500;
 
+// ============================================================================
+// 平铺视图的改名编辑框
+//
+// 平铺不用列表控件自带的原地改名，自己建一个"多行编辑框"：
+//   · 自带编辑框是单行的，框比一行高时文字必然垂直居中，做不出"三行框 + 字贴左上"；
+//   · 自建的多行编辑框文字天然靠左上，框也能做三行高，正好盖住名字位置。
+// 这是失焦时的收尾消息：不能在 WM_KILLFOCUS 里同步销毁自己，排到队列后面再做。
+// ============================================================================
+
+static const UINT kMsgFinishTileRename = WM_APP + 101;
+
+
 // 判断一个名字是不是以 typed 开头（支持中文名按拼音首字母匹配）
 //
 // 逐字符比较，不分配任何内存：
@@ -846,6 +858,12 @@ void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)
         return;
     }
 
+    // 换目录 / 重扫时如果还有平铺的改名框挂着，先取消掉（旧行号马上就对不上了）
+    if (m_hEdit != nullptr)
+    {
+        FinishTileRename(false);
+    }
+
     // 刷新前先记住"用户看到的状态"：选中了哪些、滚动到哪一行
     std::vector<std::wstring> selectedNames;
     std::wstring              topName;
@@ -1435,6 +1453,13 @@ void FileListView::BeginRenameSelected()
         return;
     }
 
+    // 平铺走自己建的编辑框（自带的是单行框，做不出"三行高 + 字贴左上"）
+    if (m_viewMode == ViewMode::Tiles)
+    {
+        BeginTileRename(selectedIndex);
+        return;
+    }
+
     ::SetFocus(m_hWnd);
     HWND edit = ListView_EditLabel(m_hWnd, static_cast<UINT>(selectedIndex));
 
@@ -1447,7 +1472,7 @@ void FileListView::BeginRenameSelected()
     const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(selectedIndex)];
 
     // ---- 只选中主文件名、不选扩展名（和资源管理器一致）----
-    // 所有视图都要，控件的编辑框默认是全选的
+    // 控件的编辑框默认是全选的（连扩展名一起），这里改回来
     int selectEnd = static_cast<int>(entry.name.size());
     if (!entry.isFolder)
     {
@@ -1458,23 +1483,210 @@ void FileListView::BeginRenameSelected()
         }
     }
 
-    // ---- 平铺视图还要额外收拾编辑框 ----
-    //
-    // 1）框里没有名字：为了格子高度不被长名字撑高（会压到下一行），平铺视图交给控件的
-    //    名称列是空串，控件就把编辑框的初始文本也当成空了。这里把真名字灌回去。
-    // 2）位置不对：控件的编辑框是按"图标视图的 label 区"（图标正下方）摆的，
-    //    平铺的布局是"图标在左、名字在右"，所以要按着我们画名字的矩形去摆，
-    //    让框正好压住原来那行名字。
-    // 3）名字得先擦掉：平铺是自绘的，控件不知道那儿有字，不擦会和框里的文字叠在一起。
-    //    BEGINLABELEDIT 里已经把 m_editingIndex 设成这一行，DrawTile 会跳过名字。
-    if (m_viewMode == ViewMode::Tiles)
-    {
-        ::SetWindowTextW(edit, entry.name.c_str());
+    ::SendMessageW(edit, EM_SETSEL, 0, static_cast<LPARAM>(selectEnd));
+}
 
-        RECT itemRect = {};
-        if (ListView_GetItemRect(m_hWnd, selectedIndex, &itemRect, LVIR_BOUNDS))
+// ============================================================================
+// 平铺视图的原地改名：自己建一个多行编辑框
+//
+// 为什么不用列表控件自带的原地改名：
+//   · 自带的是单行编辑框，框比一行高时文字必定垂直居中，做不出"三行框 + 字贴左上"；
+//   · 它的位置按"图标视图的 label 区"（图标正下方）算，和平铺"图标在左、名字在右"对不上；
+//   · 虚拟列表里它从 LVN_GETDISPINFO 取初始文字，而平铺那边为了格子高度稳定交的是空串。
+// 自己建框就能三件事全解决：位置照着名字矩形摆、高度按名字行数给、文字天然靠左上。
+// ============================================================================
+
+void FileListView::BeginTileRename(int index)
+{
+    if (m_hWnd == nullptr || m_result == nullptr)
+    {
+        return;
+    }
+
+    if (index < 0 || index >= static_cast<int>(m_result->entries.size()))
+    {
+        return;
+    }
+
+    const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(index)];
+
+    // 分组标题行、占位格不是真文件，不能改名
+    if (entry.isGroupHeader || entry.isSpacer)
+    {
+        return;
+    }
+
+    // 已经有一个编辑框挂着（比如连按两次 F2）：先把上一个按"提交"收尾
+    if (m_hEdit != nullptr)
+    {
+        FinishTileRename(true);
+    }
+
+    RECT itemRect = {};
+    if (!ListView_GetItemRect(m_hWnd, index, &itemRect, LVIR_BOUNDS))
+    {
+        return;
+    }
+
+    // 格子高度按行距夹一下（和自绘时的口径一致）
+    const DWORD spacing = static_cast<DWORD>(
+        ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
+    const int rowHeight = static_cast<int>(HIWORD(spacing));
+
+    if (rowHeight > 0 && (itemRect.bottom - itemRect.top) > rowHeight)
+    {
+        itemRect.bottom = itemRect.top + rowHeight;
+    }
+
+    // 用"画名字的同一个函数"算出名字文字块的位置，编辑框照着它摆，位置天然一致
+    RECT nameRect = {};
+    HDC measureDc = ::GetDC(m_hWnd);
+    if (measureDc == nullptr)
+    {
+        return;
+    }
+
+    HGDIOBJ oldFont = ::SelectObject(measureDc, m_hFont);
+    nameRect = ComputeTileNameRect(measureDc, itemRect, entry);
+    ::SelectObject(measureDc, oldFont);
+    ::ReleaseDC(m_hWnd, measureDc);
+
+    const int editWidth = nameRect.right - nameRect.left;
+    if (editWidth <= 40)
+    {
+        return;
+    }
+
+    // 高度：名字文字块的高度 + 上下各 2px 的余量（框线本身要占位，少给就会把字挤扁）
+    int editHeight = static_cast<int>(nameRect.bottom - nameRect.top) + 4;
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        ::GetWindowLongPtrW(m_hWnd, GWLP_HINSTANCE));
+
+    // 多行编辑框：ES_MULTILINE 让它自己换行、文字靠左上，ES_AUTOVSCROLL 处理超长名字
+    m_hEdit = ::CreateWindowExW(
+        0,
+        L"EDIT",
+        entry.name.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL,
+        nameRect.left, nameRect.top, editWidth, editHeight,
+        m_hWnd,
+        nullptr,
+        instance,
+        nullptr);
+
+    if (m_hEdit == nullptr)
+    {
+        return;
+    }
+
+    if (m_hFont != nullptr)
+    {
+        ::SendMessageW(m_hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(m_hFont), TRUE);
+    }
+
+    // 左右各留 3px，字不要顶死在边框上
+    ::SendMessageW(m_hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(3, 3));
+
+    ::SetWindowSubclass(m_hEdit, &FileListView::EditSubclassProc, 1,
+                        reinterpret_cast<DWORD_PTR>(this));
+
+    // 记住"正在改名"和"改的是哪一行"：DrawTile 见到这一行就不画名字，
+    // 目录监视的自动刷新也要绕开（否则编辑框会被刷掉）
+    m_editingLabel = true;
+    m_editingIndex = index;
+
+    // 只选中主文件名、不选扩展名（文件夹没有扩展名，整段选中）
+    int selectEnd = static_cast<int>(entry.name.size());
+    if (!entry.isFolder)
+    {
+        const size_t dot = entry.name.rfind(L'.');
+        if (dot != std::wstring::npos && dot > 0)
         {
-            // 格子高度按行距夹一下（和自绘时的口径一致）
+            selectEnd = static_cast<int>(dot);
+        }
+    }
+
+    ::SetFocus(m_hEdit);
+    ::SendMessageW(m_hEdit, EM_SETSEL, 0, static_cast<LPARAM>(selectEnd));
+
+    // 先把这一格重画一遍（名字已经被跳过，不再画），再把新框露出来
+    ::InvalidateRect(m_hWnd, &itemRect, FALSE);
+    ::UpdateWindow(m_hWnd);
+}
+
+// ============================================================================
+// 平铺改名收尾：提交（回车 / 失焦）或取消（Esc）
+// ============================================================================
+
+void FileListView::FinishTileRename(bool commit)
+{
+    HWND edit = m_hEdit;
+    const int index = m_editingIndex;
+
+    m_hEdit = nullptr;
+    m_editingIndex = -1;
+    m_editingLabel = false;
+
+    if (edit == nullptr || m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    std::wstring newName;
+
+    if (commit)
+    {
+        const int length = ::GetWindowTextLengthW(edit);
+        if (length > 0)
+        {
+            std::wstring raw(static_cast<size_t>(length) + 1, L'\0');
+            ::GetWindowTextW(edit, raw.data(), length + 1);
+            raw.resize(static_cast<size_t>(length));
+
+            // 多行编辑框里可能混进换行（粘贴多行文本时），文件名里不能有，统一换成空格
+            std::wstring cleaned;
+            cleaned.reserve(raw.size());
+
+            for (wchar_t ch : raw)
+            {
+                if (ch == L'\r' || ch == L'\n')
+                {
+                    if (!cleaned.empty() && cleaned.back() != L' ')
+                    {
+                        cleaned.push_back(L' ');
+                    }
+                    continue;
+                }
+                cleaned.push_back(ch);
+            }
+
+            // 去掉首尾空白
+            while (!cleaned.empty() && (cleaned.front() == L' ' || cleaned.front() == L'\t'))
+            {
+                cleaned.erase(cleaned.begin());
+            }
+            while (!cleaned.empty() && (cleaned.back() == L' ' || cleaned.back() == L'\t'))
+            {
+                cleaned.pop_back();
+            }
+
+            newName = cleaned;
+        }
+    }
+
+    // 焦点还给列表（这一步之后失焦消息还会再来一次，但 m_hEdit 已经清空了，会被忽略）
+    ::SetFocus(m_hWnd);
+
+    ::RemoveWindowSubclass(edit, &FileListView::EditSubclassProc, 1);
+    ::DestroyWindow(edit);
+
+    // 把那一格重画回去，名字重新出现
+    if (index >= 0 && m_result != nullptr && index < static_cast<int>(m_result->entries.size()))
+    {
+        RECT itemRect = {};
+        if (ListView_GetItemRect(m_hWnd, index, &itemRect, LVIR_BOUNDS))
+        {
             const DWORD spacing = static_cast<DWORD>(
                 ::SendMessageW(m_hWnd, LVM_GETITEMSPACING, FALSE, 0));
             const int rowHeight = static_cast<int>(HIWORD(spacing));
@@ -1484,47 +1696,74 @@ void FileListView::BeginRenameSelected()
                 itemRect.bottom = itemRect.top + rowHeight;
             }
 
-            // 借一个选好字体的 dc，算出名字文字块的位置（和 DrawTile 用的是同一个函数）
-            HDC measureDc = ::GetDC(m_hWnd);
-            if (measureDc != nullptr)
-            {
-                HGDIOBJ oldFont = ::SelectObject(measureDc, m_hFont);
-                const RECT nameRect = ComputeTileNameRect(measureDc, itemRect, entry);
-
-                // 编辑框只做"一行文字 + 上下各留一点"这么高，不跟着名字的行数拉高。
-                // 原因：ListView 挂的是单行编辑框，框比一行高的时候它一定把文字垂直居中，
-                // 我们没有手段让它贴顶。所以框本身不做高，字就自然贴在左上；
-                // 名字块下面那几行本来就不画（正在改名的那一行整块跳过名字），不会露出旧字。
-                TEXTMETRICW metrics = {};
-                int editHeight = 26;
-                if (::GetTextMetricsW(measureDc, &metrics))
-                {
-                    editHeight = static_cast<int>(metrics.tmHeight) + 8;
-                }
-
-                ::SelectObject(measureDc, oldFont);
-                ::ReleaseDC(m_hWnd, measureDc);
-
-                const int editWidth = nameRect.right - nameRect.left;
-
-                if (editWidth > 40)
-                {
-                    ::SetWindowPos(edit, nullptr, nameRect.left, nameRect.top,
-                                   editWidth, editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
-                }
-
-                // 先把这一格重画一遍（名字已经被跳过，不再画），再让编辑框自己画一次，
-                // 否则自绘的白底会盖到编辑框上，或者旧名字残留在旁边
-                ::InvalidateRect(m_hWnd, &itemRect, FALSE);
-                ::UpdateWindow(m_hWnd);
-
-                ::InvalidateRect(edit, nullptr, TRUE);
-                ::UpdateWindow(edit);
-            }
+            ::InvalidateRect(m_hWnd, &itemRect, FALSE);
         }
     }
 
-    ::SendMessageW(edit, EM_SETSEL, 0, static_cast<LPARAM>(selectEnd));
+    // 真正去改名：只有名字确实变了才叫主窗口干活
+    if (commit && !newName.empty() && index >= 0 && m_onRename &&
+        m_result != nullptr && index < static_cast<int>(m_result->entries.size()) &&
+        newName != m_result->entries[static_cast<size_t>(index)].name)
+    {
+        m_onRename(static_cast<size_t>(index), newName);
+    }
+}
+
+// ============================================================================
+// 自建编辑框的子类过程：回车提交、Esc 取消、失焦提交
+// ============================================================================
+
+LRESULT CALLBACK FileListView::EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                                LPARAM lParam, UINT_PTR id, DWORD_PTR refData)
+{
+    FileListView* self = reinterpret_cast<FileListView*>(refData);
+
+    if (self == nullptr)
+    {
+        return ::DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    switch (msg)
+    {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN)
+        {
+            self->FinishTileRename(true);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE)
+        {
+            self->FinishTileRename(false);
+            return 0;
+        }
+        break;
+
+    case WM_CHAR:
+        // 多行编辑框默认会把回车/退格插进文本，这里吃掉，避免文件名里出现换行
+        if (wParam == 13 || wParam == 27)
+        {
+            return 0;
+        }
+        break;
+
+    case WM_KILLFOCUS:
+        // 点到别处（列表里别的行、地址栏、菜单）就当改名结束，和资源管理器一致。
+        // 不能在失焦过程中同步销毁自己，排到消息队列后面再收尾。
+        if (self->m_hEdit == hWnd)
+        {
+            ::PostMessageW(self->m_hWnd, kMsgFinishTileRename, 0, 0);
+        }
+        break;
+
+    case WM_NCDESTROY:
+        ::RemoveWindowSubclass(hWnd, &FileListView::EditSubclassProc, id);
+        break;
+
+    default:
+        break;
+    }
+
+    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 // ============================================================================
@@ -1558,6 +1797,12 @@ LRESULT CALLBACK FileListView::ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM 
     {
         // 窗口要销毁了，把子类化摘掉（否则回调里还拿着已经释放的 this）
         ::RemoveWindowSubclass(hWnd, &FileListView::ListViewSubclassProc, id);
+    }
+    else if (msg == kMsgFinishTileRename && self != nullptr)
+    {
+        // 平铺改名框失焦后排队回来的收尾（提交）
+        self->FinishTileRename(true);
+        return 0;
     }
 
     return ::DefSubclassProc(hWnd, msg, wParam, lParam);
