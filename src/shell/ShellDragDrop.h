@@ -35,6 +35,9 @@ namespace shell
 //   sourceWindow   ：发起拖动的窗口（用来定位拖动时跟着鼠标的那个图像）
 //   dragPointClient：鼠标按下时的客户区坐标（同上，用于取拖动图像）
 //   allowedEffects ：允许的效果位（复制/移动）
+//   preferredEffect：首选效果（0 表示不声明）。
+//                    从压缩包里往外拖时传 DROPEFFECT_COPY —— 源是解出来的临时副本，
+//                    不该被"移动"掉；声明之后接收方（含我们自己的窗口）会按复制处理。
 //
 // 返回最终效果（DROPEFFECT_MOVE / COPY / NONE 这些宏值，类型是 DWORD）。
 // 注意：这是阻塞调用，拖动过程中不要指望能执行别的代码。
@@ -42,7 +45,8 @@ namespace shell
 DWORD DoDragFiles(const std::vector<std::wstring>& paths,
                   HWND                            sourceWindow,
                   POINT                           dragPointClient,
-                  DWORD                           allowedEffects);
+                  DWORD                           allowedEffects,
+                  DWORD                           preferredEffect = 0);
 
 // ----------------------------------------------------------------------------
 // 拖入：接收别的程序拖过来的文件

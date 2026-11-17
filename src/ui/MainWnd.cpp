@@ -718,6 +718,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             RefreshCurrentFolder();
         });
 
+        // 拖出前把路径准备好：普通文件原样返回；压缩包内部的项先解到临时目录
+        m_fileListView.SetPrepareDragPathsCallback([this](const std::vector<std::wstring>& paths)
+        {
+            return PrepareDragPaths(paths);
+        });
+
         // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
         RegisterDropTargets();
 
@@ -4166,6 +4172,179 @@ std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtual
     // ---- 4) 真正去解（先读流，读不出来走 Shell 复制通道；失败原因填在 error 里）----
     return shellops::ExtractContainerEntry(virtualPath, containerRoot, innerPath,
                                            tempDirectory, error);
+}
+
+// ============================================================================
+// 拖出压缩包内部的项
+// ============================================================================
+
+namespace
+{
+// 解压超过这个字节数才显示进度小窗（小的几百 KB 是一瞬间的事，弹窗反而闪眼睛）
+const unsigned long long kDragProgressThresholdBytes = 8ull * 1024ull * 1024ull;
+}
+
+std::vector<std::wstring> MainWindow::PrepareDragPaths(const std::vector<std::wstring>& paths)
+{
+    // ---- 1) 先看这一批里有没有压缩包内部的项 ----
+    //
+    // 普通磁盘文件走的还是原来的路（路径原样交给拖动循环），
+    // 这里只查文件属性、不碰 COM，所以来回拖动不会变慢。
+    bool hasContainerEntry = false;
+    for (const auto& path : paths)
+    {
+        if (shell::IsPathInsideContainer(path))
+        {
+            hasContainerEntry = true;
+            break;
+        }
+    }
+
+    if (!hasContainerEntry)
+    {
+        return paths;
+    }
+
+    // ---- 2) 大的才显示进度窗 ----
+    //
+    // DoDragDrop 是阻塞的，解压发生在进入拖动循环之前：这期间用户一直按着鼠标、
+    // 屏幕上什么都不动，很容易以为"卡住了"。所以把总大小估一下，大的就弹个小窗。
+    const bool showProgress =
+        static_cast<unsigned long long>(m_fileListView.SelectedTotalSize()) >= kDragProgressThresholdBytes;
+
+    std::vector<std::wstring> realPaths;
+    realPaths.reserve(paths.size());
+
+    const size_t total = paths.size();
+    for (size_t index = 0; index < total; ++index)
+    {
+        // 名字取最后一段，太长的话窗口里显示不下
+        const std::wstring& path = paths[index];
+        const size_t slash = path.find_last_of(L"\\/");
+        const std::wstring name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+
+        const std::wstring progressText = L"正在解出：" + name + L"（" + std::to_wstring(index + 1) +
+                                          L" / " + std::to_wstring(total) + L"）";
+
+        if (showProgress)
+        {
+            ShowDragProgress(progressText, static_cast<int>((index * 100) / total));
+        }
+
+        std::wstring error;
+        std::wstring realPath = ExtractContainerEntryToTemp(paths[index], error);
+
+        if (realPath.empty())
+        {
+            // 解不出来就跳过这一项，其余照拖（日志里留个原因）
+            Logger::Warn(L"拖出：压缩包内项解不出来，已跳过：" + paths[index] +
+                         L"，原因：" + (error.empty() ? L"未知" : error));
+            continue;
+        }
+
+        realPaths.push_back(std::move(realPath));
+
+        // 这一项解完了，把进度往前推一格（最后一项会短暂跳到 100%，看着比一直停着舒服）
+        if (showProgress)
+        {
+            ShowDragProgress(progressText, static_cast<int>(((index + 1) * 100) / total));
+        }
+    }
+
+    if (showProgress)
+    {
+        HideDragProgress();
+    }
+
+    Logger::Info(L"拖出：从压缩包解出 " + std::to_wstring(realPaths.size()) + L" / " +
+                 std::to_wstring(total) + L" 项到临时目录");
+
+    // 一项都没成功：返回空，调用方据此放弃这次拖动
+    return realPaths;
+}
+
+void MainWindow::ShowDragProgress(const std::wstring& text, int percent)
+{
+    RECT client = {};
+    ::GetClientRect(m_hWnd, &client);
+
+    const int panelWidth  = 360;
+    const int panelHeight = 96;
+    const int left = ((client.right - client.left) - panelWidth) / 2;
+    const int top  = ((client.bottom - client.top) - panelHeight) / 2;
+
+    // ---- 第一次用的时候创建三个控件 ----
+    //
+    // 面板用 STATIC + SS_WHITERECT（一个白底方块），上面压一行文字和一条进度条。
+    // 都做成主窗口的子窗口，跟着主窗口走，不用额外管理生命周期。
+    if (m_dragProgressPanel == nullptr)
+    {
+        HINSTANCE instance = ::GetModuleHandleW(nullptr);
+
+        // 注意每个控件都要带 WS_VISIBLE：WS_CHILD 窗口不给这个样式就是"建好即隐藏"，
+        // 只对面板 ShowWindow 的话，里面的文字和进度条永远看不见。
+        m_dragProgressPanel = ::CreateWindowExW(0, L"STATIC", L"",
+                                                WS_CHILD | WS_VISIBLE | WS_BORDER | SS_WHITERECT,
+                                                left, top, panelWidth, panelHeight,
+                                                m_hWnd, nullptr, instance, nullptr);
+
+        m_dragProgressText = ::CreateWindowExW(0, L"STATIC", text.c_str(),
+                                               WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                               left + 12, top + 20, panelWidth - 24, 22,
+                                               m_hWnd, nullptr, instance, nullptr);
+
+        m_dragProgressBar = ::CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE,
+                                              left + 12, top + 54, panelWidth - 24, 18,
+                                              m_hWnd, nullptr, instance, nullptr);
+
+        if (m_dragProgressBar != nullptr)
+        {
+            ::SendMessageW(m_dragProgressBar, PBM_SETRANGE32, 0, 100);
+        }
+
+        // 字体跟列表一致，看起来不像"野控件"
+        if (m_dragProgressText != nullptr && m_fileListView.Handle() != nullptr)
+        {
+            HFONT font = reinterpret_cast<HFONT>(
+                ::SendMessageW(m_fileListView.Handle(), WM_GETFONT, 0, 0));
+            if (font != nullptr)
+            {
+                ::SendMessageW(m_dragProgressText, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+        }
+    }
+
+    if (m_dragProgressText != nullptr)
+    {
+        ::SetWindowTextW(m_dragProgressText, text.c_str());
+    }
+    if (m_dragProgressBar != nullptr)
+    {
+        ::SendMessageW(m_dragProgressBar, PBM_SETPOS, static_cast<WPARAM>(percent), 0);
+    }
+
+    // 拖动前这里是同步循环，没有消息泵：必须自己把这三块强制画出来，
+    // 否则窗口要到解压结束（销毁）才会真的出现在屏幕上。
+    if (m_dragProgressPanel != nullptr)
+    {
+        ::ShowWindow(m_dragProgressPanel, SW_SHOW);
+        ::RedrawWindow(m_dragProgressPanel, nullptr, nullptr,
+                       RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+}
+
+void MainWindow::HideDragProgress()
+{
+    // 三个控件一起销毁，下次需要时重新建（用它的时间是"拖大文件"这种低频场景，
+    // 常驻没必要，留着还容易被别的重绘逻辑误伤）
+    for (HWND* handle : { &m_dragProgressBar, &m_dragProgressText, &m_dragProgressPanel })
+    {
+        if (*handle != nullptr)
+        {
+            ::DestroyWindow(*handle);
+            *handle = nullptr;
+        }
+    }
 }
 
 // ============================================================================

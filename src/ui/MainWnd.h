@@ -362,6 +362,20 @@ private:
     std::wstring ExtractContainerEntryToTemp(const std::wstring& virtualPath,
                                              std::wstring& error);
 
+    // ----------------------------------------------------------------
+    // 拖出前的路径准备（文件列表的 LVN_BEGINDRAG 会调它）
+    //
+    // 普通磁盘文件 → 原样返回，零成本（不查磁盘、不碰 COM）。
+    // 压缩包内部的项 → 先解到临时目录，返回真实路径；解不出来的项跳过。
+    // 一项都没解出来时返回空，调用方据此放弃这次拖动。
+    // ----------------------------------------------------------------
+    std::vector<std::wstring> PrepareDragPaths(const std::vector<std::wstring>& paths);
+
+    // 「正在解出以便拖出」的小进度窗（拖动前解压时挡住视线的那块）。
+    // 只有总大小超过阈值才显示，解完立即销毁。percent 传 0~100。
+    void ShowDragProgress(const std::wstring& text, int percent);
+    void HideDragProgress();
+
     // 把某条程序的存在状态记进配置（只在值真的变了才写盘，避免频繁落盘）
     void SetOpenWithProgramAlive(const std::wstring& extension,
                                  const std::wstring& programKey,
@@ -554,6 +568,11 @@ private:
     // 只在本进程第一次需要时生成一次：同一个压缩包反复双击里面的文件，
     // 会一直用同一个临时目录（%TEMP%\{guid}_{压缩包名}），不会每次都堆一个新目录。
     std::wstring                                 m_containerTempTag;
+
+    // 「正在解出以便拖出」小浮窗的三个控件（第一次需要时才创建，用完销毁）
+    HWND                                         m_dragProgressPanel = nullptr;
+    HWND                                         m_dragProgressText  = nullptr;
+    HWND                                         m_dragProgressBar   = nullptr;
 
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
 

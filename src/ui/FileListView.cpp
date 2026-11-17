@@ -1410,6 +1410,35 @@ size_t FileListView::ItemCount() const
     return m_result->entries.size();
 }
 
+unsigned long long FileListView::SelectedTotalSize() const
+{
+    unsigned long long total = 0;
+
+    if (m_hWnd == nullptr || m_result == nullptr)
+    {
+        return total;
+    }
+
+    const int itemCount = static_cast<int>(m_result->entries.size());
+
+    for (int index = 0; index < itemCount; ++index)
+    {
+        if ((ListView_GetItemState(m_hWnd, index, LVIS_SELECTED) & LVIS_SELECTED) == 0)
+        {
+            continue;
+        }
+
+        // 目录没有"大小"的概念，按 0 算（解压只看文件的实际字节数）
+        const shell::ShellEntry& entry = m_result->entries[index];
+        if (!entry.isFolder)
+        {
+            total += entry.size;
+        }
+    }
+
+    return total;
+}
+
 void FileListView::SelectAll()
 {
     if (m_hWnd == nullptr)
@@ -2326,13 +2355,48 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
 
         if (!paths.empty())
         {
-            // 对外只声明复制和移动（和资源管理器自己一样）；
-            // 在本程序内部按 Alt 建快捷方式，由我们自己的放置目标处理，不依赖这个声明
-            DWORD effect = shell::DoDragFiles(paths, m_hWnd, dragInfo->ptAction,
-                                              DROPEFFECT_COPY | DROPEFFECT_MOVE);
+            // ---- 压缩包内部：先把虚拟路径换成真实路径 ----
+            //
+            // 包内的项（C:\a\t.rar\sub\inner.txt）在磁盘上是不存在的，
+            // 外部程序照着 CF_HDROP 里的这个路径什么也读不到。
+            // 主窗口会先把它们解到临时目录，返回真实路径；解不出来就返回空。
+            std::vector<std::wstring> dragPaths = paths;
+            bool extractedFromContainer = false;
+
+            if (m_onPrepareDragPaths)
+            {
+                std::vector<std::wstring> prepared = m_onPrepareDragPaths(paths);
+
+                if (prepared.empty())
+                {
+                    // 一项都没解出来，别开始拖动（否则拖出去会落地成空）
+                    return 0;
+                }
+
+                // 路径变了，说明这一批是从压缩包里解出来的
+                if (prepared != paths)
+                {
+                    extractedFromContainer = true;
+                    dragPaths = std::move(prepared);
+                }
+            }
+
+            // 从压缩包里解出来的只是临时副本，源不该被"移动"——只给复制
+            const DWORD allowedEffects = extractedFromContainer
+                                             ? DROPEFFECT_COPY
+                                             : (DROPEFFECT_COPY | DROPEFFECT_MOVE);
+            const DWORD preferredEffect = extractedFromContainer ? DROPEFFECT_COPY : 0;
+
+            DWORD effect = shell::DoDragFiles(dragPaths, m_hWnd, dragInfo->ptAction,
+                                             allowedEffects, preferredEffect);
 
             // 移动走了：源目录里的东西已经没了，需要主窗口更新列表
-            if (effect == DROPEFFECT_MOVE && m_onDragCompleted)
+            // （压缩包里的项只会复制，源本来就还在，不用刷新）
+            //
+            // 注意这里不看 effect：有的目标（资源管理器）不把最终效果回写给我们，
+            // 拖完返回 DROPEFFECT_NONE，但文件其实已经被移动走了。真按 effect 判断，
+            // 列表里就会留下一个已经不存在的"幽灵项"。所以拖完一律通知刷新一次。
+            if (!extractedFromContainer && m_onDragCompleted)
             {
                 m_onDragCompleted(effect);
             }

@@ -901,16 +901,21 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
         return false;
     }
 
-    // ---- 4) 等文件真的落盘（CopyHere 是异步的，最多等 5 秒）----
+    // ---- 4) 等东西真的落盘（CopyHere 是异步的，最多等 5 秒）----
     bool landed = false;
+    bool isDirectory = false;
 
     for (int attempt = 0; attempt < 100; ++attempt)
     {
-        DWORD attributes = ::GetFileAttributesW(landingPath.c_str());
+        const DWORD attributes = ::GetFileAttributesW(landingPath.c_str());
 
-        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        // 文件、目录都算落地：
+        // 拖出压缩包里的整个文件夹时，CopyHere 复制出来的是一项目录，
+        // 以前这里按"不是目录"判断，导致文件夹永远等不到、最后报超时。
+        if (attributes != INVALID_FILE_ATTRIBUTES)
         {
-            landed = true;
+            landed      = true;
+            isDirectory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             break;
         }
 
@@ -929,22 +934,32 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
         if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
         {
             ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-            ::DeleteFileW(outputPath.c_str());
+
+            // 目录要先清空才能删，这里只做文件那一套；
+            // 目录撞名时直接让 MoveFileEx 失败，由调用方报错（临时目录下一般不会撞）
+            if (!isDirectory)
+            {
+                ::DeleteFileW(outputPath.c_str());
+            }
         }
 
         if (!::MoveFileExW(landingPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
         {
-            error = L"解出来的文件挪不到目标位置：" + outputPath;
+            error = L"解出来的内容挪不到目标位置：" + outputPath;
             return false;
         }
     }
 
-    // 只读：和系统解出来的临时文件一样，防止把包里的原件改坏
-    DWORD outputAttributes = ::GetFileAttributesW(outputPath.c_str());
-
-    if (outputAttributes != INVALID_FILE_ATTRIBUTES)
+    // 只读：和系统解出来的临时文件一样，防止把包里的原件改坏。
+    // 目录不加只读标记（加了会让里面新建文件变麻烦）。
+    if (!isDirectory)
     {
-        ::SetFileAttributesW(outputPath.c_str(), outputAttributes | FILE_ATTRIBUTE_READONLY);
+        DWORD outputAttributes = ::GetFileAttributesW(outputPath.c_str());
+
+        if (outputAttributes != INVALID_FILE_ATTRIBUTES)
+        {
+            ::SetFileAttributesW(outputPath.c_str(), outputAttributes | FILE_ATTRIBUTE_READONLY);
+        }
     }
 
     return true;

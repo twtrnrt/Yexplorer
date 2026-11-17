@@ -151,6 +151,23 @@ public:
     // 拖完之后回调：效果是"移动"说明文件已经被搬走，需要主窗口刷新列表
     void SetDragCompletedCallback(DragCompletedCallback callback) { m_onDragCompleted = std::move(callback); }
 
+    // 拖出去之前的"换路径"回调。
+    //
+    // 压缩包内部的项是虚拟路径（C:\a\t.rar\sub\inner.txt），外部程序按这个路径
+    // 什么都读不到，所以由主窗口先把它们解到临时目录，返回真实路径。
+    // 返回空 = 这一批拖不了（调用方就别开始拖动）。
+    // 没注册这个回调时，原样使用列表里的路径（普通磁盘文件就是这种情况）。
+    using PrepareDragPathsCallback =
+        std::function<std::vector<std::wstring>(const std::vector<std::wstring>& paths)>;
+    void SetPrepareDragPathsCallback(PrepareDragPathsCallback callback)
+    {
+        m_onPrepareDragPaths = std::move(callback);
+    }
+
+    // 当前选中项的总字节数（判断"要不要显示解压进度窗"用）。
+    // 只看已经枚举好的大小，不额外查磁盘。
+    unsigned long long SelectedTotalSize() const;
+
     // 排序规则（用于新建项时判断插到哪个位置）
     void SetComparator(Comparator comparator) { m_comparator = std::move(comparator); }
 
@@ -286,6 +303,7 @@ private:
     ColumnClickCallback                           m_onColumnClick;
     RenameCallback                                m_onRename;
     DragCompletedCallback                         m_onDragCompleted;
+    PrepareDragPathsCallback                      m_onPrepareDragPaths;
     Comparator                                    m_comparator;
     ColumnWidthChangedCallback                    m_onColumnWidthChanged;
 

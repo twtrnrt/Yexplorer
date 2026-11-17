@@ -553,7 +553,8 @@ std::shared_ptr<ShellDataObjectHolder> CreateShellDataObject(const std::vector<s
 DWORD DoDragFiles(const std::vector<std::wstring>& paths,
                   HWND                            sourceWindow,
                   POINT                           dragPointClient,
-                  DWORD                           allowedEffects)
+                  DWORD                           allowedEffects,
+                  DWORD                           preferredEffect)
 {
     if (paths.empty())
     {
@@ -570,11 +571,43 @@ DWORD DoDragFiles(const std::vector<std::wstring>& paths,
     }
     else
     {
-        dataObject.attach(new SimpleDataObject(paths, 0));
+        dataObject.attach(new SimpleDataObject(paths, preferredEffect));
     }
     if (dataObject == nullptr)
     {
         return DROPEFFECT_NONE;
+    }
+
+    // 标准壳对象自己不带"首选效果"，补一份写进去：接收方据此知道只能复制。
+    // 写失败不影响拖动（接收方会按同盘/跨盘自己判断），只是语义没那么精确。
+    if (preferredEffect != 0 && shellHolder != nullptr)
+    {
+        STGMEDIUM medium = {};
+        medium.tymed     = TYMED_HGLOBAL;
+        medium.hGlobal   = ::GlobalAlloc(GHND, sizeof(DWORD));
+
+        if (medium.hGlobal != nullptr)
+        {
+            void* raw = ::GlobalLock(medium.hGlobal);
+            if (raw != nullptr)
+            {
+                *static_cast<DWORD*>(raw) = preferredEffect;
+                ::GlobalUnlock(medium.hGlobal);
+
+                FORMATETC format = {};
+                format.cfFormat = static_cast<CLIPFORMAT>(
+                    ::RegisterClipboardFormatW(L"Preferred DropEffect"));
+                format.dwAspect = DVASPECT_CONTENT;
+                format.lindex   = -1;
+                format.tymed    = TYMED_HGLOBAL;
+
+                dataObject->SetData(&format, &medium, TRUE);
+            }
+            else
+            {
+                ::GlobalFree(medium.hGlobal);
+            }
+        }
     }
 
     Logger::Info(shellHolder != nullptr
