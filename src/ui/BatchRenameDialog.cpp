@@ -3228,7 +3228,7 @@ void BatchRenameDialog::OnApplyClick()
         }
 
         // 标题里报个数：有多少项现在改不了。按表格里标红的行数算，
-        // 和底部「有问题 K 项」是同一个数，用户一眼能对上
+        // 和表格上方那行提示、底部「有问题 K 项」是同一个数，用户一眼能对上
         size_t problemCount = 0;
 
         for (const auto& row : m_rows)
@@ -3240,7 +3240,7 @@ void BatchRenameDialog::OnApplyClick()
         }
 
         const std::wstring instruction =
-            L"有 " + std::to_wstring(problemCount) + L" 个文件不允许重命名，请检查";
+            L"存在 " + std::to_wstring(problemCount) + L" 个异常文件，请处理好再进行重命名！";
 
         ShowCenteredMessage(instruction.c_str(), content, true);
         return;
@@ -3627,6 +3627,25 @@ void BatchRenameDialog::Draw(HDC dc)
 
     const int padding = Scale(kPadding);
 
+    // ---- 统计两件事：改了名的项数、异常项数（标红的行）----
+    // 「修改」这一格只问名字改没改：哪怕这一行因为被占用/重名标红，也照样算进「修改」里，
+    // 「有问题」才单独按标红行数算，两件事不混着看
+    int changedCount  = 0;
+    int conflictCount = 0;
+
+    for (const auto& row : m_rows)
+    {
+        if (row.newName != row.oldName)
+        {
+            ++changedCount;
+        }
+
+        if (row.state == 2)
+        {
+            ++conflictCount;
+        }
+    }
+
     // ---- 标题 ----
     HGDIOBJ oldFont = ::SelectObject(dc, m_fontTitle);
     ::SetBkMode(dc, TRANSPARENT);
@@ -3642,6 +3661,14 @@ void BatchRenameDialog::Draw(HDC dc)
     RECT hintRect = { padding, Scale(44), clientRect.right - padding, Scale(66) };
     ::DrawTextW(dc, L"按 Ctrl 可多选，支持拖拽排序。单击模板按钮可载入模板，右键单击给模板重命名。",
                 -1, &hintRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // 有异常项时，提醒文字跟上面这句同一行、靠右放（红字，不占表格的地方）
+    if (conflictCount > 0)
+    {
+        ::SetTextColor(dc, kErrorColor);
+        ::DrawTextW(dc, L"存在异常文件，请处理好再进行重命名。", -1, &hintRect,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 
     // ---- 三条分隔线（列表上方 / 列表下方 / 模板栏下方）----
     HPEN dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
@@ -3744,21 +3771,7 @@ void BatchRenameDialog::Draw(HDC dc)
                m_hotRegexButton, m_pressedRegexButton, false);
 
     // ---- 底部统计（和四个按钮同一条线，在左边空白里居中）----
-    int changedCount = 0;
-    int conflictCount = 0;
-
-    for (const auto& row : m_rows)
-    {
-        if (row.state == 1)
-        {
-            ++changedCount;
-        }
-        else if (row.state == 2)
-        {
-            ++conflictCount;
-        }
-    }
-
+    // changedCount / conflictCount 已经在函数开头算好
     ::SelectObject(dc, m_fontSmall);
 
     // 这三行平时显示统计；改名过程中显示进度，失败之后显示失败原因（都写在同一块地方）
@@ -3771,7 +3784,7 @@ void BatchRenameDialog::Draw(HDC dc)
     else
     {
         wchar_t statsText[256] = {};
-        ::wsprintfW(statsText, L"共 %u 项 · 会改动 %u 项 · 有问题 %u 项",
+        ::wsprintfW(statsText, L"共 %u 项 · 修改 %u 项 · 有问题 %u 项",
                     static_cast<unsigned>(m_rows.size()),
                     static_cast<unsigned>(changedCount),
                     static_cast<unsigned>(conflictCount));
@@ -3793,21 +3806,6 @@ void BatchRenameDialog::Draw(HDC dc)
 
     ::DrawTextW(dc, statusText.c_str(), -1, &m_statsRect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    // 有问题的行会标红，但「应用」照样能点：点下去会先弹窗把原因列出来，不会直接改文件
-    // （表格加高 47px 之后这条缝只剩十几像素，所以把提示压成一行，贴着按钮上沿画）
-    if (conflictCount > 0 && m_statusText.empty())
-    {
-        const int bandBottom = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
-
-        RECT warnRect = { padding, bandBottom + Scale(1),
-                          clientRect.right - padding,
-                          m_applyRect.top - Scale(1) };
-
-        ::SetTextColor(dc, kErrorColor);
-        ::DrawTextW(dc, L"标红的行点「应用」会先弹窗提醒，不会改名。", -1, &warnRect,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
 
     ::SelectObject(dc, oldFont);
 
