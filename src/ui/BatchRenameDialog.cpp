@@ -3175,14 +3175,27 @@ void BatchRenameDialog::UpdateStatusLine()
         return;
     }
 
+    RECT clientRect = {};
+    ::GetClientRect(m_hWnd, &clientRect);
+
+    // 底部这一条：从参数区下面那条空白一直盖到窗口底，**整条宽度**都要刷。
+    // 统计文字是居中画在左边空白里的（m_statsRect 从 padding 开始），
+    // 以前这里左边界错写成 kRuleTop（那是个 Y 坐标），左半截永远刷不到，
+    // 于是"共 N 项 · 修改 M 项"里的数字会一直是打开窗口时的那一份，改规则也不跟着变。
     RECT bottomRect = {};
 
-    bottomRect.left   = Scale(kRuleTop);
+    bottomRect.left   = 0;
     bottomRect.top    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
-    bottomRect.right  = m_applyRect.right;
-    bottomRect.bottom = m_applyRect.bottom + Scale(8);
+    bottomRect.right  = clientRect.right;
+    bottomRect.bottom = clientRect.bottom;
 
     ::InvalidateRect(m_hWnd, &bottomRect, FALSE);
+
+    // 表格上方右侧那句"存在异常文件…"跟"按 Ctrl 可多选…"同一行，
+    // 异常项数变了它也要出现/消失，把这一条也刷掉，不然得等整窗重画才更新
+    RECT hintBand = { 0, Scale(44), clientRect.right, Scale(66) };
+    ::InvalidateRect(m_hWnd, &hintBand, FALSE);
+
     ::UpdateWindow(m_hWnd);
 }
 
