@@ -1154,47 +1154,63 @@ void BatchRenameDialog::EnableRuleControls()
 // 除「普通查找」以外，一律按正则解释。
 // ============================================================================
 
-size_t BatchRenameDialog::RegexPresetCount()
+// ---- 内置正则写法表（两列：写法 / 说明）----
+// 上表放在匿名命名空间里，避免和别的编译单元撞名；只在下面几个函数里用。
+namespace
 {
-    return 9;
-}
-
-const wchar_t* BatchRenameDialog::RegexPresetName(size_t index)
-{
-    static const wchar_t* names[] =
+    const BatchRenameDialog::RegexEntry kRegexEntries[] =
     {
-        L"普通查找",
-        L"连续数字  \\d+",
-        L"副本编号 (N)",
-        L"开头编号 01_",
-        L"连续空白  \\s+",
-        L"8 位日期",
-        L"半角括号备注",
-        L"全角方括号备注",
-        L"版本号 x.y.z"
+        // ---- 常用写法：用户手里真会用来改名的 8 条（编号跟旧版一致，模板文件里存的就是它们）----
+        {  1, L"\\d+",                  L"连续数字（照片 001 里的 001）",        true },
+        {  2, L"\\s*\\(\\d+\\)$",       L"结尾的副本编号 (N)，连前面的空格一起", true },
+        {  3, L"^\\d+[\\.\\-_ ]*",      L"开头的编号，如 01_、001-、02 ",        true },
+        {  4, L"\\s+",                  L"连续空白（空格 / Tab 串）",            true },
+        {  5, L"\\d{8}",                L"8 位日期（20260105）",                 true },
+        {  6, L"\\([^)]*\\)",           L"半角括号备注（(草稿)）",               true },
+        {  7, L"【[^】]*】",             L"全角方括号备注（【草稿】）",           true },
+        {  8, L"\\d+\\.\\d+(\\.\\d+)*",  L"版本号（1.2 / 1.2.3）",               true },
+
+        // ---- 语法元素：照「正则速查表」补的，20 起编号 ----
+        { 20, L".",                     L"任意单个字符",                         false },
+        { 21, L".*",                    L"0 个或以上个任意字符",                 false },
+        { 22, L".+",                    L"一个或以上任意字符",                   false },
+        { 23, L".+?",                   L"一个或以上任意字符，但尽可能少",       false },
+        { 24, L".{3}",                  L"正好三个任意字符",                     false },
+        { 25, L".{3,}",                 L"三个或以上任意字符",                   false },
+        { 26, L".{2,4}",                L"二到四个任意字符",                     false },
+        { 27, L"(.+)",                  L"子表达式分组（一个或多个任意字符）",   false },
+        { 28, L"[abc]",                 L"括号里任意一个字符（a 或 b 或 c）",    false },
+        { 29, L"[^abc]",                L"除了这些以外的一个字符",               false },
+        { 30, L"[a-z]",                 L"范围内的一个字符（a 到 z）",           false },
+        { 31, L"aa|bb|cc",              L"候选之一（aa 或 bb 或 cc）",           false },
+        { 32, L"\\\\",                  L"匹配一个真正的反斜杠 \\",              false },
+        { 33, L"\\w",                   L"一个字母 / 数字 / 下划线",             false },
+        { 34, L"\\s",                   L"一个空白字符（空格 / Tab / 换行）",    false },
+        { 35, L"\\b",                   L"单词边界",                             false },
+        { 36, L"\\A",                   L"整段文本的开头",                       false },
+        { 37, L"\\Z",                   L"整段文本的结尾",                       false }
     };
 
-    const size_t count = RegexPresetCount();
-    return names[(index < count) ? index : 0];
+    // 表里一共多少条
+    const size_t kRegexEntryCount = _countof(kRegexEntries);
 }
 
-const wchar_t* BatchRenameDialog::RegexPresetPattern(size_t index)
+size_t BatchRenameDialog::RegexEntryCount()
 {
-    static const wchar_t* patterns[] =
-    {
-        L"",                    // 0：不用（空写法 = 不做替换）
-        L"\\d+",
-        L"\\s*\\(\\d+\\)$",
-        L"^\\d+[\\.\\-_ ]*",
-        L"\\s+",
-        L"\\d{8}",
-        L"\\([^)]*\\)",
-        L"【[^】]*】",
-        L"\\d+\\.\\d+(\\.\\d+)*"
-    };
+    return kRegexEntryCount;
+}
 
-    const size_t count = RegexPresetCount();
-    return patterns[(index < count) ? index : 0];
+const BatchRenameDialog::RegexEntry* BatchRenameDialog::FindRegexEntry(int id)
+{
+    for (size_t i = 0; i < kRegexEntryCount; ++i)
+    {
+        if (kRegexEntries[i].id == id)
+        {
+            return &kRegexEntries[i];
+        }
+    }
+
+    return nullptr;
 }
 
 // ============================================================================
@@ -1693,11 +1709,17 @@ void BatchRenameDialog::BeginTemplateRename(int index)
 
     const RECT& rect = m_templateRects[index];
 
+    // 就地改名：输入框比按钮本身小一圈（上下左右各缩 1px），
+    // 这样按钮的边框、底色还留在外面看得见，感觉是"按钮原地变成可编辑的"，
+    // 而不是按钮整个消失、只剩一个白框。
+    RECT editRect = rect;
+    ::InflateRect(&editRect, -1, -1);
+
     m_renameIndex = index;
     m_hRenameEdit = ::CreateWindowExW(0, L"EDIT", m_templates[index].name.c_str(),
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                      rect.left, rect.top,
-                                      rect.right - rect.left, rect.bottom - rect.top,
+                                      editRect.left, editRect.top,
+                                      editRect.right - editRect.left, editRect.bottom - editRect.top,
                                       m_hWnd,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdRenameEdit)),
                                       ::GetModuleHandleW(nullptr), nullptr);
@@ -1705,6 +1727,11 @@ void BatchRenameDialog::BeginTemplateRename(int index)
     if (m_hRenameEdit != nullptr)
     {
         ::SendMessageW(m_hRenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+
+        // 左右各留 3px 内边距，别让文字贴着按钮边框
+        ::SendMessageW(m_hRenameEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                       MAKELPARAM(Scale(3), Scale(3)));
+
         ::SendMessageW(m_hRenameEdit, EM_SETSEL, 0, -1);   // 全选，直接打字就替换
         ::SetFocus(m_hRenameEdit);
 
@@ -1849,10 +1876,10 @@ void BatchRenameDialog::ApplyTemplateToControls(const RenameTemplate& tpl)
         ::SendMessageW(m_hIncludeExt, BM_SETCHECK,
                        tpl.includeExt ? BST_CHECKED : BST_UNCHECKED, 0);
     }
-    // 查找方式：越界的值（老文件里可能只存了 0/1）夹到合法范围
+    // 查找方式：只认 0（普通）/ 10（自定义）/ 表里的写法，其它（比如老文件里的怪值）一律当普通查找
     {
         int preset = tpl.regexPreset;
-        if (preset < 0 || preset > kRegexCustomItem)
+        if (preset != 0 && preset != kRegexCustomItem && FindRegexEntry(preset) == nullptr)
         {
             preset = 0;
         }
@@ -2178,20 +2205,22 @@ bool BatchRenameDialog::RegexOn() const
 // 0（普通查找）和 10（自定义正则）不动用户已经敲的内容
 void BatchRenameDialog::SetRegexPreset(int preset)
 {
-    if (preset < 0 || preset > kRegexCustomItem)
+    // 合法编号只有三种：0 = 普通查找、10 = 自定义正则、表里那几条写法
+    if (preset != 0 && preset != kRegexCustomItem && FindRegexEntry(preset) == nullptr)
     {
         preset = 0;
     }
 
     m_regexPreset = preset;
 
-    if (preset >= 1 && preset < static_cast<int>(RegexPresetCount()))
+    // 选了表里的写法就把它填进「查找」；普通查找和自定义正则不动用户已经敲的内容
+    if (const RegexEntry* entry = FindRegexEntry(preset))
     {
         m_suppressRecalculate = true;
 
         if (m_hFind != nullptr)
         {
-            ::SetWindowTextW(m_hFind, RegexPresetPattern(static_cast<size_t>(preset)));
+            ::SetWindowTextW(m_hFind, entry->pattern);
         }
 
         m_suppressRecalculate = false;
@@ -2203,7 +2232,91 @@ void BatchRenameDialog::SetRegexPreset(int preset)
     Recalculate();
 }
 
-// 点「普通 / 正则」按钮：弹出菜单，11 项 = 普通查找 + 9 条内置正则 + 自定义正则
+// ----------------------------------------------------------------------------
+// 自绘菜单项：左边一列「写法」（等宽字体，看着像代码），右边一列「说明」。
+// 这样跟用户给的速查表一个格式：一眼能看出这条正则长什么样、是干什么的。
+// ----------------------------------------------------------------------------
+void BatchRenameDialog::DrawRegexMenuItem(DRAWITEMSTRUCT* draw)
+{
+    if (draw == nullptr || draw->itemData == 0)
+    {
+        return;
+    }
+
+    const RegexEntry* entry = reinterpret_cast<const RegexEntry*>(draw->itemData);
+
+    // 鼠标停在这一项上时用系统高亮色，平时用菜单底色（跟着系统主题走）
+    const bool hot = (draw->itemState & ODS_SELECTED) != 0;
+    const COLORREF backColor = hot ? ::GetSysColor(COLOR_HIGHLIGHT) : ::GetSysColor(COLOR_MENU);
+    const COLORREF textColor = hot ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : ::GetSysColor(COLOR_MENUTEXT);
+
+    HBRUSH brush = ::CreateSolidBrush(backColor);
+    ::FillRect(draw->hDC, &draw->rcItem, brush);
+    ::DeleteObject(brush);
+
+    ::SetBkMode(draw->hDC, TRANSPARENT);
+    ::SetTextColor(draw->hDC, textColor);
+
+    // 左列前面留一小段放"当前用的是哪条"的勾
+    const int patternX = draw->rcItem.left + Scale(20);
+    const int descX    = draw->rcItem.left + Scale(150);
+
+    if (entry->id == m_regexPreset)
+    {
+        RECT checkRect = draw->rcItem;
+        checkRect.left  += Scale(3);
+        checkRect.right  = checkRect.left + Scale(14);
+        ::DrawTextW(draw->hDC, L"✓", -1, &checkRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // 左列：写法（等宽字体。按界面的字体高度现做一个，菜单不是常驻，不用缓存）
+    LOGFONTW logFont = {};
+    HFONT uiFont = reinterpret_cast<HFONT>(::SendMessageW(m_hWnd, WM_GETFONT, 0, 0));
+    if (uiFont == nullptr)
+    {
+        uiFont = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+    }
+
+    if (::GetObjectW(uiFont, sizeof(logFont), &logFont) == 0)
+    {
+        logFont.lfHeight = -Scale(12);
+    }
+
+    HFONT monoFont = ::CreateFontW(logFont.lfHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+    HGDIOBJ oldFont = ::SelectObject(draw->hDC, (monoFont != nullptr) ? monoFont : uiFont);
+
+    RECT rcPattern = draw->rcItem;
+    rcPattern.left  = patternX;
+    rcPattern.right = descX - Scale(8);
+
+    ::DrawTextW(draw->hDC, entry->pattern, -1, &rcPattern,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    ::SelectObject(draw->hDC, uiFont);
+    ::SetTextColor(draw->hDC, textColor);
+
+    // 右列：说明
+    RECT rcDesc = draw->rcItem;
+    rcDesc.left  = descX;
+    rcDesc.right -= Scale(8);
+
+    ::DrawTextW(draw->hDC, entry->desc, -1, &rcDesc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    ::SelectObject(draw->hDC, oldFont);
+
+    if (monoFont != nullptr)
+    {
+        ::DeleteObject(monoFont);
+    }
+}
+
+// 点「普通 / 正则」按钮：弹出菜单。
+// 菜单结构 = 普通查找 ／ 常用写法（子菜单）／ 语法元素（子菜单）／ 自定义正则，
+// 两个子菜单里的条目都是自绘两列（左写法、右说明）。
 void BatchRenameDialog::OnRegexButtonClick()
 {
     HMENU menu = ::CreatePopupMenu();
@@ -2216,15 +2329,26 @@ void BatchRenameDialog::OnRegexButtonClick()
     const int kMenuBase = 7000;
 
     ::AppendMenuW(menu, MF_STRING, kMenuBase + 0, L"普通查找（按文字找）");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-    for (size_t i = 1; i < RegexPresetCount(); ++i)
+    HMENU commonMenu = ::CreatePopupMenu();
+    HMENU syntaxMenu = ::CreatePopupMenu();
+
+    for (size_t i = 0; i < kRegexEntryCount; ++i)
     {
-        ::AppendMenuW(menu, MF_STRING, kMenuBase + static_cast<UINT>(i), RegexPresetName(i));
+        // 自绘项：把这一条的指针当"附加数据"塞进去，WM_DRAWITEM 里再取出来画
+        ::AppendMenuW(kRegexEntries[i].common ? commonMenu : syntaxMenu,
+                      MF_OWNERDRAW,
+                      static_cast<UINT_PTR>(kMenuBase + kRegexEntries[i].id),
+                      reinterpret_cast<LPTSTR>(const_cast<RegexEntry*>(&kRegexEntries[i])));
     }
 
+    ::AppendMenuW(menu, MF_POPUP | MF_STRING, reinterpret_cast<UINT_PTR>(commonMenu), L"常用写法");
+    ::AppendMenuW(menu, MF_POPUP | MF_STRING, reinterpret_cast<UINT_PTR>(syntaxMenu), L"语法元素（速查表）");
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kMenuBase + kRegexCustomItem, L"自定义正则（自己写）");
 
-    // 当前选的那条打勾
+    // 当前选的那条打勾（自绘项自己画勾，这两条普通项交给系统画）
     ::CheckMenuItem(menu, static_cast<UINT>(kMenuBase + m_regexPreset), MF_BYCOMMAND | MF_CHECKED);
 
     // 菜单贴在按钮左下角弹出（按钮下方空间不够时系统会自动往上翻）
@@ -2237,7 +2361,7 @@ void BatchRenameDialog::OnRegexButtonClick()
     const int command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
                                          point.x, point.y, 0, m_hWnd, nullptr);
 
-    ::DestroyMenu(menu);
+    ::DestroyMenu(menu);   // 连子菜单一起销毁
 
     if (command >= kMenuBase)
     {
@@ -3197,8 +3321,33 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
         return 0;
 
-    case WM_DRAWITEM:
+    case WM_MEASUREITEM:
+    {
+        // 自绘菜单项全部一样高、一样宽（宽度要够放"写法 + 说明"两列）
+        MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+
+        if (measure != nullptr && measure->CtlType == ODT_MENU)
+        {
+            measure->itemHeight = Scale(24);
+            measure->itemWidth  = Scale(430);   // 够放"写法 + 说明"两列，说明太长时右边省略号
+            return TRUE;
+        }
+
         return 0;
+    }
+
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+
+        if (draw != nullptr && draw->CtlType == ODT_MENU)
+        {
+            DrawRegexMenuItem(draw);
+            return TRUE;
+        }
+
+        return 0;
+    }
 
     case WM_NOTIFY:
     {

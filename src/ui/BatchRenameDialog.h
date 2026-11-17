@@ -179,12 +179,27 @@ private:
     void UpdateListDrag(int clientY);
     void FinishListDrag();
 
-    // 正则下拉里的内置常用写法（下标 0 表示"普通查找"，1~9 是预设）
-    static size_t RegexPresetCount();
-    static const wchar_t* RegexPresetName(size_t index);
-    static const wchar_t* RegexPresetPattern(size_t index);
+    // ---- 内置正则写法表 ----
+    // 每一条 = 「怎么写」（左列，会被原样填进「查找」）+ 「什么意思」（右列，给人看的），
+    // 菜单按两列排版（左列等宽字体、右列中文说明），照用户给的速查表格式。
+    // 编号特意留空：1~8 是前几版就有的常用写法（模板文件里存的就是这几个数字，不能改），
+    // 20 起是后来照语法速查表补进来的「语法元素」，10 单独留给「自定义正则」。
+public:
+    struct RegexEntry
+    {
+        int            id;        // 编号（存进模板 / 菜单里打勾都靠它）
+        const wchar_t* pattern;   // 左列：写法
+        const wchar_t* desc;      // 右列：说明
+        bool           common;    // true = 常用写法组，false = 语法元素组
+    };
 
-    // 查找方式下拉里"自定义正则"那一项的编号（选它 = 用户在查找框里自己写正则）
+    static size_t RegexEntryCount();
+    static const RegexEntry* FindRegexEntry(int id);   // 按编号找一条，找不到返回 nullptr
+
+private:
+    void DrawRegexMenuItem(DRAWITEMSTRUCT* draw);      // 自绘菜单项（两列）
+
+    // 查找方式菜单里"自定义正则"那一项的编号（选它 = 用户在查找框里自己写正则）
     static const int kRegexCustomItem = 10;
 
     // 查找方式（点「普通 / 正则」按钮弹出菜单，选一条就生效）
