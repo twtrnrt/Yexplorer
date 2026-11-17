@@ -171,6 +171,7 @@ private:
 
     void OnTemplateSlotClick(int index);    // 左键点槽：高亮 + 载入
     void BeginTemplateRename(int index);    // 右键点槽：在按钮上原地改名
+    void UpdateRenameEditLayout();           // 让改名输入框里的字保持在按钮正中间
     void CommitTemplateRename();
     void CancelTemplateRename();
 

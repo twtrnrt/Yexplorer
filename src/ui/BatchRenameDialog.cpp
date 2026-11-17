@@ -32,6 +32,7 @@
 #include "core/Logger.h"
 
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "comctl32.lib")   // TaskDialog 用它（模板未保存时那个三选提醒）
 
 namespace
 {
@@ -43,12 +44,12 @@ const int kClientWidth  = 940;
 const int kClientHeight = 642;   // 参数区从 4 行减到 3 行，窗口跟着矮一行（34px）
 const int kPadding      = 20;
 
-// 预览列表的位置
+// 预览列表的位置（高度从 246 加到 293，多出来的 47px 正好吃掉规则区和底部按钮之间那块空白）
 const int kListTop    = 78;
-const int kListHeight = 246;
+const int kListHeight = 293;
 
 // 模板栏（预览列表和规则区之间那一条）：固定 10 个槽，一行排满
-const int kTemplateTop     = 342;
+const int kTemplateTop     = 389;
 const int kTemplateSlotGap = 4;    // 槽间距（原来是 8，收一半；槽宽在 Layout 里按表格宽度均分算）
 const int kTemplateSlotH   = 30;   // 槽高
 
@@ -58,14 +59,14 @@ const int kBottomButtonGap = 12;
 
 // 参数区：三行，每行一个 1px 细边框"分组框"，行内控件统一高度；
 // kRuleRowHeight 是行与行的间距，kRuleBandHeight 是分组框高度
-const int kRuleTop          = 398;
+const int kRuleTop          = 445;
 const int kRuleRowHeight    = 48;   // 行距（比分组框高，多出来的部分就是行与行之间的白缝）
 const int kRuleBandHeight   = 36;   // 每行分组框的高度
 const int kRuleBandInset    = 0;    // 分组框跟表格同宽（都从左 padding 到右 padding，不再外扩）
 const int kRuleControlHeight = 24;  // 行内所有控件（输入框 / 下拉 / 复选框 / 按钮）统一高度
 const int kRuleControlTop    = 6;   // 控件相对分组条顶部的偏移：(36-24)/2
 const int kRuleRightX        = 920; // 三行内容的右边界，统一收在这一列
-const int kRuleSortDividerX  = 732; // 第三行里"序号"和"排序"之间的竖分隔线位置
+const int kRuleSortDividerX  = 736; // 第三行里"序号"和"排序"之间的竖分隔线位置（两边各留 12px）
 
 // 底部那条线：现在只剩统计文字 + 四个按钮（排序 / 倒序已经搬到参数区第三行）
 
@@ -123,11 +124,12 @@ struct RuleFieldSpec
 const RuleFieldSpec kRuleSpecs[kRfCount] =
 {
     // ---- 第 0 行：前缀 / 后缀 / 扩展名（下拉 + 值）/ 大小写 ----
-    { L"前缀",    28, 30,  63, 220, 0, 24 },         // 前缀
-    { L"后缀",   291, 30, 326, 220, 0, 24 },         // 后缀
-    { L"扩展名", 554, 44, 603, 100, 0, 24 * 3 },     // 扩展名下拉（不修改 / 修改）
-    { nullptr,   -1, -1, 703,  50, 0, 24 },          // 扩展名填什么（紧贴下拉，不留间隔）
-    { L"大小写", 761, 44, 810, 102, 0, 24 * 3 },     // 大小写下拉（右端留 8px 到框线）
+    // 两个下拉（不修改 / 保持原样）只留够显示字的宽度，省下来的 50px 全给了前后缀两个输入框
+    { L"前缀",    28, 30,  63, 245, 0, 24 },         // 前缀
+    { L"后缀",   316, 30, 351, 245, 0, 24 },         // 后缀
+    { L"扩展名", 604, 44, 653,  72, 0, 24 * 3 },     // 扩展名下拉（宽度 72 够显示「不修改」）
+    { nullptr,   -1, -1, 725,  50, 0, 25 },          // 扩展名填什么（紧贴下拉，向下加高 1px）
+    { L"大小写", 783, 44, 832,  80, 0, 24 * 3 },     // 大小写下拉（宽度 80 够显示「保持原样」）
 
     // ---- 第 1 行：查找（紧贴「普通 / 正则」按钮）/ 替换为（跟查找一样长）/ 两个复选框 ----
     { L"查找",    28, 30,  63, 285, 1, 24 },         // 查找
@@ -144,8 +146,8 @@ const RuleFieldSpec kRuleSpecs[kRfCount] =
     { L"位数",  355, 30, 390,  54, 2, 24 },          // 位数
     { L"位置",  452, 30, 487, 120, 2, 24 * 3 },      // 位置下拉（2 项）
     { L"分隔符", 615, 44, 664,  60, 2, 24 },         // 分隔符（60 宽，一般就填一个符号）
-    { nullptr,   -1, -1, 740,  96, 2, 24 * 5 },      // 排序下拉（4 项）
-    { nullptr,   -1, -1, 844,  68, 2, 24 }           // 倒序（右端留 8px 到框线）
+    { nullptr,   -1, -1, 748,  96, 2, 24 * 5 },      // 排序下拉（4 项，跟左边序号组分得更开）
+    { nullptr,   -1, -1, 852,  60, 2, 24 }           // 倒序（右端留 8px 到框线）
 };
 
 // 控件 ID
@@ -989,8 +991,10 @@ void BatchRenameDialog::Layout()
 
         ::MoveWindow(m_hList, padding, Scale(kListTop), listWidth, Scale(kListHeight), TRUE);
 
-        // 列宽按真实内宽重算：原名 42% / 新名 42% / 状态 16%
-        const int innerWidth = listWidth - Scale(4);
+        // 列宽按真实内宽重算：原名 42% / 新名 42% / 状态 16%。
+        // 这里要扣掉竖向滚动条那一条的宽度：行数多了冒出竖滚动条时客户区会变窄，
+        // 三列加起来如果正好等于原宽度，就会再冒出一条横向滚动条（用户说不要横向滚动条）。
+        const int innerWidth = listWidth - ::GetSystemMetrics(SM_CXVSCROLL) - Scale(2);
         ListView_SetColumnWidth(m_hList, 0, innerWidth * 42 / 100);
         ListView_SetColumnWidth(m_hList, 1, innerWidth * 42 / 100);
         ListView_SetColumnWidth(m_hList, 2, innerWidth * 16 / 100);
@@ -1048,7 +1052,13 @@ void BatchRenameDialog::Layout()
 
     // ---- 模板栏：10 个槽一行排满（全是自绘按钮）----
     {
-        const int top  = Scale(kTemplateTop) - Scale(2);
+        // 竖着居中在上下两条分隔线中间（上线在 kTemplateTop-12、下线在 kRuleTop-12），
+        // 以前固定往上抬 2px，看着偏上；现在按两条线的中点算。
+        const int lineTop    = Scale(kTemplateTop - 12);
+        const int lineBottom = Scale(kRuleTop - 12);
+        const int slotHeight = Scale(kTemplateSlotH);
+        const int top        = lineTop + (lineBottom - lineTop - slotHeight) / 2;
+
         // 这一行跟表格（预览列表）同宽：从 padding 起步、到 clientRight-padding 收尾。
         // 十个槽平均分这段宽度：每格 cell = 总宽/10，槽宽 = cell - 间距，
         // 最后一格补满到右边界（这样整排正好跟表格右边缘对齐，不会差几个像素）。
@@ -1057,7 +1067,6 @@ void BatchRenameDialog::Layout()
         const int count    = static_cast<int>(BatchRenameDialog::kTemplateSlotCount);
         const int cell     = (count > 0) ? (totalW / count) : totalW;
         const int slotGap  = Scale(kTemplateSlotGap);
-        const int slotHeight = Scale(kTemplateSlotH);
 
         m_templateRects.resize(BatchRenameDialog::kTemplateSlotCount);
 
@@ -1619,19 +1628,44 @@ bool BatchRenameDialog::ConfirmLeaveSlot()
                                   : std::wstring(L"当前模板");
 
     const std::wstring message =
-        L"模板「" + name + L"」的参数改过还没保存。\r\n\r\n"
-        L"是 = 先保存再继续\r\n"
-        L"否 = 不保存直接继续\r\n"
-        L"取消 = 留在这个模板继续改";
+        L"模板「" + name + L"」的参数改过还没保存。\r\n"
+        L"先保存的话，下次点这个模板还是这套参数；不保存就直接跳到新模板。";
 
-    const int answer = ::MessageBoxW(m_hWnd, message.c_str(), L"批量重命名",
-                                     MB_YESNOCANCEL | MB_ICONQUESTION);
+    // 这里原本用 MessageBox，但它不认"窗口居中"，实测弹到了屏幕右下角（还压到任务栏那边）。
+    // 换成 TaskDialog：TDF_POSITION_RELATIVE_TO_WINDOW 会让它在属主窗口（本窗口）中间弹出。
+    // 三个按钮自己起名字，返回的自定义 ID 再翻译回"是 / 否 / 取消"。
+    const int kButtonSave   = 100;
+    const int kButtonLeave  = 101;
+    const int kButtonCancel = 102;
 
-    if (answer == IDCANCEL)
+    TASKDIALOG_BUTTON buttons[3] =
+    {
+        { kButtonSave,   L"是，先保存再继续" },
+        { kButtonLeave,  L"否，不保存直接继续" },
+        { kButtonCancel, L"取消，留在这里继续改" }
+    };
+
+    TASKDIALOGCONFIG config = {};
+    config.cbSize             = sizeof(config);
+    config.hwndParent         = m_hWnd;
+    config.dwFlags            = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons    = 0;
+    config.pszWindowTitle     = L"批量重命名";
+    config.pszMainIcon        = TD_INFORMATION_ICON;
+    config.pszMainInstruction = L"模板的参数改过还没保存";
+    config.pszContent         = message.c_str();
+    config.pButtons           = buttons;
+    config.cButtons           = ARRAYSIZE(buttons);
+    config.nDefaultButton     = kButtonSave;
+
+    int pressed = kButtonCancel;
+    ::TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
+
+    if (pressed == kButtonCancel)
     {
         return false;
     }
-    if (answer == IDYES)
+    if (pressed == kButtonSave)
     {
         SaveCurrentSlot();
     }
@@ -1728,15 +1762,77 @@ void BatchRenameDialog::BeginTemplateRename(int index)
     {
         ::SendMessageW(m_hRenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
 
-        // 左右各留 3px 内边距，别让文字贴着按钮边框
-        ::SendMessageW(m_hRenameEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                       MAKELPARAM(Scale(3), Scale(3)));
-
         ::SendMessageW(m_hRenameEdit, EM_SETSEL, 0, -1);   // 全选，直接打字就替换
         ::SetFocus(m_hRenameEdit);
 
+        UpdateRenameEditLayout();   // 第一下就把字摆到按钮正中
+
         ::InvalidateRect(m_hWnd, &rect, FALSE);
     }
+}
+
+// 让就地改名的输入框看起来"字在按钮正中间"。
+// 单行 EDIT 的 ES_CENTER 是不起作用的（那个样式只对多行框有效），靠 EM_SETMARGINS 折算
+// 内边距在实测里也不稳（选区会偏左）。所以换个笨办法但可靠：
+// 把输入框本身做成"文字宽 + 一点余量"的小方框，再在按钮里水平居中摆，
+// 框里是左对齐，整体看上去就跟按钮上的字一样居中；打字时按新文字宽重算一次。
+void BatchRenameDialog::UpdateRenameEditLayout()
+{
+    if (m_hRenameEdit == nullptr)
+    {
+        return;
+    }
+
+    if (m_renameIndex < 0 || m_renameIndex >= static_cast<int>(m_templateRects.size()))
+    {
+        return;
+    }
+
+    const RECT& slot = m_templateRects[static_cast<size_t>(m_renameIndex)];
+
+    // 按钮里留 1px 边，输入框就在这 1px 里面活动
+    const int innerLeft   = slot.left + Scale(1);
+    const int innerTop    = slot.top + Scale(1);
+    const int innerWidth  = (slot.right - slot.left) - Scale(2);
+    const int innerHeight = (slot.bottom - slot.top) - Scale(2);
+
+    // 量一下现在这几个字有多宽
+    const std::wstring text = GetTextOf(m_hRenameEdit);
+
+    int textWidth = 0;
+    {
+        HDC dc = ::GetDC(m_hRenameEdit);
+        if (dc != nullptr)
+        {
+            HGDIOBJ oldFont = ::SelectObject(dc, m_font);
+            SIZE size = {};
+            ::GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+            textWidth = size.cx;
+            ::SelectObject(dc, oldFont);
+            ::ReleaseDC(m_hRenameEdit, dc);
+        }
+    }
+
+    // 留 6px 余量给光标和选区，超出按钮宽度就顶到边（这时文字自然会长到框外面截断）
+    int width = textWidth + Scale(6);
+    if (width > innerWidth)
+    {
+        width = innerWidth;
+    }
+
+    // 输入框自己还有 1~2px 的内边距，所以居中后再往右补 Scale(3)，
+    // 这样字的视觉中心才正好落在按钮中心上
+    int left = innerLeft + (innerWidth - width) / 2 + Scale(3);
+    if (left < innerLeft)
+    {
+        left = innerLeft;
+    }
+    if (left + width > innerLeft + innerWidth)
+    {
+        left = innerLeft + innerWidth - width;
+    }
+
+    ::MoveWindow(m_hRenameEdit, left, innerTop, width, innerHeight, TRUE);
 }
 
 void BatchRenameDialog::CommitTemplateRename()
@@ -2857,7 +2953,7 @@ void BatchRenameDialog::Draw(HDC dc)
     ::SetTextColor(dc, kHintColor);
 
     RECT hintRect = { padding, Scale(44), clientRect.right - padding, Scale(66) };
-    ::DrawTextW(dc, L"改下面的规则，上面的「新文件名」会立刻跟着变；模板点一下载入、右键改名。",
+    ::DrawTextW(dc, L"按 Ctrl 可多选，支持拖拽排序。单击模板按钮可载入模板，右键单击给模板重命名。",
                 -1, &hintRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // ---- 三条分隔线（列表上方 / 列表下方 / 模板栏下方）----
@@ -2974,18 +3070,19 @@ void BatchRenameDialog::Draw(HDC dc)
     ::SetTextColor(dc, (conflictCount > 0) ? kErrorColor : kHintColor);
     ::DrawTextW(dc, statsText, -1, &m_statsRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // 有冲突时「应用」不可用，在参数区下面那块空白里说一句原因
+    // 有冲突时「应用」不可用，在参数区和底部按钮之间那条窄缝里说一句原因
+    // （表格加高 47px 之后这条缝只剩十几像素，所以把提示压成一行，贴着按钮上沿画）
     if (conflictCount > 0)
     {
         const int bandBottom = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
 
-        RECT warnRect = { padding, bandBottom + Scale(6),
+        RECT warnRect = { padding, bandBottom + Scale(1),
                           clientRect.right - padding,
-                          bandBottom + Scale(22) };
+                          m_applyRect.top - Scale(1) };
 
         ::SetTextColor(dc, kErrorColor);
         ::DrawTextW(dc, L"有冲突的行会标红，改到没有冲突才能应用。", -1, &warnRect,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     ::SelectObject(dc, oldFont);
@@ -3209,6 +3306,10 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
             if (notification == EN_KILLFOCUS)
             {
                 CommitTemplateRename();   // 点到别处就算确认，不留悬空输入框
+            }
+            else if (notification == EN_CHANGE)
+            {
+                UpdateRenameEditLayout();   // 边打字边把字保持在按钮正中
             }
             return 0;
         }
