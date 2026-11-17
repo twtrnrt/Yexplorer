@@ -74,6 +74,10 @@ static const int kCommandOpenInNewWindow = 3203;  // 在新窗口中打开
 static const int kCommandUndo       = 3204;  // 撤销（Ctrl+Z）
 static const int kCommandRedo       = 3205;  // 恢复/重做（Ctrl+Y）
 static const int kCommandCopyPath   = 3206;  // 复制文件路径（Ctrl+Shift+C）
+// 下面这两个只给快捷键用：Ctrl+Z / Ctrl+Y 发的是它们，不等于右键菜单里的
+// 「撤销」「恢复」。拆开的原因是批量重命名只能从菜单撤销，不能走键盘（用户拍板）。
+static const int kCommandUndoKeyboard = 3207;  // Ctrl+Z 专用（批量重命名不响应）
+static const int kCommandRedoKeyboard = 3208;  // Ctrl+Y 专用（批量重命名不响应）
 
 // 「打开方式」子菜单里的命令
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
@@ -245,6 +249,10 @@ private:
         UndoKind                  kind = UndoKind::None;
         std::vector<std::wstring> afterPaths;    // 操作之后这些项在哪（撤销要动它们）
         std::vector<std::wstring> beforePaths;   // 操作之前在哪（重命名前的全路径 / 移动和删除的源路径）
+
+        // 批量重命名专用的标记：这条记录照样在撤销栈里、右键「撤销」能撤，
+        // 但 Ctrl+Z / Ctrl+Y 会被拦掉（用户拍板：批量改名不能走快捷键）。
+        bool batchRename = false;
     };
 
     // 最多记多少级（再多也没人真的会连撤 50 步，省点内存）
@@ -255,9 +263,13 @@ private:
 
     void PushUndoRecord(const UndoRecord& record);   // 操作成功后压栈（同时清空重做栈）
     void FillUndoItem(HMENU menu);                   // 有可撤销/可恢复的步骤才往菜单里加
-    void PerformUndo();                              // Ctrl+Z / 右键「撤销」
-    void PerformRedo();                              // Ctrl+Y / 右键「恢复」
+    void PerformUndo(bool fromKeyboard);             // fromKeyboard=true 是 Ctrl+Z，false 是右键「撤销」
+    void PerformRedo(bool fromKeyboard);             // fromKeyboard=true 是 Ctrl+Y，false 是右键「恢复」
     void ClearUndoHistory();                         // 清空两栈
+
+    // 批量改名记录的撤销/恢复：两段式把一批文件改成另一批名字，返回失败项数
+    int RenameManyTwoStage(const std::vector<std::wstring>& fromPaths,
+                           const std::vector<std::wstring>& toNames);
 
     // 把操作的动词转成文案（「撤销 删除」里的"删除"）
     static const wchar_t* UndoVerbText(UndoKind kind);

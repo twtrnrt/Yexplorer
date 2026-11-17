@@ -594,8 +594,10 @@ void MainWindow::CreateChildControls()
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'A',       kCommandSelectAll },
         { static_cast<BYTE>(FVIRTKEY),            VK_BACK,   kCommandGoUp },
         { static_cast<BYTE>(FVIRTKEY),            VK_F2,     kCommandRename },
-        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Z',       kCommandUndo },   // 撤销
-        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Y',       kCommandRedo },   // 恢复
+        // 撤销 / 恢复：键盘发的是"键盘专用命令"，右键菜单发的是普通命令。
+        // 拆开是为了让批量重命名只能从菜单撤销，Ctrl+Z 不响应它（见 PerformUndo 里的判断）
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Z',       kCommandUndoKeyboard },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Y',       kCommandRedoKeyboard },
         // 复制文件路径（和资源管理器一样是 Ctrl+Shift+C）
         { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'C', kCommandCopyPath },
     };
@@ -925,10 +927,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             OpenSelection();
             return 0;
         case kCommandUndo:
-            PerformUndo();
+            PerformUndo(false);   // 右键菜单「撤销」：批量重命名也能撤
             return 0;
         case kCommandRedo:
-            PerformRedo();
+            PerformRedo(false);
+            return 0;
+        case kCommandUndoKeyboard:
+            PerformUndo(true);    // Ctrl+Z：批量重命名这条会被拦掉
+            return 0;
+        case kCommandRedoKeyboard:
+            PerformRedo(true);    // Ctrl+Y：同上
             return 0;
         case kCommandOpenInNewWindow:
         {
@@ -1788,12 +1796,28 @@ void MainWindow::DoBatchRename()
 
     Logger::Info(L"批量重命名：已改名 " + std::to_wstring(results.size()) + L" 项");
 
-    // ---- 批量重命名故意不进撤销栈 ----
-    // 用户拍板：批量改名不参与 Ctrl+Z（单文件 F2 改名照样能撤销）。
-    // 原因：整批改名本来就是"一次成型的规则产物"，要还原也是按规则改回去，
-    // 而且一条撤销记录里塞几十上百对路径，任何一项对不上都会连累后面的项。
-    // 注意 results 里现在只有**真正改过名**的项（名字没变的、被跳过异常的都不在里面），
-    // 所以下面更新列表也不会把没动过的文件显示成新名字。
+    // ---- 整批压一条撤销记录 ----
+    // 用户拍板：批量重命名进撤销栈，右键菜单「撤销 批量重命名」能撤整批，
+    // 但 Ctrl+Z / Ctrl+Y 不响应它（靠 batchRename 这个标记拦，见 PerformUndo）。
+    // results 里只有**真正改过名**的项（名字没变的、被跳过异常的都不在里面），
+    // 所以撤销时不会去动没改过的文件，也不会出现"原名和目标名相同"。
+    {
+        UndoRecord record;
+        record.kind        = UndoKind::Rename;
+        record.batchRename = true;
+
+        record.beforePaths.reserve(results.size());
+        record.afterPaths.reserve(results.size());
+
+        for (const auto& rename : results)
+        {
+            record.beforePaths.push_back(rename.oldPath);
+            record.afterPaths.push_back(
+                JoinDirectoryFile(NavigationHistory::ParentPath(rename.oldPath), rename.newName));
+        }
+
+        PushUndoRecord(record);
+    }
 
     // ---- 局部更新：只换名字和路径，再按当前的排序规则重排，不重扫目录 ----
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
@@ -2343,6 +2367,33 @@ static std::wstring FileNameOf(const std::wstring& path)
     return (slash == std::wstring::npos) ? path : path.substr(slash + 1);
 }
 
+// 超过 260 字符的路径，普通 Win32 调用会失败，得换成 \\?\ 写法。
+// 批量改名那边也是这么处理的，撤销/重做要跟它一致，否则长路径的项改不回来。
+static std::wstring MakeLongPath(const std::wstring& path)
+{
+    if (path.size() < 260 || path.size() >= 32767)
+    {
+        return path;
+    }
+
+    if (path.compare(0, 4, L"\\\\?\\") == 0)
+    {
+        return path;
+    }
+
+    if (path.size() > 1 && path[1] == L':')
+    {
+        return L"\\\\?\\" + path;                       // C:\...
+    }
+
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+    {
+        return L"\\\\?\\UNC\\" + path.substr(2);        // \\server\share
+    }
+
+    return path;   // 相对路径之类，原样交给系统
+}
+
 // ---------------------------------------------------------------------------
 // 从回收站还原若干项（按原路径匹配）
 //
@@ -2538,7 +2589,11 @@ void MainWindow::FillUndoItem(HMENU menu)
     // 「撤销 删除」：撤销栈顶那一步
     if (!m_undoStack.empty())
     {
-        const wchar_t* verb = UndoVerbText(m_undoStack.back().kind);
+        const UndoRecord& record = m_undoStack.back();
+
+        // 批量重命名单独说一句「撤销 批量重命名」，让用户一眼看出这一条
+        // 和单文件改名不是同一档（也就不会奇怪 Ctrl+Z 为什么不动它）
+        const wchar_t* verb = record.batchRename ? L"批量重命名" : UndoVerbText(record.kind);
 
         if (verb != nullptr)
         {
@@ -2551,7 +2606,9 @@ void MainWindow::FillUndoItem(HMENU menu)
     // 「恢复 删除」：重做栈顶那一步（撤销过、还没被新操作冲掉的那些）
     if (!m_redoStack.empty())
     {
-        const wchar_t* verb = UndoVerbText(m_redoStack.back().kind);
+        const UndoRecord& record = m_redoStack.back();
+
+        const wchar_t* verb = record.batchRename ? L"批量重命名" : UndoVerbText(record.kind);
 
         if (verb != nullptr)
         {
@@ -2567,7 +2624,7 @@ void MainWindow::FillUndoItem(HMENU menu)
     }
 }
 
-void MainWindow::PerformUndo()
+void MainWindow::PerformUndo(bool fromKeyboard)
 {
     if (m_operationRunning != nullptr && m_operationRunning->load())
     {
@@ -2578,6 +2635,15 @@ void MainWindow::PerformUndo()
     if (m_undoStack.empty())
     {
         Logger::Info(L"撤销：没有可撤销的步骤");
+        return;
+    }
+
+    // 批量重命名：只能在右键菜单里撤，Ctrl+Z 不响应（用户拍板）。
+    // 这里是"整条不执行"，不是"跳过这条去撤上一条"——跳过去会让撤销和用户看到的
+    // 操作顺序对不上，太容易误删。
+    if (fromKeyboard && m_undoStack.back().batchRename)
+    {
+        Logger::Info(L"撤销：批量重命名不支持 Ctrl+Z，请用右键菜单里的「撤销 批量重命名」");
         return;
     }
 
@@ -2626,6 +2692,27 @@ void MainWindow::PerformUndo()
 
     case UndoKind::Rename:
     {
+        if (record.batchRename)
+        {
+            // 批量改名：走两段式（一批文件同时互换名字时才不会自己撞自己）。
+            // 不走 shellops::RenameItem：那个每项起一次 IFileOperation，
+            // 几十上百项会很慢，而且这里不需要进回收站。
+            std::vector<std::wstring> oldNames(record.beforePaths.size());
+
+            for (size_t i = 0; i < record.beforePaths.size(); ++i)
+            {
+                oldNames[i] = FileNameOf(record.beforePaths[i]);
+            }
+
+            const int failures = RenameManyTwoStage(record.afterPaths, oldNames);
+
+            Logger::Info(L"撤销：批量重命名已改回 " +
+                         std::to_wstring(record.afterPaths.size() - static_cast<size_t>(failures)) +
+                         L" 项" + (failures > 0 ? L"，" + std::to_wstring(failures) + L" 项失败" : L""));
+            m_redoStack.push_back(record);
+            break;
+        }
+
         // 改回原来的名字
         const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
         for (size_t i = 0; i < count; ++i)
@@ -2659,7 +2746,7 @@ void MainWindow::PerformUndo()
 //   删除   → 再删一次
 //   （新建没有重做：撤销时原有的文件内容已经进回收站，重做不出同一个文件）
 // ---------------------------------------------------------------------------
-void MainWindow::PerformRedo()
+void MainWindow::PerformRedo(bool fromKeyboard)
 {
     if (m_operationRunning != nullptr && m_operationRunning->load())
     {
@@ -2673,6 +2760,13 @@ void MainWindow::PerformRedo()
         return;
     }
 
+    // 和撤销对称：批量重命名的重做也只能走右键菜单，Ctrl+Y 不碰它
+    if (fromKeyboard && m_redoStack.back().batchRename)
+    {
+        Logger::Info(L"恢复：批量重命名不支持 Ctrl+Y，请用右键菜单里的「恢复 批量重命名」");
+        return;
+    }
+
     const UndoRecord record = m_redoStack.back();
     m_redoStack.pop_back();
 
@@ -2680,6 +2774,25 @@ void MainWindow::PerformRedo()
     {
     case UndoKind::Rename:
     {
+        if (record.batchRename)
+        {
+            // 正向再改一遍：原来的名字 → 批量改出来的名字（同样两段式）
+            std::vector<std::wstring> newNames(record.afterPaths.size());
+
+            for (size_t i = 0; i < record.afterPaths.size(); ++i)
+            {
+                newNames[i] = FileNameOf(record.afterPaths[i]);
+            }
+
+            const int failures = RenameManyTwoStage(record.beforePaths, newNames);
+
+            Logger::Info(L"恢复：批量重命名已重做 " +
+                         std::to_wstring(record.afterPaths.size() - static_cast<size_t>(failures)) +
+                         L" 项" + (failures > 0 ? L"，" + std::to_wstring(failures) + L" 项失败" : L""));
+            m_undoStack.push_back(record);
+            break;
+        }
+
         const size_t count = std::min(record.afterPaths.size(), record.beforePaths.size());
         for (size_t i = 0; i < count; ++i)
         {
@@ -2730,6 +2843,86 @@ void MainWindow::PerformRedo()
     }
 
     RefreshCurrentFolder();
+}
+
+// ---------------------------------------------------------------------------
+// 批量改名的撤销 / 重做：两段式批量改名
+//
+//   fromPaths 里的项 → 各自先挪到同目录下的临时名 → 再改成 toNames 里的名字
+//
+// 为什么要两段：批量改名经常出现 a→b、b→a 这种互换，直接改会撞上"目标名已存在"。
+// 为什么不走 shellops::RenameItem：那个每项起一次 IFileOperation，几十上百项太慢，
+// 而且撤销批量改名不需要进回收站。
+// 失败项尽量回退到"改之前的名字"，实在回不去就留在临时名上（日志里有记录，文件不会丢）。
+// ---------------------------------------------------------------------------
+int MainWindow::RenameManyTwoStage(const std::vector<std::wstring>& fromPaths,
+                                   const std::vector<std::wstring>& toNames)
+{
+    const size_t count = std::min(fromPaths.size(), toNames.size());
+
+    if (count == 0)
+    {
+        return 0;
+    }
+
+    std::vector<std::wstring> tempPaths(count, std::wstring());
+    const ULONGLONG tick = ::GetTickCount64();
+    int failures = 0;
+
+    // 第一段：原名 → 临时名（temp 带下标 + tick，同一个目录里不会撞；只保留扩展名）
+    for (size_t i = 0; i < count; ++i)
+    {
+        const std::wstring parent = NavigationHistory::ParentPath(fromPaths[i]);
+        const std::wstring name   = FileNameOf(fromPaths[i]);
+
+        std::wstring extension;
+        const size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos && dot + 1 < name.size())
+        {
+            extension = name.substr(dot);   // 含那个点
+        }
+
+        const std::wstring temp = JoinDirectoryFile(
+            parent,
+            L"~urex_" + std::to_wstring(i) + L"_" + std::to_wstring(tick % 100000) + extension);
+
+        if (::MoveFileExW(MakeLongPath(fromPaths[i]).c_str(),
+                          MakeLongPath(temp).c_str(), 0))
+        {
+            tempPaths[i] = temp;
+        }
+        else
+        {
+            ++failures;   // 这一项没挪走，第二段跳过它
+        }
+    }
+
+    // 第二段：临时名 → 目标名；失败就尽量挪回原名，别留一个 ~urex_ 名字
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (tempPaths[i].empty())
+        {
+            continue;
+        }
+
+        const std::wstring target =
+            JoinDirectoryFile(NavigationHistory::ParentPath(fromPaths[i]), toNames[i]);
+
+        if (::MoveFileExW(MakeLongPath(tempPaths[i]).c_str(), MakeLongPath(target).c_str(), 0))
+        {
+            continue;
+        }
+
+        ++failures;
+
+        if (!::MoveFileExW(MakeLongPath(tempPaths[i]).c_str(),
+                           MakeLongPath(fromPaths[i]).c_str(), 0))
+        {
+            Logger::Warn(L"批量改名撤销/重做失败，文件停在临时名：" + tempPaths[i]);
+        }
+    }
+
+    return failures;
 }
 
 // ============================================================================
