@@ -1788,23 +1788,12 @@ void MainWindow::DoBatchRename()
 
     Logger::Info(L"批量重命名：已改名 " + std::to_wstring(results.size()) + L" 项");
 
-    // ---- 整批压一条撤销记录（beforePaths 原名，afterPaths 新名）----
-    {
-        UndoRecord record;
-        record.kind = UndoKind::Rename;
-
-        record.beforePaths.reserve(results.size());
-        record.afterPaths.reserve(results.size());
-
-        for (const auto& result : results)
-        {
-            record.beforePaths.push_back(result.oldPath);
-            record.afterPaths.push_back(
-                JoinDirectoryFile(NavigationHistory::ParentPath(result.oldPath), result.newName));
-        }
-
-        PushUndoRecord(record);
-    }
+    // ---- 批量重命名故意不进撤销栈 ----
+    // 用户拍板：批量改名不参与 Ctrl+Z（单文件 F2 改名照样能撤销）。
+    // 原因：整批改名本来就是"一次成型的规则产物"，要还原也是按规则改回去，
+    // 而且一条撤销记录里塞几十上百对路径，任何一项对不上都会连累后面的项。
+    // 注意 results 里现在只有**真正改过名**的项（名字没变的、被跳过异常的都不在里面），
+    // 所以下面更新列表也不会把没动过的文件显示成新名字。
 
     // ---- 局部更新：只换名字和路径，再按当前的排序规则重排，不重扫目录 ----
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();

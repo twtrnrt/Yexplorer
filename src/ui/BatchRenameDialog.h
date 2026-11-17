@@ -107,8 +107,11 @@ public:
 
     // 以模态方式打开。
     // paths：要改名的项的完整路径（调用方保证至少 2 项、且都是文件系统路径）
-    // 返回 true 表示用户点了「应用」，results 里是每一项的目标文件名；
-    // 返回 false 表示取消。
+    // 返回 true 表示整批都改成功了，results 里**只**含真正改过名的项（原名 + 新名字）；
+    // 返回 false 表示取消 / 中途失败。
+    //
+    // 注意：这里刻意不包含"名字没变"的行，也不包含"跳过异常"时被跳过的行 ——
+    // 调用方拿这份结果去更新列表、写日志、记撤销，多一项都会对不上真实磁盘状态。
     bool ShowModal(HWND owner, const std::vector<std::wstring>& paths,
                    std::vector<BatchRenameResult>& results);
 
@@ -202,7 +205,7 @@ private:
     static const size_t kTemplateSlotCount = 10;   // 模板槽固定 10 个，一行排满，不增不减
 
     void LoadTemplatesFromDisk();
-    void SaveTemplatesToDisk() const;
+    bool SaveTemplatesToDisk() const;    // 写盘成功返回 true（失败时由调用方提示，不再只写日志）
     void EnsureTemplateSlots();                            // 保证 m_templates 正好 10 条
     void CaptureCurrentRules(RenameTemplate& out) const;   // 把界面上的规则收成一份模板
     void ApplyTemplateToControls(const RenameTemplate& tpl); // 把模板回填到控件
@@ -346,14 +349,22 @@ private:
     RECT m_statsRect = {};
 
     // ---- 字体 ----
+    // 说明：字体兜底时会退到系统 stock 字体（那东西不归我们管，不能删），
+    // 而 m_fontTitle / m_fontSmall 在兜底时又可能和 m_font 是同一个句柄，
+    // 所以用 m_ownedFonts 记住"这几个是我自己 CreateFontIndirect 出来的"，析构时只删它们。
     HFONT m_font       = nullptr;
     HFONT m_fontTitle  = nullptr;
     HFONT m_fontSmall  = nullptr;   // 底部提示用
+    bool  m_ownedFonts = false;
     HBRUSH m_whiteBrush = nullptr;
     HBRUSH m_disabledBrush = nullptr;   // 被禁用的输入框用这个灰底
 
     // ---- 结果 ----
     bool m_applied = false;    // 用户点了「应用」（并且真的改成功了）
+
+    // 真正改成功的项（ShowModal 就把它当成 results 回传）。
+    // 只有两段式改名全程成功之后才会往这里塞，回滚过的一次都不会留。
+    std::vector<BatchRenameResult> m_renamedResults;
 
     // ---- 落盘改名 ----
     // 每一项源文件的"能不能改名"：0 正常 / 1 可能被占用 / 2 没有改名权限 / 3 已经不在了
@@ -366,6 +377,11 @@ private:
 
     bool m_diskScanPending = false;   // 防抖定时器已经挂上了，别重复挂
     bool m_running         = false;   // 正在改名：这时什么都不接
+
+    // 上一次"逐项试探打开源文件"的时间（毫秒，GetTickCount64）。
+    // 防抖到点时用它做节流：源文件的占用情况变得慢，没必要每停一次手就全量开一遍句柄，
+    // 800ms 内已经扫过就沿用上次结果，只重算目标名冲突（那个只是查属性，很便宜）。
+    ULONGLONG m_lastSourceProbeTick = 0;
 
     std::wstring m_statusText;             // 状态行临时文字（空 = 平时那句统计）
     bool         m_statusIsError = false;  // 状态文字用红字（失败了）还是灰字（进度）

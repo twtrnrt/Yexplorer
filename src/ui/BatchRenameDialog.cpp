@@ -5,9 +5,10 @@
 // 「批量重命名」窗口的实现。说明见 BatchRenameDialog.h。
 //
 // 【这一版的边界】
-//   界面 + 实时预览是完整的：改任何规则都会立刻重算右边列表。
-//   点「应用」目前只把结果回传给调用方（真正落盘的改名、撤销记录、
-//   进度条留到下一步接），所以不会动文件。
+//   界面 + 实时预览 + 真正落盘改名都是完整的：
+//   改任何规则都立刻重算右边列表；点「应用」先复检磁盘状态，
+//   有问题就弹窗（可"跳过异常继续"），没问题就两段式改名、失败整批回滚；
+//   成功后把"真正改过的项"回传主窗口（主窗口只更新这几项的显示，不进撤销栈）。
 //
 // 【为什么用原生控件】
 //   编辑框、下拉框、复选框、列表都是系统的：输入法、Tab 焦点、
@@ -27,6 +28,7 @@
 #include <regex>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unordered_map>
 
 #include "ui/BatchRenameDialog.h"
 
@@ -485,6 +487,7 @@ struct RenamePlan
     std::wstring oldPath;
     std::wstring targetPath;
     std::wstring tempPath;
+    std::wstring newName;        // 只含文件名（回传给主窗口用）
     int          stage = 0;
 };
 
@@ -525,6 +528,72 @@ long long ReadInteger(HWND edit, long long fallback, long long minimum)
     }
 
     return (value < minimum) ? minimum : value;
+}
+
+// 把一个整数夹进 [low, high]（读模板文件、读位数框时用，防手改文件 / 离谱输入）
+int ClampInt(int value, int low, int high)
+{
+    if (value < low)
+    {
+        return low;
+    }
+    if (value > high)
+    {
+        return high;
+    }
+    return value;
+}
+
+// 位数最多补到多少位。名字最长 255 个字符，补到 20 位已经远超任何真实用途；
+// 不给上限的话用户在「位数」里填 999999 会造出 100 万字符的名字，几百项直接把内存吃光。
+const int kMaxNumberDigits = 20;
+
+// Windows 的单段文件名最长 255 个字符（含扩展名，不含目录）
+const size_t kMaxFileNameLength = 255;
+
+// 这个文件名结尾是不是"Windows 会偷偷吃掉"的样子。
+// 结尾的空格和点 Win32 会自行去掉：于是磁盘上的真实名字和预览/撤销记录里写的不是同一串，
+// 用户会觉得"明明改成了 a.txt 怎么变 a"，撤销也会因为路径对不上而失败。
+bool HasInvalidNameTail(const std::wstring& name)
+{
+    if (name.empty())
+    {
+        return false;
+    }
+
+    const wchar_t last = name.back();
+    return (last == L' ' || last == L'.');
+}
+
+// 是不是 Windows 的保留设备名（CON / PRN / AUX / NUL / COM1~9 / LPT1~9）。
+// 这些名字（包括 "CON.txt" 这种带扩展名的写法）在 Win32 下都建不出来。
+// 判断口径：取第一个点之前那一段，转大写后跟表里比。
+bool IsReservedDeviceName(const std::wstring& name)
+{
+    const size_t dot = name.find(L'.');
+    std::wstring stem = (dot == std::wstring::npos) ? name : name.substr(0, dot);
+
+    if (stem.empty())
+    {
+        return false;
+    }
+
+    ::CharUpperBuffW(stem.data(), static_cast<DWORD>(stem.size()));
+
+    if (stem == L"CON" || stem == L"PRN" || stem == L"AUX" || stem == L"NUL")
+    {
+        return true;
+    }
+
+    // COM1~COM9 / LPT1~LPT9：前三个字符固定，最后一位是 1~9
+    if (stem.size() == 4 &&
+        (stem.compare(0, 3, L"COM") == 0 || stem.compare(0, 3, L"LPT") == 0) &&
+        stem[3] >= L'1' && stem[3] <= L'9')
+    {
+        return true;
+    }
+
+    return false;
 }
 
 } // 匿名命名空间
@@ -634,9 +703,11 @@ LRESULT CALLBACK LightComboBorderProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         HDC dc = ::GetDC(hWnd);
         if (dc != nullptr && rcClient.right > 0 && rcClient.bottom > 0)
         {
-            HBRUSH brush = ::CreateSolidBrush(kEditBorderColor);
-            ::FrameRect(dc, &rcClient, brush);
-            ::DeleteObject(brush);
+            // 这个刷子颜色是固定的：建一次留到进程结束，别每帧 CreateSolidBrush/DeleteObject
+            // （下拉框一展开一动就重画，每帧建删一次纯属白烧 GDI 句柄）
+            static HBRUSH borderBrush = ::CreateSolidBrush(kEditBorderColor);
+
+            ::FrameRect(dc, &rcClient, borderBrush);
             ::ReleaseDC(hWnd, dc);
         }
 
@@ -654,7 +725,8 @@ LRESULT CALLBACK LightComboBorderProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
-// ---- 输入框里的提示词（cue banner）自己画 ----// 系统那套 EM_SETCUEBANNER 的颜色是固定的（偏深灰），改不了；用户要求"浅一点"，
+// ---- 输入框里的提示词（cue banner）自己画 ----
+// 系统那套 EM_SETCUEBANNER 的颜色是固定的（偏深灰），改不了；用户要求"浅一点"，
 // 所以这里不挂系统提示词，改成：输入框空着、并且没有焦点的时候，自己在客户区画一行浅色字。
 std::map<HWND, std::wstring> g_editCueTexts;                  // 输入框 → 它的提示词
 const COLORREF kEditCueColor = RGB(184, 187, 192);            // 提示词颜色（比正文浅很多）
@@ -785,18 +857,25 @@ std::wstring TemplateFilePath()
 
 BatchRenameDialog::~BatchRenameDialog()
 {
-    if (m_font != nullptr)
+    // 只有自己 CreateFontIndirect 出来的字体才删：
+    // 兜底时用的是系统 stock 字体（不能删），而且 m_fontTitle / m_fontSmall 在兜底时
+    // 可能和 m_font 是同一个句柄，同一个句柄删两遍也是错的
+    if (m_ownedFonts)
     {
-        ::DeleteObject(m_font);
+        if (m_font != nullptr)
+        {
+            ::DeleteObject(m_font);
+        }
+        if (m_fontTitle != nullptr && m_fontTitle != m_font)
+        {
+            ::DeleteObject(m_fontTitle);
+        }
+        if (m_fontSmall != nullptr && m_fontSmall != m_font && m_fontSmall != m_fontTitle)
+        {
+            ::DeleteObject(m_fontSmall);
+        }
     }
-    if (m_fontTitle != nullptr)
-    {
-        ::DeleteObject(m_fontTitle);
-    }
-    if (m_fontSmall != nullptr)
-    {
-        ::DeleteObject(m_fontSmall);
-    }
+
     if (m_whiteBrush != nullptr)
     {
         ::DeleteObject(m_whiteBrush);
@@ -872,6 +951,7 @@ bool BatchRenameDialog::ShowModal(HWND owner, const std::vector<std::wstring>& p
                                   std::vector<BatchRenameResult>& results)
 {
     m_hOwner = owner;
+    m_renamedResults.clear();
 
     // ---- 把路径变成带大小/时间的条目（排序和预览都要用）----
     m_items.clear();
@@ -886,8 +966,10 @@ bool BatchRenameDialog::ShowModal(HWND owner, const std::vector<std::wstring>& p
         item.name = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
 
         // 顺手查一下属性：是不是文件夹、多大、什么时候改的（排序用；查不到就算了）
+        // 走 ToLongPath：超过 260 字符的路径不走长路径写法会直接查不到，
+        // 那样按大小/时间排序时这些项都会当成"0 字节 / 1970 年"排到最前面
         WIN32_FILE_ATTRIBUTE_DATA attributeData = {};
-        if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attributeData))
+        if (::GetFileAttributesExW(ToLongPath(path).c_str(), GetFileExInfoStandard, &attributeData))
         {
             item.isFolder = (attributeData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             item.size     = (static_cast<uint64_t>(attributeData.nFileSizeHigh) << 32) |
@@ -939,6 +1021,11 @@ bool BatchRenameDialog::ShowModal(HWND owner, const std::vector<std::wstring>& p
     ::SetForegroundWindow(m_hOwner);
 
     // ---- 回传结果 ----
+    // 只回传"真正改过名的项"（PerformBatchRename 成功时填好的 m_renamedResults）。
+    // 以前是无条件把 m_rows 全部回传，于是：
+    //   · 名字没变的行也被当成"改了名"，主窗口的撤销记录里多出一堆"原名→同名"，
+    //     用户一按 Ctrl+Z 就报"原文件名和目标文件名相同"；
+    //   · 「跳过异常继续重命名」时被跳过的行也被当成改了，列表会显示成假的新名字。
     results.clear();
 
     if (!m_applied)
@@ -946,13 +1033,7 @@ bool BatchRenameDialog::ShowModal(HWND owner, const std::vector<std::wstring>& p
         return false;
     }
 
-    for (const auto& row : m_rows)
-    {
-        BatchRenameResult result = {};
-        result.oldPath = m_items[row.itemIndex].path;
-        result.newName = row.newName;
-        results.push_back(result);
-    }
+    results = m_renamedResults;
 
     return true;
 }
@@ -994,6 +1075,9 @@ bool BatchRenameDialog::CreateDialogWindow()
         LOGFONTW smallFont = metrics.lfMessageFont;
         smallFont.lfHeight = static_cast<LONG>(smallFont.lfHeight * 0.92);
         m_fontSmall = ::CreateFontIndirectW(&smallFont);
+
+        // 记下"这几个是我建的"：析构时只删自己建出来的（stock 字体和重复句柄不能删）
+        m_ownedFonts = (m_font != nullptr);
     }
 
     if (m_font == nullptr)
@@ -1074,12 +1158,12 @@ bool BatchRenameDialog::CreateDialogWindow()
     Layout();
     LoadTemplatesFromDisk();
 
-    // 先算一遍预览，用户一打开就能看到效果
-    Recalculate();
-
     // 打开的时候就把"能不能改名"查一遍：谁正被别的程序开着、谁没权限、谁已经不在了，
     // 一进来就在状态列标出来，不用等用户改规则才发现。
     // （本地盘几百项也就几毫秒；网络盘慢一点，但只查这一次）
+    //
+    // 注意只需要这一遍：RecalculateNow(true) 会先算名字、再查目标名冲突、最后填列表，
+    // 之前这里还多调了一次 Recalculate()（纯内存那版 + 再挂一次防抖），等于打开窗口多算两遍，去掉了。
     ScanSourceStates();
     RecalculateNow(true);
 
@@ -1144,17 +1228,25 @@ void BatchRenameDialog::CreateControls()
     }
 
     // ---- 左栏：名称类 ----
-    auto createEdit = [&](int id, const wchar_t* cue) -> HWND
+    // limit = 最多能输入多少个字符（0 = 不限制）。
+    // 给文本框都加个上限：名字最长 255 个字符，粘进来一段几百字的文本既改不成名，
+    // 还会让每敲一个键的重算变慢（查找串越长，逐项查找越费）。
+    auto createEdit = [&](int id, const wchar_t* cue, int limit) -> HWND
     {
         HWND edit = ::CreateWindowExW(0, L"EDIT", L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                      ES_AUTOHSCROLL,   // 不带 WS_BORDER：边框由父窗口画成 #D2D2D2
+                                      ES_AUTOHSCROLL,   // 不带 WS_BORDER：边框由父窗口画成 #ADADAD
                                       0, 0, 0, 0, m_hWnd,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                       instance, nullptr);
         if (edit != nullptr)
         {
             ::SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+
+            if (limit > 0)
+            {
+                ::SendMessageW(edit, EM_SETLIMITTEXT, static_cast<WPARAM>(limit), 0);
+            }
 
             // 提示词不走系统那套（颜色改不了），记下来由 EditCueProc 自己画成浅色
             g_editCueTexts[edit] = (cue != nullptr) ? cue : L"";
@@ -1163,10 +1255,13 @@ void BatchRenameDialog::CreateControls()
         return edit;
     };
 
-    m_hPrefix  = createEdit(kIdPrefix,  L"名字前面加什么");
-    m_hSuffix  = createEdit(kIdSuffix,  L"名字后面加什么");
-    m_hFind    = createEdit(kIdFind,    L"要查找的文字");
-    m_hReplace = createEdit(kIdReplace, L"替换成什么（空＝删除）");
+    // 前缀 / 后缀 / 查找 / 替换：都按"一段文件名"给上限（255 + 一点余量）
+    const int nameLimit = static_cast<int>(kMaxFileNameLength) + 8;
+
+    m_hPrefix  = createEdit(kIdPrefix,  L"名字前面加什么", nameLimit);
+    m_hSuffix  = createEdit(kIdSuffix,  L"名字后面加什么", nameLimit);
+    m_hFind    = createEdit(kIdFind,    L"要查找的文字",   nameLimit);
+    m_hReplace = createEdit(kIdReplace, L"替换成什么（空＝删除）", nameLimit);
 
     // 替换范围：替换全部 / 从左往右 / 从右往左（默认替换全部）
     m_hReplaceMode = ::CreateWindowExW(0, L"COMBOBOX", L"",
@@ -1187,7 +1282,7 @@ void BatchRenameDialog::CreateControls()
     // 替换几处：只在选了「从左往右 / 从右往左」时能填。
     // 默认是「替换全部」，所以一开始留空（空着才说明这格不参与计算）；
     // 等用户切到另两项，才在 WM_COMMAND 里给它补一个默认的 "1"
-    m_hReplaceCount = createEdit(kIdReplaceCount, L"");
+    m_hReplaceCount = createEdit(kIdReplaceCount, L"", 0);
     if (m_hReplaceCount != nullptr)
     {
         ::SendMessageW(m_hReplaceCount, EM_SETLIMITTEXT, 4, 0);   // 最多四位数，够用了
@@ -1229,12 +1324,12 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hNumberEnable, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
     }
 
-    m_hNumberStart  = createEdit(kIdNumberStart,  L"1");
-    m_hNumberStep   = createEdit(kIdNumberStep,   L"1");
-    m_hNumberDigits = createEdit(kIdNumberDigits, L"2");
+    m_hNumberStart  = createEdit(kIdNumberStart,  L"1", 6);
+    m_hNumberStep   = createEdit(kIdNumberStep,   L"1", 6);
+    m_hNumberDigits = createEdit(kIdNumberDigits, L"2", 2);   // 位数最多两位（上限 20 位，见 kMaxNumberDigits）
 
-    // 数字框只收数字
-    for (HWND edit : { m_hNumberStart, m_hNumberStep, m_hNumberDigits })
+    // 数字框只收数字（位数那个框上面已经单独设成两位了，别再被这里覆盖成 6）
+    for (HWND edit : { m_hNumberStart, m_hNumberStep })
     {
         if (edit != nullptr)
         {
@@ -1259,7 +1354,7 @@ void BatchRenameDialog::CreateControls()
 
     // 分隔符：默认就填一个「-」，跟结构体里的默认值一致；
     // 清空它才是"序号和原名直接粘在一起"（提示文字写明这一点，免得看到框是空的又以为有 -
-    m_hNumberSep = createEdit(kIdNumberSep, L"空＝直接拼");
+    m_hNumberSep = createEdit(kIdNumberSep, L"空＝直接拼", 32);   // 分隔符只是几个字符，不用给整段名字的长度
     if (m_hNumberSep != nullptr)
     {
         ::SetWindowTextW(m_hNumberSep, L"-");
@@ -1291,7 +1386,7 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hExtMode, CB_SETCURSEL, 0, 0);
     }
 
-    m_hExtValue = createEdit(kIdExtValue, L"txt");
+    m_hExtValue = createEdit(kIdExtValue, L"txt", 64);
 
     // ---- 大小写 ----
     m_hCaseMode = ::CreateWindowExW(0, L"COMBOBOX", L"",
@@ -1737,15 +1832,13 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 }
                 else if (key == L"replacemode")
                 {
-                    current.replaceMode = ::_wtoi(value.c_str());
+                    // 下拉只有 3 项：0 全部 / 1 从左往右 / 2 从右往左。文件被手工改坏时别让越界值流进来
+                    current.replaceMode = ClampInt(::_wtoi(value.c_str()), 0, 2);
                 }
                 else if (key == L"replacecount")
                 {
-                    current.replaceCount = ::_wtoi(value.c_str());
-                    if (current.replaceCount < 1)
-                    {
-                        current.replaceCount = 1;
-                    }
+                    // 次数至少 1，上限给个 9999（再大也没意义，只会让替换循环白跑）
+                    current.replaceCount = ClampInt(::_wtoi(value.c_str()), 1, 9999);
                 }
                 else if (key == L"caseSensitive")
                 {
@@ -1757,6 +1850,7 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 }
                 else if (key == L"regexpreset")
                 {
+                    // 编号合法性留到整条模板读完再判（老文件里可能存着已经不存在的编号）
                     current.regexPreset = ::_wtoi(value.c_str());
                 }
                 else if (key == L"regex")
@@ -1775,19 +1869,22 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 }
                 else if (key == L"start")
                 {
-                    current.numberStart = ::_wtoi(value.c_str());
+                    // 起始值只允许 0 以上；给个上限免得 wcstoll 出来的怪值把序号撑爆
+                    current.numberStart = ClampInt(::_wtoi(value.c_str()), 0, 999999);
                 }
                 else if (key == L"step")
                 {
-                    current.numberStep = ::_wtoi(value.c_str());
+                    current.numberStep = ClampInt(::_wtoi(value.c_str()), 1, 999999);
                 }
                 else if (key == L"digits")
                 {
-                    current.numberDigits = ::_wtoi(value.c_str());
+                    // 位数没有上限的话，一条坏模板就能让名字长到几十万字符
+                    current.numberDigits = ClampInt(::_wtoi(value.c_str()), 1, kMaxNumberDigits);
                 }
                 else if (key == L"pos")
                 {
-                    current.numberPos = ::_wtoi(value.c_str());
+                    // 「位置」下拉只有 2 项：0 放在名字后面 / 1 放在名字前面
+                    current.numberPos = ClampInt(::_wtoi(value.c_str()), 0, 1);
                 }
                 else if (key == L"sep")
                 {
@@ -1795,7 +1892,8 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 }
                 else if (key == L"extmode")
                 {
-                    current.extMode = ::_wtoi(value.c_str());
+                    // 「扩展名」下拉只有 2 项：0 不修改 / 1 修改（旧的"去掉扩展名"已经并到"修改 + 留空"）
+                    current.extMode = ClampInt(::_wtoi(value.c_str()), 0, 1);
                 }
                 else if (key == L"extvalue")
                 {
@@ -1803,11 +1901,11 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 }
                 else if (key == L"casemode")
                 {
-                    current.caseMode = ::_wtoi(value.c_str());
+                    current.caseMode = ClampInt(::_wtoi(value.c_str()), 0, 3);
                 }
                 else if (key == L"sortmode")
                 {
-                    current.sortMode = ::_wtoi(value.c_str());
+                    current.sortMode = ClampInt(::_wtoi(value.c_str()), 0, 3);
                 }
                 else if (key == L"reverse")
                 {
@@ -1837,18 +1935,29 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
     // 读到的模板从上往下填进前几个槽，多出来的丢掉，缺的还是默认空槽
     for (size_t i = 0; i < loaded.size() && i < m_templates.size(); ++i)
     {
-        m_templates[i] = loaded[i];
+        RenameTemplate tpl = loaded[i];
+
+        // 正则编号只认三种：0（普通）、10（自定义）、表里那几条内置写法。
+        // 文件被手工改坏（或者换版本后编号消失）时统一退回"普通查找"，
+        // 否则按钮上写着"正则"、实际用不了。
+        if (tpl.regexPreset != 0 && tpl.regexPreset != kRegexCustomItem &&
+            FindRegexEntry(tpl.regexPreset) == nullptr)
+        {
+            tpl.regexPreset = 0;
+        }
+
+        m_templates[i] = tpl;
     }
 
     EnsureTemplateSlots();
 }
 
-void BatchRenameDialog::SaveTemplatesToDisk() const
+bool BatchRenameDialog::SaveTemplatesToDisk() const
 {
     const std::wstring path = TemplateFilePath();
     if (path.empty())
     {
-        return;
+        return false;   // 连模板文件该放哪儿都算不出来（APPDATA 读不到）
     }
 
     std::wstring text;
@@ -1887,12 +1996,21 @@ void BatchRenameDialog::SaveTemplatesToDisk() const
     if (::_wfopen_s(&file, path.c_str(), L"wb") != 0 || file == nullptr)
     {
         Logger::Warn(L"批量重命名模板保存失败（打不开文件）");
-        return;
+        return false;
     }
 
     const std::string bytes = WideToUtf8(text);
-    ::fwrite(bytes.c_str(), 1, bytes.size(), file);
+    const size_t written = (bytes.empty()) ? 0 : ::fwrite(bytes.c_str(), 1, bytes.size(), file);
+
     ::fclose(file);
+
+    if (bytes.empty() || written != bytes.size())
+    {
+        Logger::Warn(L"批量重命名模板保存失败（写盘不完整）");
+        return false;
+    }
+
+    return true;
 }
 
 // ============================================================================
@@ -1930,6 +2048,13 @@ void BatchRenameDialog::EnsureTemplateSlots()
 }
 
 // 只比较"规则"，不比较名字：名字是标识，不算参数改动
+//
+// 注意这里比得**比 IsDefaultRules 细**：连 numberStart / numberStep / numberDigits /
+// numberPos / numberSep 也比。因为两者的用途不同 ——
+//   · 这里回答"用户改过这个模板没有"（改过就要先把「保存」点亮，应用变灰）；
+//     用户把起始值从 1 改成 5 当然算改过。
+//   · IsDefaultRules 回答"这个槽里到底存没存东西"（决定边框颜色、点槽要不要带参数），
+//     序号关着的时候里面残留的 pos=0 之类不算内容。
 static bool SameRules(const RenameTemplate& a, const RenameTemplate& b)
 {
     return a.prefix == b.prefix &&
@@ -2037,7 +2162,14 @@ bool BatchRenameDialog::SaveCurrentSlot()
     m_baseline    = captured;                     // 存完就是"新的干净状态"
     m_hasBaseline = true;
 
-    SaveTemplatesToDisk();
+    // 写盘失败要说一声：以前只记日志，用户以为存上了，下次打开发现参数没了
+    if (!SaveTemplatesToDisk())
+    {
+        ShowCenteredMessage(L"模板没有存到文件",
+                            L"这台电脑上写不了模板文件（%APPDATA%\\FileExplorer\\rename_templates.txt），"
+                            L"这次的参数只在本次打开期间有效，关掉窗口就没了。\r\n\r\n"
+                            L"可以检查一下那个目录是不是只读、磁盘是不是满了。", true);
+    }
 
     // 保存完「应用」要从灰变回可点，Recalculate 会把底部那一条重画一遍
     Recalculate();
@@ -2346,7 +2478,14 @@ void BatchRenameDialog::CommitTemplateRename()
         !text.empty() && text != m_templates[index].name)
     {
         m_templates[index].name = text;
-        SaveTemplatesToDisk();
+
+        // 改个名字也要落盘；写不进去就提醒（否则下次打开名字又变回去了）
+        if (!SaveTemplatesToDisk())
+        {
+            ShowCenteredMessage(L"模板名没有存到文件",
+                                L"写不了模板文件（%APPDATA%\\FileExplorer\\rename_templates.txt），"
+                                L"这个名字只在本次打开期间有效。", true);
+        }
     }
 
     // 只把改过名的那个槽刷一遍
@@ -2410,7 +2549,9 @@ void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
                         (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
     out.numberStart  = static_cast<int>(ReadInteger(m_hNumberStart, 1, 0));
     out.numberStep   = static_cast<int>(ReadInteger(m_hNumberStep, 1, 1));
-    out.numberDigits = static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1));
+    // 位数夹到 1~20：输入框虽然只收两位，但"99"这种值也会让名字长到离谱，这里再兜一层
+    out.numberDigits = ClampInt(static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1)),
+                                1, kMaxNumberDigits);
     out.numberPos    = ComboSelection(m_hNumberPos);
     out.numberSep    = GetTextOf(m_hNumberSep);
 
@@ -2646,17 +2787,20 @@ void BatchRenameDialog::FinishListDrag()
         ::ReleaseCapture();
     }
 
-    // 先记住"哪些行原来是选中的"（按名字记，因为重排之后行号对应的东西就变了）
-    std::vector<std::wstring> selectedNames;
+    // 先记住"哪些项原来是选中的"。
+    // 用 itemIndex（m_items 的下标）记，而不是文件名：它是每一项在整批里的固定身份，
+    // 重排之后行号变了、甚至名字刚好改成和别的项同大小写写法都不影响找回。
+    std::vector<size_t> selectedItems;
 
     if (m_hList != nullptr)
     {
-        for (int i = 0; i < ListView_GetItemCount(m_hList); ++i)
+        const int listCount = ListView_GetItemCount(m_hList);
+
+        for (int i = 0; i < listCount && static_cast<size_t>(i) < m_rows.size(); ++i)
         {
-            if ((ListView_GetItemState(m_hList, i, LVIS_SELECTED) & LVIS_SELECTED) != 0 &&
-                static_cast<size_t>(i) < m_rows.size())
+            if ((ListView_GetItemState(m_hList, i, LVIS_SELECTED) & LVIS_SELECTED) != 0)
             {
-                selectedNames.push_back(m_rows[static_cast<size_t>(i)].oldName);
+                selectedItems.push_back(m_rows[static_cast<size_t>(i)].itemIndex);
             }
         }
     }
@@ -2676,7 +2820,9 @@ void BatchRenameDialog::FinishListDrag()
         return;
     }
 
-    const int itemCount = static_cast<int>(m_rows.size());
+    // 用行数最多的那个上限（正常情况下两边一样；万一不同步，宁可少算一行也别越界）
+    const int itemCount = static_cast<int>(std::min(
+        m_rows.size(), static_cast<size_t>(ListView_GetItemCount(m_hList))));
 
     // 算出"移除被拖行之后"，插入点是第几个
     size_t removedBefore = 0;
@@ -2739,8 +2885,8 @@ void BatchRenameDialog::FinishListDrag()
 
     Recalculate();
 
-    // 拖完顺序变了，原来选中的那几行按"原名"重新选上（不然选择会跳到别的文件上）
-    if (m_hList != nullptr && !selectedNames.empty())
+    // 拖完顺序变了，原来选中的那几项按 itemIndex 重新选上（不然选择会跳到别的文件上）
+    if (m_hList != nullptr && !selectedItems.empty())
     {
         const int rowCount = ListView_GetItemCount(m_hList);
 
@@ -2748,8 +2894,8 @@ void BatchRenameDialog::FinishListDrag()
         {
             const bool selected =
                 (static_cast<size_t>(i) < m_rows.size()) &&
-                std::find(selectedNames.begin(), selectedNames.end(),
-                          m_rows[static_cast<size_t>(i)].oldName) != selectedNames.end();
+                std::find(selectedItems.begin(), selectedItems.end(),
+                          m_rows[static_cast<size_t>(i)].itemIndex) != selectedItems.end();
 
             ListView_SetItemState(m_hList, i, selected ? LVIS_SELECTED : 0, LVIS_SELECTED);
         }
@@ -2775,8 +2921,19 @@ std::wstring BatchRenameDialog::GetTextOf(HWND control) const
         return L"";
     }
 
-    std::wstring text(static_cast<size_t>(length), L'\0');
-    ::GetWindowTextW(control, text.data(), length + 1);
+    // 注意这里必须先多留一个字符的位置：
+    // GetWindowTextW 的第三个参数是"最多能写多少个字符"，它会连同结尾的 '\0' 一起写，
+    // 原来直接传 length + 1 而缓冲只有 length 个字符，等于越界写 1 个 wchar_t。
+    // 正确做法是先按 length + 1 备好缓冲，读完再把多出来的那个 '\0' 截掉。
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    const int copied = ::GetWindowTextW(control, text.data(), length + 1);
+
+    if (copied <= 0)
+    {
+        return L"";
+    }
+
+    text.resize(static_cast<size_t>((copied > length) ? length : copied));
     return text;
 }
 
@@ -2865,7 +3022,10 @@ void BatchRenameDialog::DrawRegexMenuItem(DRAWITEMSTRUCT* draw)
         ::DrawTextW(draw->hDC, L"✓", -1, &checkRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
-    // 左列：写法（等宽字体。按界面的字体高度现做一个，菜单不是常驻，不用缓存）
+    // 左列：写法（等宽字体）。
+    // 以前每画一项就 CreateFontW 一个、画完 DeleteObject：菜单一弹出有二十多项，
+    // 鼠标划过一项又重画一项，一次菜单生命周期里能建删几十个字体。
+    // 现在按字号缓存，整个进程只建一次（字号跟着系统 DPI 变，所以按高度做 key）。
     LOGFONTW logFont = {};
     HFONT uiFont = reinterpret_cast<HFONT>(::SendMessageW(m_hWnd, WM_GETFONT, 0, 0));
     if (uiFont == nullptr)
@@ -2878,9 +3038,21 @@ void BatchRenameDialog::DrawRegexMenuItem(DRAWITEMSTRUCT* draw)
         logFont.lfHeight = -Scale(12);
     }
 
-    HFONT monoFont = ::CreateFontW(logFont.lfHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                   CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+    const int fontHeight = (logFont.lfHeight != 0) ? logFont.lfHeight : -Scale(12);
+
+    static std::map<int, HFONT> monoFontCache;
+    auto monoIt = monoFontCache.find(fontHeight);
+
+    if (monoIt == monoFontCache.end())
+    {
+        HFONT created = ::CreateFontW(fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+        monoIt = monoFontCache.emplace(fontHeight, created).first;
+    }
+
+    HFONT monoFont = monoIt->second;
 
     HGDIOBJ oldFont = ::SelectObject(draw->hDC, (monoFont != nullptr) ? monoFont : uiFont);
 
@@ -2904,10 +3076,7 @@ void BatchRenameDialog::DrawRegexMenuItem(DRAWITEMSTRUCT* draw)
 
     ::SelectObject(draw->hDC, oldFont);
 
-    if (monoFont != nullptr)
-    {
-        ::DeleteObject(monoFont);
-    }
+    // 字体是缓存里的，这里不再删（删了下次还得重建）
 }
 
 // 点「普通 / 正则」按钮：弹出菜单。
@@ -3189,8 +3358,10 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
     {
         const long long start  = ReadInteger(m_hNumberStart, 1, 0);
         const long long step   = ReadInteger(m_hNumberStep, 1, 1);
-        // 位数框空着就用 2（跟框里那句灰色提示一致，免得"提示写 2、实际出 1 位"）
-        const int       digits = static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1));
+        // 位数框空着就用 2（跟框里那句灰色提示一致，免得"提示写 2、实际出 1 位"）；
+        // 并且夹到 1~20 位，防止"位数填 99"把名字撑到几百个前导零
+        const int       digits = ClampInt(
+            static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1)), 1, kMaxNumberDigits);
 
         const std::wstring numberText =
             FormatNumber(start + step * static_cast<long long>(index), digits);
@@ -3328,6 +3499,23 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
         newNames[order[i]] = ComputeNewName(i, m_items[order[i]].name);
     }
 
+    // ---- 先把"小写后的路径 / 原名 / 新名"各算一遍 ----
+    //
+    // 下面两段要反复比较字符串，而且是"每项跟每项比"：
+    // 以前每次比较都现场 ToLowerText（每次分配一个新的宽字符串），
+    // 300 项就是十几万次分配、1000 项上百万次——敲一个字就卡一下。
+    // 现在每个字符串只转一次小写，后面直接比现成的，重名判断也改成"数次数"而不是双层循环。
+    std::vector<std::wstring> lowerPaths(m_items.size());
+    std::vector<std::wstring> lowerNames(m_items.size());      // 原名（只含文件名）
+    std::vector<std::wstring> lowerNewNames(m_items.size());   // 新名
+
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        lowerPaths[i]    = ToLowerText(m_items[i].path);
+        lowerNames[i]    = ToLowerText(m_items[i].name);
+        lowerNewNames[i] = ToLowerText(newNames[i]);
+    }
+
     // ---- 目标名是不是已经被目录里别的文件占着（这一条要问磁盘，所以只在 scanDisk 时查）----
     //
     // 三个不算冲突的例外：
@@ -3335,51 +3523,52 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
     //   2) 占着那个名字的是本批里另一项，而那一项自己也要改走 —— 两段式改名会先腾地方；
     //   3) 那个位置本来就空着。
     // 除了这三种，遇到同名一律标红：改名绝不能把别人的文件顶掉。
-    if (scanDisk && m_targetState.size() != m_items.size())
-    {
-        m_targetState.assign(m_items.size(), 0);
-    }
-
     if (scanDisk)
     {
         m_targetState.assign(m_items.size(), 0);
+
+        // "现在占着这个名字的是本批哪一项"：一次建表，后面 O(1) 查。
+        // （以前是每项都把所有项再遍历一遍，再各自转一次小写）
+        std::unordered_map<std::wstring, size_t> pathOwners;
+        pathOwners.reserve(m_items.size() * 2);
+
+        for (size_t i = 0; i < m_items.size(); ++i)
+        {
+            pathOwners.emplace(lowerPaths[i], i);   // 同一路径不会出现两次，重复的忽略即可
+        }
 
         for (size_t i = 0; i < m_items.size(); ++i)
         {
             const std::wstring target = JoinPath(ParentDirectoryOf(m_items[i].path), newNames[i]);
 
+            const std::wstring lowerTarget = ToLowerText(target);
+
             // 例外 1：纯大小写改名
-            if (ToLowerText(target) == ToLowerText(m_items[i].path))
+            if (lowerTarget == lowerPaths[i])
             {
                 continue;
             }
 
+            // 例外 3：空位
             if (!PathExists(target))
             {
-                continue;   // 例外 3：空位
+                continue;
             }
 
             // 例外 2：占着这个名字的是本批里另一项，且它自己也要改走
             bool vacated = false;
 
-            for (size_t j = 0; j < m_items.size(); ++j)
-            {
-                if (j == i)
-                {
-                    continue;
-                }
+            auto owner = pathOwners.find(lowerTarget);
 
-                if (ToLowerText(m_items[j].path) != ToLowerText(target))
-                {
-                    continue;
-                }
+            if (owner != pathOwners.end() && owner->second != i)
+            {
+                const size_t j = owner->second;
 
                 // 它自己的新名字和原名不一样 = 它会离开这个名字，把位置让出来
-                if (ToLowerText(newNames[j]) != ToLowerText(m_items[j].name))
+                if (lowerNewNames[j] != lowerNames[j])
                 {
                     vacated = true;
                 }
-                break;
             }
 
             if (!vacated)
@@ -3394,7 +3583,17 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
         m_targetState.assign(m_items.size(), 0);
     }
 
-    // ---- 状态判定：空名 / 非法字符 / 重名 / 已存在同名 / 可能被占用 / 已修改 / 未改动 ----
+    // 每个新名字（小写）出现几次：>= 2 次就是本批内部撞名。
+    // 以前是每行再遍历所有行比一遍（n² 次比较 + n² 次小写转换），现在一次统计就够。
+    std::unordered_map<std::wstring, int> newNameCounts;
+    newNameCounts.reserve(m_items.size() * 2);
+
+    for (size_t i = 0; i < lowerNewNames.size(); ++i)
+    {
+        ++newNameCounts[lowerNewNames[i]];
+    }
+
+    // ---- 状态判定：空名 / 非法字符 / 名字本身不合法 / 重名 / 已存在同名 / 可能被占用 / 已修改 / 未改动 ----
     for (size_t i = 0; i < order.size(); ++i)
     {
         const size_t itemIndex = order[i];
@@ -3414,25 +3613,36 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
             row.state     = 2;
             row.stateText = L"含非法字符";
         }
+        else if (row.newName.size() > kMaxFileNameLength)
+        {
+            // 名字超过 255 个字符，文件系统根本建不出来。放在这里拦，
+            // 总比"已经开始改名了才失败、再整批回滚"强。
+            row.state     = 2;
+            row.stateText = L"名字太长（>255 字）";
+        }
+        else if (row.newName == L"." || row.newName == L"..")
+        {
+            row.state     = 2;
+            row.stateText = L"名字不能只有点";
+        }
+        else if (HasInvalidNameTail(row.newName))
+        {
+            // 结尾的空格 / 点会被 Win32 悄悄去掉：实际名字和这里显示的不一样，
+            // 撤销记录也会对不上，所以直接拦下来
+            row.state     = 2;
+            row.stateText = L"结尾不能是空格或点";
+        }
+        else if (IsReservedDeviceName(row.newName))
+        {
+            row.state     = 2;
+            row.stateText = L"系统保留名";
+        }
         else
         {
             // 和别的项撞名了吗（不区分大小写，和文件系统一致）
-            const std::wstring lowered = ToLowerText(row.newName);
-            bool               collision = false;
-
-            for (size_t j = 0; j < order.size(); ++j)
-            {
-                if (j == i)
-                {
-                    continue;
-                }
-
-                if (ToLowerText(newNames[order[j]]) == lowered)
-                {
-                    collision = true;
-                    break;
-                }
-            }
+            const bool collision =
+                (newNameCounts.find(lowerNewNames[itemIndex]) != newNameCounts.end()) &&
+                (newNameCounts[lowerNewNames[itemIndex]] > 1);
 
             if (collision)
             {
@@ -3562,6 +3772,9 @@ void BatchRenameDialog::ScanSourceStates()
     {
         m_sourceState[i] = ProbeSourceState(m_items[i].path);
     }
+
+    // 记下这一趟的时间：防抖定时器靠它做节流（同一秒里别反复全量开句柄）
+    m_lastSourceProbeTick = ::GetTickCount64();
 }
 
 void BatchRenameDialog::RecalculateNow(bool scanDisk)
@@ -3773,6 +3986,9 @@ bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText, bool skipPro
     // ---- 列出真正要动的项：新名字和原名一模一样的不碰；要求跳过异常时，标红的整行跳过 ----
     std::vector<RenamePlan> plans;
 
+    // 结果先清空：这一批要是失败/回滚，回传列表必须一项都不留
+    m_renamedResults.clear();
+
     for (const auto& row : m_rows)
     {
         if (skipProblemRow && row.state == 2)
@@ -3782,18 +3998,25 @@ bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText, bool skipPro
 
         if (row.newName == row.oldName)
         {
-            continue;
+            continue;   // 名字没变：不碰文件，也不进结果（否则撤销会报"原名和目标名相同"）
         }
 
         RenamePlan plan = {};
         plan.oldPath    = m_items[row.itemIndex].path;
+        plan.newName    = row.newName;
         plan.targetPath = JoinPath(ParentDirectoryOf(plan.oldPath), row.newName);
         plans.push_back(plan);
     }
 
     if (plans.empty())
     {
-        errorText = L"现在的规则没有改动任何一项名字";
+        // 两种情况文案不一样：
+        //   · 正常路径：规则本来就没改动任何名字；
+        //   · 跳过路径：能改的都被"异常"筛掉了，用户点的是"跳过异常继续改名"，
+        //     这时候说"规则没有改动任何一项名字"会让人以为规则不生效。
+        errorText = skipProblemRow
+                        ? L"除了异常项以外，没有别的项需要改名"
+                        : L"现在的规则没有改动任何一项名字";
         return false;
     }
 
@@ -3877,28 +4100,38 @@ bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText, bool skipPro
         {
             const DWORD error = ::GetLastError();
 
-            // 整批回滚（倒序）：已经到目标名的改回原名，还在临时名的也改回原名
+            // 整批回滚，顺序很讲究：**先把已经落到目标名的撤回，再把还停在临时名的撤回**。
+            //
+            // 为什么不能像以前那样"按计划下标倒序，两段混着撤回"：
+            // 遇到 a→b、b→a 这种互换，b 这个名字此刻正被"已经改成功的 a"占着，
+            // 先去回滚还没到目标名的那一项（temp→b）就会撞上它而失败，
+            // 结果一个文件卡在 ~brex_1 这个名字上，用户看到的是"文件不见了"。
             int rollbackFailed = 0;
 
+            // 第一轮：已经到目标名的（stage == 2），倒序改回原名
             for (int j = total - 1; j >= 0; --j)
             {
-                std::wstring from;
-
-                if (plans[j].stage == 2)
+                if (plans[j].stage != 2)
                 {
-                    from = plans[j].targetPath;
-                }
-                else if (plans[j].stage == 1)
-                {
-                    from = plans[j].tempPath;
+                    continue;
                 }
 
-                if (from.empty())
+                if (!::MoveFileExW(ToLongPath(plans[j].targetPath).c_str(),
+                                   ToLongPath(plans[j].oldPath).c_str(), 0))
                 {
-                    continue;   // 这一项压根没动过
+                    ++rollbackFailed;
+                }
+            }
+
+            // 第二轮：还停在临时名的（stage == 1），倒序改回原名
+            for (int j = total - 1; j >= 0; --j)
+            {
+                if (plans[j].stage != 1)
+                {
+                    continue;
                 }
 
-                if (!::MoveFileExW(ToLongPath(from).c_str(),
+                if (!::MoveFileExW(ToLongPath(plans[j].tempPath).c_str(),
                                    ToLongPath(plans[j].oldPath).c_str(), 0))
                 {
                     ++rollbackFailed;
@@ -3932,6 +4165,19 @@ bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText, bool skipPro
 
     m_statusText.clear();
     m_statusIsError = false;
+
+    // ---- 两段都成功了，这才把"真正改过的项"记进结果 ----
+    // 回滚路径直接 return false，一项都不会进这里，所以主窗口拿到的永远和磁盘一致。
+    m_renamedResults.clear();
+    m_renamedResults.reserve(plans.size());
+
+    for (const auto& plan : plans)
+    {
+        BatchRenameResult result = {};
+        result.oldPath = plan.oldPath;
+        result.newName = plan.newName;
+        m_renamedResults.push_back(result);
+    }
 
     return true;
 }
@@ -4629,9 +4875,10 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
             // 下拉列表正展开的时候，回车的意思是"收下拉"，不能顺手把窗口应用掉
             // （否则用户在「位置」「扩展名」这些下拉里按回车选条目，窗口就被关掉了）
+            // 注意这张表要把所有下拉框都列全：以前漏过「替换范围」这一格。
             const HWND combos[] =
             {
-                m_hNumberPos, m_hExtMode, m_hCaseMode, m_hSortMode
+                m_hReplaceMode, m_hNumberPos, m_hExtMode, m_hCaseMode, m_hSortMode
             };
 
             for (HWND combo : combos)
@@ -4749,7 +4996,17 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
             if (!m_running)
             {
-                ScanSourceStates();
+                // 源文件那一趟是"每项一次 CreateFile"，几百项在网络盘上很贵；
+                // 而占用情况变得很慢，没必要用户每停一次手就全量重扫。
+                // 800ms 内刚扫过就沿用上次结果，只重算目标名冲突（那个只查属性，便宜）。
+                // 打开窗口、点「应用」前都会各自全量扫一次，该发现的问题不会漏。
+                const ULONGLONG now = ::GetTickCount64();
+
+                if (now - m_lastSourceProbeTick >= 800)
+                {
+                    ScanSourceStates();
+                }
+
                 RecalculateNow(true);
             }
         }
