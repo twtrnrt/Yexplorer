@@ -1627,46 +1627,37 @@ bool BatchRenameDialog::ConfirmLeaveSlot()
                                   ? m_templates[m_selectedTemplate].name
                                   : std::wstring(L"当前模板");
 
+    // 这一段文字跟旧版消息框一字不差（用户要求"文字改成之前一样"）：
+    // 第一行说清情况，后三行逐个说明"是 / 否 / 取消"各是什么后果。
     const std::wstring message =
-        L"模板「" + name + L"」的参数改过还没保存。\r\n"
-        L"先保存的话，下次点这个模板还是这套参数；不保存就直接跳到新模板。";
+        L"模板「" + name + L"」的参数改过还没保存。\r\n\r\n"
+        L"是 = 先保存再继续\r\n"
+        L"否 = 不保存直接继续\r\n"
+        L"取消 = 留在这个模板继续改";
 
     // 这里原本用 MessageBox，但它不认"窗口居中"，实测弹到了屏幕右下角（还压到任务栏那边）。
     // 换成 TaskDialog：TDF_POSITION_RELATIVE_TO_WINDOW 会让它在属主窗口（本窗口）中间弹出。
-    // 样式上刻意做成跟原来的消息框一样朴素：不要大标题、不要图标，正文就一段话，
-    // 三个按钮自己起名字，返回的自定义 ID 再翻译回"是 / 否 / 取消"。
-    const int kButtonSave   = 100;
-    const int kButtonLeave  = 101;
-    const int kButtonCancel = 102;
-
-    TASKDIALOG_BUTTON buttons[3] =
-    {
-        { kButtonSave,   L"是，先保存再继续" },
-        { kButtonLeave,  L"否，不保存直接继续" },
-        { kButtonCancel, L"取消，留在这里继续改" }
-    };
-
+    // 正文和按钮都照旧版：不画图标、不要大字标题，按钮用系统标准的「是 / 否 / 取消」
+    // （TDCBF_YES/NO/CANCEL 会自动带上本地化文字和对应的标准返回值）。
     TASKDIALOGCONFIG config = {};
     config.cbSize             = sizeof(config);
     config.hwndParent         = m_hWnd;
     config.dwFlags            = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
-    config.dwCommonButtons    = 0;
+    config.dwCommonButtons    = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON;
     config.pszWindowTitle     = L"批量重命名";
     config.pszMainIcon        = nullptr;   // 不画图标，保持朴素
     config.pszMainInstruction = nullptr;   // 不要那行大字标题
     config.pszContent         = message.c_str();
-    config.pButtons           = buttons;
-    config.cButtons           = ARRAYSIZE(buttons);
-    config.nDefaultButton     = kButtonSave;
+    config.nDefaultButton     = IDYES;
 
-    int pressed = kButtonCancel;
+    int pressed = IDCANCEL;
     ::TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
 
-    if (pressed == kButtonCancel)
+    if (pressed == IDCANCEL)
     {
         return false;
     }
-    if (pressed == kButtonSave)
+    if (pressed == IDYES)
     {
         SaveCurrentSlot();
     }
