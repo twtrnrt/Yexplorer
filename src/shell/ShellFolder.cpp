@@ -657,15 +657,33 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
 
             DWORD realAttributes = INVALID_FILE_ATTRIBUTES;
 
-            if (entry.canEnter && !entry.fullPath.empty() && IsFileSystemPath(entry.fullPath))
+            // 需要查磁盘的只有两种：Shell 说能进去的（可能是文件夹，也可能是 zip），
+            // 以及扩展名属于压缩包的（rar / 7z 这类没装"压缩包当文件夹"处理器时，
+            // Shell 只当它是普通文件，但它确实是个压缩包）。
+            const bool extensionIsContainer = IsContainerFileExtension(entry.fullPath);
+
+            if ((entry.canEnter || extensionIsContainer) &&
+                !entry.fullPath.empty() && IsFileSystemPath(entry.fullPath))
             {
                 realAttributes = ::GetFileAttributesW(WithLongPathPrefix(entry.fullPath).c_str());
 
                 if (realAttributes != INVALID_FILE_ATTRIBUTES &&
                     (realAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
                 {
-                    entry.isFolder        = false;
-                    entry.isContainerFile = true;
+                    if (entry.canEnter)
+                    {
+                        entry.isFolder        = false;
+                        entry.isContainerFile = true;
+                    }
+                    else if (extensionIsContainer)
+                    {
+                        // Shell 没把它报成文件夹，但扩展名是压缩包：
+                        // 跟 zip / 7z 一样统一按「容器文件」处理，
+                        // 双击走打开方式账本（默认本程序），就能进去看内容了。
+                        entry.canEnter        = true;
+                        entry.isFolder        = false;
+                        entry.isContainerFile = true;
+                    }
                 }
             }
 
@@ -1033,7 +1051,7 @@ bool IsFileSystemPath(const std::wstring& path)
     return false;
 }
 
-bool IsContainerFileExtension(const std::wstring& path)
+bool IsContainerExtension(const std::wstring& extension)
 {
     // 常见压缩包/容器扩展名（系统把它们的属性报成"文件夹"，其实磁盘上是文件）
     static const wchar_t* const kContainerExtensions[] = {
@@ -1041,16 +1059,6 @@ bool IsContainerFileExtension(const std::wstring& path)
         L".tgz",  L".bz2",  L".tbz", L".tbz2", L".xz", L".txz",  L".lz",
         L".lzma", L".zst",  L".arj", L".lzh", L".lha", L".iso",
     };
-
-    // 直接按 PathFindExtensionW 取扩展名并转小写：
-    // 这里不引用 ShellOpenWith 的 ExtensionKeyForPath，避免模块之间多一条依赖
-    const wchar_t* dot = ::PathFindExtensionW(path.c_str());
-    std::wstring extension = (dot == nullptr) ? L"" : dot;
-
-    for (wchar_t& ch : extension)
-    {
-        ch = static_cast<wchar_t>(::towlower(ch));
-    }
 
     for (const wchar_t* one : kContainerExtensions)
     {
@@ -1061,6 +1069,21 @@ bool IsContainerFileExtension(const std::wstring& path)
     }
 
     return false;
+}
+
+bool IsContainerFileExtension(const std::wstring& path)
+{
+    // 直接按 PathFindExtensionW 取扩展名并转小写：
+    // 这里不引用 ShellOpenWith 的 ExtensionKeyForPath，避免模块之间多一条依赖
+    const wchar_t* dot = ::PathFindExtensionW(path.c_str());
+    std::wstring extension = (dot == nullptr) ? L"" : dot;
+
+    for (wchar_t& ch : extension)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+
+    return IsContainerExtension(extension);
 }
 
 std::wstring GetParentPath(const std::wstring& path)

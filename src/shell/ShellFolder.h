@@ -291,6 +291,9 @@ bool IsFileSystemPath(const std::wstring& path);
 // ----------------------------------------------------------------------------
 bool IsContainerFileExtension(const std::wstring& path);
 
+// 同上，但直接给扩展名（".rar" 这种，已经带点、小写）
+bool IsContainerExtension(const std::wstring& extension);
+
 // ----------------------------------------------------------------------------
 // 判断一个 Shell 项"到底是不是容器"（能不能当作文件夹导航进去）
 //

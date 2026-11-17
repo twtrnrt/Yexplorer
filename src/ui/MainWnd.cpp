@@ -963,6 +963,18 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
+        case kCommandOpenWithSelf:
+        {
+            // 「打开方式 → Yexplorer（本程序）」：这一次用本程序打开选中的压缩包，
+            // 进容器里浏览。改不改默认由用户自己在设置窗口里决定，这里不动账本。
+            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+            if (!selected.empty() && shell::IsContainerFileExtension(selected.front()))
+            {
+                NavigateToPath(selected.front());
+            }
+            return 0;
+        }
         case kCommandOpenWithManage:
         {
             // 「添加或管理程序…」：管的是当前选中文件那个扩展名
@@ -3407,6 +3419,7 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
     const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
 
     int visibleCount = 0;
+    bool ledgerHasSelf = false;   // 账本里已经有「本程序」这一项了（下面别重复加）
 
     if (entry != nullptr)
     {
@@ -3440,6 +3453,11 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
                 text += L"（默认）";
             }
 
+            if (item.kind == L"self")
+            {
+                ledgerHasSelf = true;
+            }
+
             const UINT commandId =
                 static_cast<UINT>(kCommandOpenWithBase + static_cast<int>(i));
 
@@ -3467,6 +3485,19 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
 
     if (visibleCount > 0)
     {
+        ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
+    }
+
+    // 压缩包（zip/rar/7z…）：固定给一条「Yexplorer（本程序）」入口
+    //
+    // 为什么要固定加：账本里记默认程序时，压缩包的默认很可能是 WinRAR/7-Zip
+    // （系统关联就是这样）。用户想用我们自己的文件管理器进去浏览内部，
+    // 就得有个随时可点的入口，而不是只能改默认程序。
+    // 点它不改账本，只是这一次用本程序打开（进容器浏览）。
+    if (shell::IsContainerExtension(extension) && !ledgerHasSelf)
+    {
+        ::AppendMenuW(subMenu, MF_STRING, kCommandOpenWithSelf,
+                      L"Yexplorer（本程序）");
         ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
     }
 

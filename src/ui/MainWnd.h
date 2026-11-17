@@ -83,6 +83,7 @@ static const int kCommandRedoKeyboard = 3208;  // Ctrl+Y 专用（批量重命�
 //   3400 ~ 3499 分给"账本里第 N 个程序"（3400 + 下标），所以下标最多到 99
 static const int kCommandOpenWithManage = 3210;   // 添加或管理程序…
 static const int kCommandOpenWithBase   = 3400;   // 用列表里第 N 个程序打开
+static const int kCommandOpenWithSelf   = 3212;   // 用本程序打开（压缩包专用入口）
 
 // 右键菜单「新建」子菜单里的命令
 //   3500 ~ 3599 分给"新建项快照里第 N 项"

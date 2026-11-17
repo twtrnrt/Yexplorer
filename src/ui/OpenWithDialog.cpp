@@ -16,6 +16,7 @@
 
 #include "core/Logger.h"
 #include "core/Settings.h"
+#include "shell/ShellFolder.h"     // IsContainerExtension：压缩包要有「本程序」这一项
 #include "shell/ShellOpenWith.h"
 
 #include <windows.h>
@@ -183,12 +184,17 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension,
     // ---- 第一次打开窗口：读系统候选 ----
     RefreshCandidatesFromSystem(false);
 
-    // ---- 压缩包（容器）专用：候选里加一条「Yexplorer（本程序）」并默认选它 ----
+    // ---- 压缩包（容器）专用：候选里加一条「Yexplorer（本程序）」 ----
     //
-    // 用户要求：第一次双击压缩包也要弹这个窗口，默认项是"我们自己的文件管理器"，
-    // 设过就按设过的。所以这里在系统候选之前插一条 kind="self" 的项，
-    // 让它成为默认；用户改选别的程序后，账本里存的就是那个程序。
-    if (m_preferSelf)
+    // 用户要求：双击压缩包也要弹这个窗口，默认项是"我们自己的文件管理器"，
+    // 设过就按设过的。
+    //
+    // 两种情况都要加这一项：
+    //   · 双击压缩包（preferSelf=true）→ 顺手设为默认；
+    //   · 右键「打开方式 → 添加或管理程序…」对压缩包（preferSelf=false）→
+    //     只作为可选项，让用户能把默认改成本程序（否则列表里只有 WinRAR/7-Zip，
+    //     用户永远找不到"用我们自己的文件管理器打开 rar"这个入口）。
+    if (m_preferSelf || shell::IsContainerExtension(m_extension))
     {
         core::OpenWithItem selfItem;
         selfItem.kind = L"self";
@@ -217,7 +223,9 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension,
             m_entry.items.insert(m_entry.items.begin(), selfItem);
         }
 
-        if (m_firstTime && m_entry.defaultKey.empty())
+        // 只有"双击压缩包且账本里还没有默认"时才替用户选成本程序；
+        // 右键进管理窗口不抢默认（用户可能已经设过 WinRAR，不能覆盖他的选择）
+        if (m_preferSelf && m_firstTime && m_entry.defaultKey.empty())
         {
             m_entry.defaultKey = core::OpenWithKey(selfItem);
         }
