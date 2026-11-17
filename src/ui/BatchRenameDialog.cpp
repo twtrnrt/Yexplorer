@@ -89,6 +89,8 @@ enum RuleField
     kRfFind,            // 查找
     kRfRegexButton,     // 查找方式（自绘按钮：显示「普通」或「正则」，点开弹菜单）
     kRfReplace,         // 替换为
+    kRfReplaceMode,     // 替换范围（下拉：替换全部 / 从左往右 / 从右往左）
+    kRfReplaceCount,    // 替换几处（30px 窄框，紧挨着替换范围，选「替换全部」时灰掉）
     kRfIncludeExt,      // 含扩展名（复选框）
     kRfCaseSensitive,   // 区分大小写（复选框）
 
@@ -131,10 +133,14 @@ const RuleFieldSpec kRuleSpecs[kRfCount] =
     { nullptr,   -1, -1, 725,  50, 0, 25 },          // 扩展名填什么（紧贴下拉，向下加高 1px）
     { L"大小写", 783, 44, 832,  80, 0, 24 * 3 },     // 大小写下拉（宽度 80 够显示「保持原样」）
 
-    // ---- 第 1 行：查找（紧贴「普通 / 正则」按钮）/ 替换为（跟查找一样长）/ 两个复选框 ----
+    // ---- 第 1 行：查找（紧贴「普通 / 正则」按钮）/ 替换为 + 替换范围 + 替换几处 / 两个复选框 ----
+    // 「替换为」右边紧挨着两格：先一个下拉（替换全部 / 从左往右 / 从右往左），
+    // 再一个 30px 窄框填"替换几处"，两格都不留间隔；没勾范围的全部时窄框才可填
     { L"查找",    28, 30,  63, 285, 1, 24 },         // 查找
     { nullptr,   -1, -1, 348,  36, 1, 24 },          // 查找方式按钮（紧贴输入框，宽度 36）
-    { L"替换为", 392, 44, 441, 285, 1, 24 },         // 替换为（跟查找等长）
+    { L"替换为", 392, 44, 441, 179, 1, 24 },         // 替换为（让出右边 106px 给范围和次数）
+    { nullptr,   -1, -1, 620,  76, 1, 24 * 3 },      // 替换范围下拉（宽度 76 够显示「替换全部」）
+    { nullptr,   -1, -1, 696,  30, 1, 24 },          // 替换几处（30px 窄框，紧贴下拉）
     { nullptr,   -1, -1, 734,  80, 1, 24 },          // 含扩展名
     { nullptr,   -1, -1, 822,  90, 1, 24 },          // 区分大小写（右端留 8px 到框线）
 
@@ -176,6 +182,8 @@ enum : int
     kIdRegexPreset   = 5018,   // 预留（查找方式从下拉改成自绘按钮 + 菜单，不再有窗口控件）
     kIdIncludeExt    = 5019,   // 含扩展名（查找替换是否连扩展名一起处理）
     kIdNumberReplace = 5020,   // 替换（序号直接当新名字，原文件名不要了）
+    kIdReplaceMode   = 5021,   // 替换范围（替换全部 / 从左往右 / 从右往左）
+    kIdReplaceCount  = 5022,   // 替换几处（30px 窄框，选「替换全部」时灰掉）
 
     kIdList          = 5100,   // 预览列表
     kIdCancel        = 5101,   // 取消（自绘按钮）
@@ -1010,6 +1018,30 @@ void BatchRenameDialog::CreateControls()
     m_hFind    = createEdit(kIdFind,    L"要查找的文字");
     m_hReplace = createEdit(kIdReplace, L"替换成什么（空＝删除）");
 
+    // 替换范围：替换全部 / 从左往右 / 从右往左（默认替换全部）
+    m_hReplaceMode = ::CreateWindowExW(0, L"COMBOBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                       CBS_DROPDOWNLIST | WS_VSCROLL,
+                                       0, 0, 0, 0, m_hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdReplaceMode)),
+                                       instance, nullptr);
+    if (m_hReplaceMode != nullptr)
+    {
+        ::SendMessageW(m_hReplaceMode, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SendMessageW(m_hReplaceMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"替换全部"));
+        ::SendMessageW(m_hReplaceMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"从左往右"));
+        ::SendMessageW(m_hReplaceMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"从右往左"));
+        ::SendMessageW(m_hReplaceMode, CB_SETCURSEL, 0, 0);
+    }
+
+    // 替换几处：只在选了「从左往右 / 从右往左」时能填，默认 1
+    m_hReplaceCount = createEdit(kIdReplaceCount, L"1");
+    if (m_hReplaceCount != nullptr)
+    {
+        ::SendMessageW(m_hReplaceCount, EM_SETLIMITTEXT, 4, 0);   // 最多四位数，够用了
+        ::SetWindowTextW(m_hReplaceCount, L"1");
+    }
+
     m_hCaseSensitive = ::CreateWindowExW(0, L"BUTTON", L"区分大小写",
                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                          0, 0, 0, 0, m_hWnd,
@@ -1192,6 +1224,8 @@ void BatchRenameDialog::Layout()
         controls[kRfCaseMode]     = m_hCaseMode;
         controls[kRfFind]         = m_hFind;
         controls[kRfReplace]      = m_hReplace;
+        controls[kRfReplaceMode]  = m_hReplaceMode;
+        controls[kRfReplaceCount] = m_hReplaceCount;
         controls[kRfIncludeExt]   = m_hIncludeExt;
         controls[kRfCaseSensitive] = m_hCaseSensitive;
         controls[kRfNumberEnable] = m_hNumberEnable;
@@ -1331,6 +1365,13 @@ void BatchRenameDialog::EnableRuleControls()
     {
         // 只有选了「修改」才让填扩展名；选「不修改」时灰掉（灰底由 WM_CTLCOLORSTATIC 画）
         ::EnableWindow(m_hExtValue, extMode != 0 ? TRUE : FALSE);
+    }
+
+    // 替换几处：只有替换范围选了「从左往右 / 从右往左」才能填，选「替换全部」时灰掉
+    if (m_hReplaceCount != nullptr)
+    {
+        ::EnableWindow(m_hReplaceCount,
+                       (ComboSelection(m_hReplaceMode) != 0) ? TRUE : FALSE);
     }
 }
 
@@ -1516,6 +1557,18 @@ void BatchRenameDialog::LoadTemplatesFromDisk()
                 {
                     current.replace = value;
                 }
+                else if (key == L"replacemode")
+                {
+                    current.replaceMode = ::_wtoi(value.c_str());
+                }
+                else if (key == L"replacecount")
+                {
+                    current.replaceCount = ::_wtoi(value.c_str());
+                    if (current.replaceCount < 1)
+                    {
+                        current.replaceCount = 1;
+                    }
+                }
                 else if (key == L"caseSensitive")
                 {
                     current.caseSensitive = (value == L"1");
@@ -1629,6 +1682,8 @@ void BatchRenameDialog::SaveTemplatesToDisk() const
         text += L"suffix=" + item.suffix + L"\r\n";
         text += L"find=" + item.find + L"\r\n";
         text += L"replace=" + item.replace + L"\r\n";
+        text += L"replacemode=" + std::to_wstring(item.replaceMode) + L"\r\n";
+        text += L"replacecount=" + std::to_wstring(item.replaceCount) + L"\r\n";
         text += std::wstring(L"caseSensitive=") + (item.caseSensitive ? L"1" : L"0") + L"\r\n";
         text += std::wstring(L"inclext=") + (item.includeExt ? L"1" : L"0") + L"\r\n";
         text += L"regexpreset=" + std::to_wstring(item.regexPreset) + L"\r\n";
@@ -1703,6 +1758,8 @@ static bool SameRules(const RenameTemplate& a, const RenameTemplate& b)
            a.suffix == b.suffix &&
            a.find == b.find &&
            a.replace == b.replace &&
+           a.replaceMode == b.replaceMode &&
+           a.replaceCount == b.replaceCount &&
            a.caseSensitive == b.caseSensitive &&
            a.includeExt == b.includeExt &&
            a.regexPreset == b.regexPreset &&
@@ -2113,6 +2170,10 @@ void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
     // 查找方式：0 普通查找 / 1~9 内置正则 / 10 自定义正则
     out.regexPreset = m_regexPreset;
 
+    // 替换范围 + 替换几处
+    out.replaceMode  = ComboSelection(m_hReplaceMode);
+    out.replaceCount = static_cast<int>(ReadInteger(m_hReplaceCount, 1, 1));
+
     out.number       = (m_hNumberEnable != nullptr) &&
                        (::SendMessageW(m_hNumberEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
     out.numberReplace = (m_hNumberReplace != nullptr) &&
@@ -2156,6 +2217,16 @@ void BatchRenameDialog::ApplyTemplateToControls(const RenameTemplate& tpl)
     {
         ::SendMessageW(m_hCaseSensitive, BM_SETCHECK,
                        tpl.caseSensitive ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    // 替换范围：0 替换全部 / 1 从左往右 / 2 从右往左（老模板没这两项，默认就是 0 和 1）
+    if (m_hReplaceMode != nullptr)
+    {
+        const int mode = (tpl.replaceMode >= 0 && tpl.replaceMode <= 2) ? tpl.replaceMode : 0;
+        ::SendMessageW(m_hReplaceMode, CB_SETCURSEL, static_cast<WPARAM>(mode), 0);
+    }
+    if (m_hReplaceCount != nullptr)
+    {
+        ::SetWindowTextW(m_hReplaceCount, std::to_wstring(tpl.replaceCount).c_str());
     }
     if (m_hIncludeExt != nullptr)
     {
@@ -2707,28 +2778,133 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
 
         const std::wstring replacement = GetTextOf(m_hReplace);
 
-        if (useRegex)
+        // 替换范围：0 = 全部；1 = 从左往右数只换前 N 处；2 = 从右往左数只换后 N 处
+        // N 取右边那个 30px 窄框（选「替换全部」时它是灰的，不参与）
+        const int       replaceMode = ComboSelection(m_hReplaceMode);
+        const long long wantCount   = ReadInteger(m_hReplaceCount, 1, 1);   // 空 / 非法 → 1，至少 1
+
+        if (replaceMode == 0)
         {
-            // 正则的合法性在外面已经编译验证过（m_regexValid），这里直接用缓存的那份
-            if (m_regexValid && EnsureRegexCompiled(find))
+            // 替换全部：沿用原来的两条路径（正则一次性全换，普通文字全量替换）
+            if (useRegex)
             {
-                try
+                // 正则的合法性在外面已经编译验证过（m_regexValid），这里直接用缓存的那份
+                if (m_regexValid && EnsureRegexCompiled(find))
                 {
-                    working = std::regex_replace(working, g_regexCache.regex, replacement);
+                    try
+                    {
+                        working = std::regex_replace(working, g_regexCache.regex, replacement);
+                    }
+                    catch (const std::regex_error&)
+                    {
+                        // 替换串里写了非法反向引用之类：保持原名，状态列那边会标出来
+                    }
                 }
-                catch (const std::regex_error&)
-                {
-                    // 替换串里写了非法反向引用之类：保持原名，状态列那边会标出来
-                }
+            }
+            else
+            {
+                const bool caseSensitive =
+                    (m_hCaseSensitive != nullptr) &&
+                    (::SendMessageW(m_hCaseSensitive, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+                working = ReplaceAll(working, find, replacement, caseSensitive);
             }
         }
         else
         {
+            // 只换其中几处：先把这个串里所有匹配的位置找出来，再挑"前 N 处"或"后 N 处"。
+            // 注意正则的替换文字不是固定的一份（$1 这类反向引用每处都不一样），
+            // 所以每找到一处就顺手算出它自己的替换文字。
+            std::vector<std::pair<size_t, size_t>> matches;       // (起点, 长度)
+            std::vector<std::wstring>              pieces;        // 每处对应要替换进去的文字
+
             const bool caseSensitive =
                 (m_hCaseSensitive != nullptr) &&
                 (::SendMessageW(m_hCaseSensitive, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-            working = ReplaceAll(working, find, replacement, caseSensitive);
+            if (useRegex)
+            {
+                if (m_regexValid && EnsureRegexCompiled(find))
+                {
+                    try
+                    {
+                        for (std::wsregex_iterator it(working.begin(), working.end(), g_regexCache.regex),
+                             last; it != last; ++it)
+                        {
+                            const std::wsmatch& m = *it;
+
+                            matches.push_back(std::make_pair(
+                                static_cast<size_t>(m.position(0)),
+                                static_cast<size_t>(m.length(0))));
+                            pieces.push_back(m.format(replacement.c_str()));
+                        }
+                    }
+                    catch (const std::regex_error&)
+                    {
+                        matches.clear();
+                        pieces.clear();   // 反向引用写错：这次就别换了
+                    }
+                }
+            }
+            else if (!find.empty())
+            {
+                size_t i = 0;
+                while (i + find.size() <= working.size())
+                {
+                    const bool matched =
+                        caseSensitive
+                            ? (::wcsncmp(working.c_str() + i, find.c_str(), find.size()) == 0)
+                            : (::_wcsnicmp(working.c_str() + i, find.c_str(), find.size()) == 0);
+
+                    if (matched)
+                    {
+                        matches.push_back(std::make_pair(i, find.size()));
+                        pieces.push_back(replacement);
+                        i += find.size();
+                    }
+                    else
+                    {
+                        ++i;
+                    }
+                }
+            }
+
+            // 选出要换的那几处（按下标区间 [first, last) 挑）
+            const size_t all  = matches.size();
+            const size_t want = static_cast<size_t>((wantCount > 0) ? wantCount : 1);
+
+            size_t first = 0;
+            size_t last  = all;
+
+            if (replaceMode == 1)
+            {
+                last = (want < all) ? want : all;          // 从左往右：只换前 N 处
+            }
+            else
+            {
+                first = (all > want) ? (all - want) : 0;    // 从右往左：只换后 N 处
+            }
+
+            std::wstring rebuilt;
+            size_t       cursor = 0;
+
+            for (size_t k = 0; k < all; ++k)
+            {
+                if (k < first || k >= last)
+                {
+                    continue;   // 这一处不换，原样留着
+                }
+
+                const size_t pos = matches[k].first;
+                const size_t len = matches[k].second;
+
+                rebuilt += working.substr(cursor, pos - cursor);
+                rebuilt += pieces[k];
+                cursor = pos + len;
+            }
+
+            rebuilt += working.substr(cursor);
+            working = rebuilt;
         }
     }
 
@@ -3523,7 +3699,8 @@ void BatchRenameDialog::SetRunningUi(bool running)
 
     const HWND controls[] =
     {
-        m_hPrefix, m_hSuffix, m_hFind, m_hReplace, m_hCaseSensitive, m_hIncludeExt,
+        m_hPrefix, m_hSuffix, m_hFind, m_hReplace, m_hReplaceMode, m_hReplaceCount,
+        m_hCaseSensitive, m_hIncludeExt,
         m_hNumberEnable, m_hNumberReplace, m_hNumberStart, m_hNumberStep, m_hNumberDigits,
         m_hNumberPos, m_hNumberSep, m_hExtMode, m_hExtValue, m_hCaseMode,
         m_hSortMode, m_hSortReverse, m_hList, m_hRenameEdit
@@ -3668,7 +3845,8 @@ void BatchRenameDialog::Draw(HDC dc)
     ::DrawTextW(dc, kTitleText, -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // ---- 副标题（说明这窗口怎么用）----
-    ::SelectObject(dc, m_fontSmall);
+    // 字号按用户要求加大一号：原来用的是 m_fontSmall（约 8pt），现在跟正文一样（约 9pt）
+    ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kHintColor);
 
     RECT hintRect = { padding, Scale(44), clientRect.right - padding, Scale(66) };
@@ -3785,7 +3963,8 @@ void BatchRenameDialog::Draw(HDC dc)
 
     // ---- 底部统计（和四个按钮同一条线，在左边空白里居中）----
     // changedCount / conflictCount 已经在函数开头算好
-    ::SelectObject(dc, m_fontSmall);
+    // 字号同样加大一号：原来 m_fontSmall，现在跟正文一样
+    ::SelectObject(dc, m_font);
 
     // 这三行平时显示统计；改名过程中显示进度，失败之后显示失败原因（都写在同一块地方）
     std::wstring statusText;
@@ -4138,7 +4317,7 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         }
 
         // 规则控件的任何改动 → 重算预览（查找方式已经不是控件，走的是自绘按钮 + 菜单）
-        if (controlId >= kIdPrefix && controlId <= kIdNumberReplace)
+        if (controlId >= kIdPrefix && controlId <= kIdReplaceCount)
         {
             if (notification == EN_CHANGE || notification == CBN_SELCHANGE ||
                 notification == BN_CLICKED)

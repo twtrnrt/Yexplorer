@@ -69,6 +69,11 @@ struct RenameTemplate
     bool         caseSensitive = false;   // 区分大小写
     bool         includeExt    = false;   // 查找替换是否连扩展名一起处理
 
+    // 替换范围：0 = 替换全部（默认）；1 = 从左往右数，只换前 N 处；2 = 从右往左数，只换后 N 处
+    // 配合 replaceCount 用：选 0 时 count 那一格是灰的，不参与计算
+    int          replaceMode   = 0;
+    int          replaceCount  = 1;       // 替换几处（只在 replaceMode 1 / 2 时有意义）
+
     // 查找方式：0 = 普通查找；1~9 = 内置正则预设；10 = 自定义正则
     // （除了普通查找以外全都按正则解释）
     int          regexPreset   = 0;
@@ -267,6 +272,9 @@ private:
     HWND m_hSuffix = nullptr;       // 后缀
     HWND m_hFind = nullptr;         // 查找
     HWND m_hReplace = nullptr;      // 替换为
+    // 替换为右边紧挨着的两格：替换范围（替换全部 / 从左往右 / 从右往左）+ 替换次数（30px 窄框）
+    HWND m_hReplaceMode = nullptr;  // 替换范围（下拉）
+    HWND m_hReplaceCount = nullptr; // 替换几处（选「替换全部」时灰掉）
     HWND m_hCaseSensitive = nullptr; // 区分大小写（复选框）
     HWND m_hIncludeExt = nullptr;   // 含扩展名（复选框：查找替换是否连扩展名一起处理）
 
