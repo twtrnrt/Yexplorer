@@ -66,7 +66,7 @@ const int kRuleBandInset    = 0;    // 分组框跟表格同宽（都从左 padd
 const int kRuleControlHeight = 24;  // 行内所有控件（输入框 / 下拉 / 复选框 / 按钮）统一高度
 const int kRuleControlTop    = 6;   // 控件相对分组条顶部的偏移：(36-24)/2
 const int kRuleRightX        = 920; // 三行内容的右边界，统一收在这一列
-const int kRuleSortDividerX  = 736; // 第三行里"序号"和"排序"之间的竖分隔线位置（两边各留 12px）
+const int kRuleSortGap       = 8;   // 第三行里"序号"框和"排序"框之间的空白（两个框分开画）
 
 // 底部那条线：现在只剩统计文字 + 四个按钮（排序 / 倒序已经搬到参数区第三行）
 
@@ -2998,29 +2998,42 @@ void BatchRenameDialog::Draw(HDC dc)
 
     // 参数区三行：每行用一个描边矩形"框成一组"（白底不填色，免得系统复选框刷出白块）。
     // 行与行之间靠 48 - 36 = 12px 的白缝分开，框线只是把这一组圈起来。
+    // 第三行是特殊情况：左边是"序号"组、右边是"排序"组，要画成两个框，
+    // 中间留 kRuleSortGap（8px）的空白把它们分开（以前是一个通长的框 + 中间一条竖线，
+    // 看着像同一组连着）。
     {
         HBRUSH groupBorderBrush = ::CreateSolidBrush(kRuleBandBorder);
 
+        // 第三行两个框的边界：左边框到"分隔符"输入框右边 +8px 为止，
+        // 右边框从"排序"下拉左边 -8px 开始，到最右边那一列为止。
+        const int numberFrameRight =
+            Scale(kRuleSpecs[kRfNumberSep].x + kRuleSpecs[kRfNumberSep].width) + Scale(8);
+        const int sortFrameLeft   = Scale(kRuleSpecs[kRfSortMode].x) - Scale(8);
+
         for (int row = 0; row < 3; ++row)
         {
-            RECT band = { padding - Scale(kRuleBandInset),
-                          Scale(kRuleTop) + Scale(kRuleRowHeight) * row,
-                          clientRect.right - padding + Scale(kRuleBandInset),
-                          Scale(kRuleTop) + Scale(kRuleRowHeight) * row + Scale(kRuleBandHeight) };
+            const int bandTop    = Scale(kRuleTop) + Scale(kRuleRowHeight) * row;
+            const int bandBottom = bandTop + Scale(kRuleBandHeight);
 
-            ::FrameRect(dc, &band, groupBorderBrush);
+            const int bandLeft  = padding - Scale(kRuleBandInset);
+            const int bandRight = clientRect.right - padding + Scale(kRuleBandInset);
+
+            if (row == 2)
+            {
+                RECT numberBand = { bandLeft, bandTop, numberFrameRight, bandBottom };
+                ::FrameRect(dc, &numberBand, groupBorderBrush);
+
+                RECT sortBand = { sortFrameLeft, bandTop, bandRight, bandBottom };
+                ::FrameRect(dc, &sortBand, groupBorderBrush);
+            }
+            else
+            {
+                RECT band = { bandLeft, bandTop, bandRight, bandBottom };
+                ::FrameRect(dc, &band, groupBorderBrush);
+            }
         }
 
         ::DeleteObject(groupBorderBrush);
-    }
-
-    // ---- 第三行右侧的排序格：用一条竖线跟左边的"序号"部分隔开，等于单独圈成一格 ----
-    {
-        const int rowTop    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2;
-        const int rowBottom = rowTop + Scale(kRuleBandHeight);
-
-        ::MoveToEx(dc, Scale(kRuleSortDividerX), rowTop + Scale(1), nullptr);
-        ::LineTo(dc, Scale(kRuleSortDividerX), rowBottom - Scale(1));
     }
 
     ::SelectObject(dc, oldPen);
