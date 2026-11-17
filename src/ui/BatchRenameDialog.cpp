@@ -1633,6 +1633,7 @@ bool BatchRenameDialog::ConfirmLeaveSlot()
 
     // 这里原本用 MessageBox，但它不认"窗口居中"，实测弹到了屏幕右下角（还压到任务栏那边）。
     // 换成 TaskDialog：TDF_POSITION_RELATIVE_TO_WINDOW 会让它在属主窗口（本窗口）中间弹出。
+    // 样式上刻意做成跟原来的消息框一样朴素：不要大标题、不要图标，正文就一段话，
     // 三个按钮自己起名字，返回的自定义 ID 再翻译回"是 / 否 / 取消"。
     const int kButtonSave   = 100;
     const int kButtonLeave  = 101;
@@ -1651,8 +1652,8 @@ bool BatchRenameDialog::ConfirmLeaveSlot()
     config.dwFlags            = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
     config.dwCommonButtons    = 0;
     config.pszWindowTitle     = L"批量重命名";
-    config.pszMainIcon        = TD_INFORMATION_ICON;
-    config.pszMainInstruction = L"模板的参数改过还没保存";
+    config.pszMainIcon        = nullptr;   // 不画图标，保持朴素
+    config.pszMainInstruction = nullptr;   // 不要那行大字标题
     config.pszContent         = message.c_str();
     config.pButtons           = buttons;
     config.cButtons           = ARRAYSIZE(buttons);
@@ -1796,10 +1797,11 @@ void BatchRenameDialog::UpdateRenameEditLayout()
     const int innerWidth  = (slot.right - slot.left) - Scale(2);
     const int innerHeight = (slot.bottom - slot.top) - Scale(2);
 
-    // 量一下现在这几个字有多宽
+    // 量一下现在这几个字有多宽、有多高
     const std::wstring text = GetTextOf(m_hRenameEdit);
 
     int textWidth = 0;
+    int lineHeight = 0;
     {
         HDC dc = ::GetDC(m_hRenameEdit);
         if (dc != nullptr)
@@ -1808,6 +1810,11 @@ void BatchRenameDialog::UpdateRenameEditLayout()
             SIZE size = {};
             ::GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
             textWidth = size.cx;
+
+            TEXTMETRICW metrics = {};
+            ::GetTextMetricsW(dc, &metrics);
+            lineHeight = metrics.tmHeight;
+
             ::SelectObject(dc, oldFont);
             ::ReleaseDC(m_hRenameEdit, dc);
         }
@@ -1832,7 +1839,27 @@ void BatchRenameDialog::UpdateRenameEditLayout()
         left = innerLeft + innerWidth - width;
     }
 
-    ::MoveWindow(m_hRenameEdit, left, innerTop, width, innerHeight, TRUE);
+    // 单行 EDIT 的文字是贴着框顶画的，框给多高它就往上跑多高。
+    // 所以把框高收成"一行字 + 2px"，再在按钮里垂直居中，字自然就落在按钮的中线上。
+    int height = lineHeight + Scale(2);
+    if (height > innerHeight)
+    {
+        height = innerHeight;
+    }
+
+    // 输入框里字是贴着框顶画的，实际字形又比 tmHeight 略微偏上，
+    // 所以垂直居中后再往下方补 Scale(2)，字的视觉中线才和按钮一致
+    int top = innerTop + (innerHeight - height) / 2 + Scale(2);
+    if (top < innerTop)
+    {
+        top = innerTop;
+    }
+    if (top + height > innerTop + innerHeight)
+    {
+        top = innerTop + innerHeight - height;
+    }
+
+    ::MoveWindow(m_hRenameEdit, left, top, width, height, TRUE);
 }
 
 void BatchRenameDialog::CommitTemplateRename()
