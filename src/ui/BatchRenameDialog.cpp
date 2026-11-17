@@ -191,6 +191,10 @@ const UINT_PTR kIdDiskScanTimer = 5200;
 // 磁盘检查（占用 / 权限 / 目标名冲突）的防抖时长：停手 30ms 再查
 const int kDiskScanDelayMs = 30;
 
+// 提醒弹窗（TaskDialog）客户区的目标宽度（像素）。
+// 默认宽度是按内容自适应的，长文件名会把正文折成几行，看着乱，所以这里定宽
+const int kMessageWidthPx = 700;
+
 // 颜色（和「设置」窗口一套）
 const COLORREF kBackground      = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
@@ -3020,19 +3024,10 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
                 row.state     = 2;
                 row.stateText = L"和别的项重名";
             }
-            else if (row.newName == row.oldName)
-            {
-                // 这一项名字没变，就不用动它，别的检查也都不用看（免得白标红）
-                row.state     = 0;
-                row.stateText = L"未改动";
-            }
-            else if (itemIndex < m_targetState.size() && m_targetState[itemIndex] == 1)
-            {
-                row.state     = 2;
-                row.stateText = L"已存在同名文件";
-            }
             else if (itemIndex < m_sourceState.size() && m_sourceState[itemIndex] != 0)
             {
+                // 源文件本身就有问题（被占 / 没权限 / 已经不在）——这种项不管名字改不改都动不了，
+                // 所以放在"未改动"前面：一打开窗口就标红，不用等你改规则才发现
                 row.state = 2;
 
                 switch (m_sourceState[itemIndex])
@@ -3053,6 +3048,17 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
                     row.stateText = L"状态异常";
                     break;
                 }
+            }
+            else if (row.newName == row.oldName)
+            {
+                // 名字没变，就不用动它
+                row.state     = 0;
+                row.stateText = L"未改动";
+            }
+            else if (itemIndex < m_targetState.size() && m_targetState[itemIndex] == 1)
+            {
+                row.state     = 2;
+                row.stateText = L"已存在同名文件";
             }
             else
             {
@@ -3207,7 +3213,7 @@ void BatchRenameDialog::OnApplyClick()
 
     if (!PreflightIssues(issues))
     {
-        // 最多列 5 条，剩下的折成"等共 N 项"，免得弹窗长得看不完
+        // 弹窗正文最多列 5 条，剩下的折成"等共 N 项"，免得弹窗长得看不完
         std::wstring content;
 
         for (size_t i = 0; i < issues.size() && i < 5; ++i)
@@ -3221,7 +3227,42 @@ void BatchRenameDialog::OnApplyClick()
             content += L"……等共 " + std::to_wstring(issues.size()) + L" 项";
         }
 
-        ShowCenteredMessage(L"这些项现在不能改名", content, true);
+        // 标题里报个数：有多少项现在改不了。按表格里标红的行数算，
+        // 和底部「有问题 K 项」是同一个数，用户一眼能对上
+        size_t problemCount = 0;
+
+        for (const auto& row : m_rows)
+        {
+            if (row.state == 2)
+            {
+                ++problemCount;
+            }
+        }
+
+        const std::wstring instruction =
+            L"有 " + std::to_wstring(problemCount) + L" 个文件不允许重命名，请检查";
+
+        ShowCenteredMessage(instruction.c_str(), content, true);
+        return;
+    }
+
+    // 规则一条都没改名字：说一声就返回，别让用户以为点了没反应。
+    // 单独放在这里，因为它不属于"不允许重命名"，标题也不该报文件数
+    bool anyChange = false;
+
+    for (const auto& row : m_rows)
+    {
+        if (row.newName != row.oldName)
+        {
+            anyChange = true;
+            break;
+        }
+    }
+
+    if (!anyChange)
+    {
+        ShowCenteredMessage(L"没有需要改名的项",
+                            L"现在的规则没有改动任何一项名字，调一下规则再点「应用」。", false);
         return;
     }
 
@@ -3263,26 +3304,6 @@ bool BatchRenameDialog::PreflightIssues(std::vector<std::wstring>& issues)
         }
 
         issues.push_back(L"「" + row.oldName + L"」→「" + row.newName + L"」：" + row.stateText);
-    }
-
-    // 一条都不改的情况也说一声，别让用户以为点了没反应
-    if (issues.empty())
-    {
-        bool anyChange = false;
-
-        for (const auto& row : m_rows)
-        {
-            if (row.newName != row.oldName)
-            {
-                anyChange = true;
-                break;
-            }
-        }
-
-        if (!anyChange)
-        {
-            issues.push_back(L"现在的规则没有改动任何一项名字");
-        }
     }
 
     return issues.empty();
@@ -3468,6 +3489,16 @@ void BatchRenameDialog::ShowCenteredMessage(const wchar_t* instruction,
     config.pszMainInstruction = instruction;
     config.pszContent         = content.c_str();
     config.nDefaultButton     = IDOK;
+
+    // 宽度：TaskDialog 默认是按内容自适应，长文件名一列就把正文折成好几行，看着很乱。
+    // 这里把客户区宽度定在 700 像素左右。cxWidth 的单位是"对话框单位"，
+    // 横向 1 个对话框单位 = 系统字体平均字宽的 1/4，所以像素换算成单位要乘 4 / 字宽。
+    // 系统字体读不到（理论上不会）就按常见的 8 像素字宽给个 350。
+    const LONG baseUnitX = static_cast<LONG>(LOWORD(::GetDialogBaseUnits()));
+
+    config.cxWidth = (baseUnitX > 0)
+                     ? static_cast<UINT>(::MulDiv(kMessageWidthPx, 4, static_cast<int>(baseUnitX)))
+                     : static_cast<UINT>(kMessageWidthPx / 2);
 
     int pressed = IDOK;
     ::TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
