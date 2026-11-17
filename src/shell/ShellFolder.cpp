@@ -460,25 +460,42 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
     // ------------------------------------------------------------------
     if (IsFileSystemPath(path))
     {
+        // 取扩展名并转小写（判断是不是 zip 用）
+        const auto extensionOf = [](const std::wstring& onePath)
+        {
+            const wchar_t* dot = ::PathFindExtensionW(onePath.c_str());
+            std::wstring  text = (dot == nullptr) ? L"" : dot;
+
+            for (auto& ch : text)
+            {
+                ch = static_cast<wchar_t>(::towlower(ch));
+            }
+            return text;
+        };
+
         const DWORD ownAttributes = ::GetFileAttributesW(path.c_str());
 
         if (ownAttributes != INVALID_FILE_ATTRIBUTES &&
             (ownAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
         {
+            // 路径自己就是磁盘上的文件 → 压缩包本身
             result.isContainer = true;
+            result.isZipContainer = (extensionOf(path) == L".zip");
+        }
+        else if (ownAttributes == INVALID_FILE_ATTRIBUTES)
+        {
+            // 磁盘上没有这个路径 → 可能是在压缩包内部（C:\a.rar\sub）
+            //
+            // 容器里的子目录也算"容器内部"：里面的项同样是虚拟项，
+            // 菜单能力、能不能粘贴、能不能剪切都和压缩包内部一致。
+            // 之前只按"路径自己是文件"判定，进了包内子目录这些判断就全部失效。
+            const std::wstring containerRoot = ContainerRootForPath(path);
 
-            const std::wstring extension = [&path]
+            if (!containerRoot.empty())
             {
-                const wchar_t* dot = ::PathFindExtensionW(path.c_str());
-                std::wstring  text = (dot == nullptr) ? L"" : dot;
-                for (auto& ch : text)
-                {
-                    ch = static_cast<wchar_t>(::towlower(ch));
-                }
-                return text;
-            }();
-
-            result.isZipContainer = (extension == L".zip");
+                result.isContainer = true;
+                result.isZipContainer = (extensionOf(containerRoot) == L".zip");
+            }
         }
     }
 
@@ -1084,6 +1101,140 @@ bool IsContainerFileExtension(const std::wstring& path)
     }
 
     return IsContainerExtension(extension);
+}
+
+// ----------------------------------------------------------------------------
+// 这个路径属于哪个压缩包（容器根）
+//
+// 容器内部的路径（C:\a.rar\sub\inner.txt）磁盘上并不存在，但从路径往上追，
+// 第一段"磁盘上真的是文件"的路径就是压缩包本身（C:\a.rar）。
+//
+// 注意：只看 path 的**上级**，不看 path 自己——
+//   · 传进来的是压缩包文件本身（C:\a.rar）→ 返回它的上级目录，不是它自己；
+//   · 只是想判断"这一项在不在容器里"，用 IsPathInsideContainer。
+//
+// 只读文件属性，不碰 COM，很快（判断菜单能力时可以放心调）。
+// ----------------------------------------------------------------------------
+std::wstring ContainerRootForPath(const std::wstring& path)
+{
+    if (path.empty() || !IsFileSystemPath(path))
+    {
+        return L"";
+    }
+
+    std::wstring current = path;
+
+    while (true)
+    {
+        const size_t lastSeparator = current.find_last_of(L"\\/");
+
+        // 追到盘符根还什么都没有 → 不在任何容器里
+        if (lastSeparator == std::wstring::npos || lastSeparator <= 2)
+        {
+            return L"";
+        }
+
+        current = current.substr(0, lastSeparator);
+
+        const DWORD attributes = ::GetFileAttributesW(current.c_str());
+
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            continue;   // 这一层也是虚拟的（容器内部的子目录），继续往上
+        }
+
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            return current;   // 是文件 → 这就是压缩包
+        }
+
+        // 撞上真实目录 → 说明这一串只是"真实目录下面的名字"，不在容器里
+        return L"";
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 这一项是不是压缩包内部的虚拟项
+//
+// 判定：磁盘上不存在（既不是文件也不是目录），但往上能追到一个压缩包。
+//   · C:\a.rar\inner.txt      → true （磁盘上没有，归 a.rar）
+//   · C:\a.rar\sub            → true （容器内部的子目录也算）
+//   · C:\a.rar                → false（它自己就是磁盘上的文件）
+//   · D:\普通目录\普通文件     → false
+// ----------------------------------------------------------------------------
+bool IsPathInsideContainer(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return false;
+    }
+
+    // 磁盘上存在（不管文件还是目录）→ 不是容器内部的虚拟项
+    if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        return false;
+    }
+
+    return !ContainerRootForPath(path).empty();
+}
+
+// ----------------------------------------------------------------------------
+// 这个路径是不是 .zip（只有 zip 有系统自带的可写处理器）
+// ----------------------------------------------------------------------------
+static bool IsZipArchivePath(const std::wstring& path)
+{
+    const wchar_t* dot = ::PathFindExtensionW(path.c_str());
+    std::wstring  extension = (dot == nullptr) ? L"" : dot;
+
+    for (wchar_t& ch : extension)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+
+    return extension == L".zip";
+}
+
+// ----------------------------------------------------------------------------
+// 这个目录能不能接收"写入"（粘贴、拖动放入）
+//
+//   · 磁盘上的普通目录          → 能
+//   · zip 内部（含子目录）      → 能（系统自带 Compressed Folder 处理器可写）
+//   · rar / 7z / tar 内部       → 不能（WinRAR 的处理器只读，实测写不进去）
+//   · 虚拟命名空间（::{GUID}）  → 按"能"处理，维持原来的行为
+//
+// 只查文件属性，不碰 COM。粘贴 / 拖放前调一次，成本可忽略；
+// 右键菜单里不用它（菜单只用内存标记，保持零成本）。
+// ----------------------------------------------------------------------------
+bool IsWritableTargetDirectory(const std::wstring& directory)
+{
+    if (directory.empty())
+    {
+        return false;
+    }
+
+    // 虚拟命名空间不是真实目录，这里不拦（拦也拦不准，交给下层去失败）
+    if (!IsFileSystemPath(directory))
+    {
+        return true;
+    }
+
+    const DWORD attributes = ::GetFileAttributesW(directory.c_str());
+
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+    {
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            return true;   // 磁盘上的普通目录
+        }
+
+        // 磁盘上的文件 = 压缩包本身：只有 zip 能写入内部
+        return IsZipArchivePath(directory);
+    }
+
+    // 磁盘上没有这个路径 → 压缩包内部（可能是包里的子目录），看归属的压缩包
+    const std::wstring containerRoot = ContainerRootForPath(directory);
+
+    return !containerRoot.empty() && IsZipArchivePath(containerRoot);
 }
 
 std::wstring GetParentPath(const std::wstring& path)

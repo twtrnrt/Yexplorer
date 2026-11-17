@@ -1756,6 +1756,19 @@ void MainWindow::DoPaste()
         return;
     }
 
+    // ------------------------------------------------------------------
+    // 只读压缩包内部（rar / 7z / tar）：粘贴一定写不进去
+    //
+    // WinRAR 提供的这类处理器只读（实测四种"外部→内部"只有 zip 成功），
+    // 按定好的做法：Ctrl+V 按了什么都不做，不弹窗、不写状态栏，
+    // 只留一条日志方便排查。菜单里也不会出现「粘贴」（见 BuildBackgroundMenu）。
+    // ------------------------------------------------------------------
+    if (!shell::IsWritableTargetDirectory(targetDirectory))
+    {
+        Logger::Info(L"粘贴：目标是只读压缩包内部，忽略本次粘贴（" + targetDirectory + L"）");
+        return;
+    }
+
     // 每次都从系统剪贴板读，而不是用程序自己记的：
     // 这样从资源管理器、桌面复制过来的东西也能粘进来
     std::vector<std::wstring> paths;
@@ -2204,7 +2217,11 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
     FillViewMenu(menu);
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
 
-    if (shellclip::HasFiles())
+    // 只读压缩包内部（rar / 7z / tar）不显示「粘贴」：
+    // 那里根本写不进去，出现了只会让用户点一次、白等一次。
+    const bool pasteAllowed = !(m_currentIsContainer && !m_currentIsZipContainer);
+
+    if (pasteAllowed && shellclip::HasFiles())
     {
         ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         ::AppendMenuW(menu, MF_STRING, kCommandPaste, L"粘贴(&P)");
@@ -4064,55 +4081,6 @@ void MainWindow::NavigateContainerEntry(const shell::ShellEntry& entry)
 // 打开容器内部的文件（先解成临时文件再打开）
 // ============================================================================
 
-// ----------------------------------------------------------------------------
-// 这一项是不是「压缩包内部」的虚拟项？是的话它属于哪个压缩包？
-//
-// 判断方法（不碰 COM、不查注册表，只查文件属性，很快）：
-//   路径本身在磁盘上不存在 → 是虚拟路径，往上逐级找；
-//   找到第一段"磁盘上真的是文件"的 → 那就是压缩包本身。
-//
-// 例：C:\a\t.rar\sub\inner.txt
-//        inner.txt 磁盘上没有 → 往上
-//        sub       磁盘上没有 → 往上
-//        t.rar     磁盘上有、且不是目录 → 容器根 = C:\a\t.rar
-//
-// 返回：压缩包完整路径；不在容器里（比如磁盘上的普通文件）返回空串
-// ----------------------------------------------------------------------------
-static std::wstring FindContainerRootPath(const std::wstring& path)
-{
-    if (path.empty())
-    {
-        return L"";
-    }
-
-    // 路径本身在磁盘上（是文件或目录）→ 这是普通路径，不在任何容器里
-    if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        return L"";
-    }
-
-    std::wstring current = path;
-
-    while (true)
-    {
-        size_t lastSeparator = current.find_last_of(L"\\/");
-        if (lastSeparator == std::wstring::npos || lastSeparator <= 2)
-        {
-            return L"";
-        }
-
-        current = current.substr(0, lastSeparator);
-
-        DWORD attributes = ::GetFileAttributesW(current.c_str());
-
-        if (attributes != INVALID_FILE_ATTRIBUTES)
-        {
-            // 是文件 → 这就是压缩包；是目录 → 虚拟路径上面接了个真实目录，不在容器里
-            return ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) ? current : L"";
-        }
-    }
-}
-
 std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtualPath,
                                                      std::wstring& error)
 {
@@ -4125,7 +4093,11 @@ std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtual
     }
 
     // ---- 1) 往上找容器根（压缩包本身）----
-    const std::wstring containerRoot = FindContainerRootPath(virtualPath);
+    //
+    // 例：C:\a\t.rar\sub\inner.txt → C:\a\t.rar
+    // 判断逻辑和右键菜单用的是同一套（shell::ContainerRootForPath），
+    // 只查文件属性、不碰 COM，很快。
+    const std::wstring containerRoot = shell::ContainerRootForPath(virtualPath);
 
     if (containerRoot.empty())
     {
@@ -4682,6 +4654,18 @@ void MainWindow::RegisterDropTargets()
 
     listCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
+        // ------------------------------------------------------------------
+        // 只读压缩包内部（rar / 7z / tar）：整个列表都不接受放置
+        //
+        // 返回空串就是对拖拽那边说"这里不能放"，系统会给禁止光标、
+        // 也不会高亮任何文件夹，松手不落地（和资源管理器表现一致）。
+        // zip 内部是可写的，照常接受。
+        // ------------------------------------------------------------------
+        if (m_currentIsContainer && !m_currentIsZipContainer)
+        {
+            return std::wstring();
+        }
+
         RECT clientRect = {};
         if (!::GetClientRect(m_fileListView.Handle(), &clientRect))
         {
@@ -4945,6 +4929,15 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
     if (usableSources.empty())
     {
         Logger::Warn(L"拖放的源和目标是同一个目录，忽略");
+        return;
+    }
+
+    // 只读压缩包内部不接受放置。
+    // 界面上（列表的落点判定）已经给了禁止光标，这里是第二道保险：
+    // 万一从别的入口（左栏树、以后的新入口）进来，也不要真去白跑一次文件操作。
+    if (!shell::IsWritableTargetDirectory(targetDirectory))
+    {
+        Logger::Warn(L"拖放目标是只读压缩包内部，忽略：" + targetDirectory);
         return;
     }
 
@@ -5564,10 +5557,10 @@ void MainWindow::OnItemActivated(size_t index)
         // 交给 Shell 会失败（rar/7z/tar 实测打不开，zip 也不稳）。
         // 资源管理器也是这么干的——先解到 %TEMP%\ 下的临时目录，再打开解出来的那个文件。
         //
-        // 判定不用 m_currentIsContainer：那个标记只在"当前目录就是压缩包本身"时为真，
-        // 进了包里的子目录（t.rar\sub）就变成 false 了，这里按路径自己往上找容器根。
+        // 判定不用 m_currentIsContainer：那个标记只覆盖"当前目录本身在容器里"的情况，
+        // 这里按路径自己往上找容器根（包内任意层级都认）。
         // ----------------------------------------------------------
-        if (!FindContainerRootPath(entry.fullPath).empty())
+        if (shell::IsPathInsideContainer(entry.fullPath))
         {
             std::wstring extractError;
             const std::wstring extractedPath = ExtractContainerEntryToTemp(entry.fullPath,
