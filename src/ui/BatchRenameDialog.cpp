@@ -377,13 +377,17 @@ bool PathExists(const std::wstring& path)
 // 查一个源文件现在"能不能改名"，返回：
 //   0 正常 / 1 可能被占用 / 2 没有改名权限 / 3 已经不在了
 //
-// 做法是两次"试探性打开"，都只碰元数据、不读文件内容：
-//   第一次：只要 DELETE 权限（改名本质上就是删掉旧名字建新名字），共享全开。
-//          这样能问出"有没有权限"、"文件还在不在"，而且不会跟别的程序抢读；
-//   第二次：独占打开（一个共享模式都不给）。有程序正开着它就会 SHARING_VIOLATION。
+// 只做一次"试探性打开"：只要 DELETE 权限（改名本质上就是删掉旧名字建新名字），
+// 共享全开。一次就能问出三件事：
+//   · 文件还在不在（找不到就是 3）
+//   · 有没有改名权限（拒绝访问就是 2）
+//   · 是不是被别的程序占着（对方不让别人删除就是 SHARING_VIOLATION，判 1）
+// 之所以不请求"读权限"（GENERIC_READ）：那会触发杀毒/EDR 的按内容扫描，
+// PDF 这类文档在本地盘上第一次打开能慢到 1.4 秒（同大小 .bin 只要十几毫秒），
+// 几百项就会把窗口卡死；而"能不能改名"根本不需要读文件内容。
 //
-// 注意这套检查只是"提醒"：会被缩略图/杀毒这种只读打开误报，也可能在检查完到
-// 真正改名之间被人抢先打开，所以执行时的失败回滚照样要做。
+// 注意这套检查只是"提醒"：也可能在检查完到真正改名之间被人抢先打开，
+// 所以执行时的失败回滚照样要做。
 // ----------------------------------------------------------------------------
 int ProbeSourceState(const std::wstring& path)
 {
@@ -411,26 +415,6 @@ int ProbeSourceState(const std::wstring& path)
             return 2;
         }
         return 1;   // 说不清的按"可能被占用"处理，反正只是提醒
-    }
-
-    ::CloseHandle(probe);
-
-    probe = ::CreateFileW(longPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
-                          FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-
-    if (probe == INVALID_HANDLE_VALUE)
-    {
-        const DWORD error = ::GetLastError();
-
-        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-        {
-            return 3;
-        }
-        if (error == ERROR_ACCESS_DENIED)
-        {
-            return 2;
-        }
-        return 1;   // 主要就是 SHARING_VIOLATION
     }
 
     ::CloseHandle(probe);
