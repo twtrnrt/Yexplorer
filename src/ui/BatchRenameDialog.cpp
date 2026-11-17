@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <uxtheme.h>   // 主题绘制（复选框等控件的原生外观）
 
 #include <algorithm>
 #include <string.h>
@@ -29,6 +30,8 @@
 #include "ui/BatchRenameDialog.h"
 
 #include "core/Logger.h"
+
+#pragma comment(lib, "uxtheme.lib")
 
 namespace
 {
@@ -54,9 +57,15 @@ const int kTemplateSlotH   = 30;   // 槽高
 const int kBottomButtonW   = 90;
 const int kBottomButtonGap = 12;
 
-// 参数区：三行，行高 34，起点 398
-const int kRuleTop      = 398;
-const int kRuleRowHeight = 34;
+// 参数区：三行，每行一条淡底"分组条"，行内控件统一个高度；
+// kRuleRowHeight 是行与行的间距（含分组条之间的空隙），kRuleBandHeight 是分组条高度
+const int kRuleTop          = 398;
+const int kRuleRowHeight    = 48;   // 行距（比分组条高，多出来的部分就是行与行之间的白缝）
+const int kRuleBandHeight   = 36;   // 每行分组底色条的高度
+const int kRuleBandInset    = 8;    // 分组条比内容左右各多出多少
+const int kRuleControlHeight = 24;  // 行内所有控件（输入框 / 下拉 / 复选框 / 按钮）统一高度
+const int kRuleControlTop    = 6;   // 控件相对分组条顶部的偏移：(36-24)/2
+const int kRuleRightX        = 920; // 三行内容的右边界，统一收在这一列
 const int kLeftColumnX  = 20;
 
 // 底部那条线（排序 + 统计 + 四个按钮）：排序下拉 / 倒序复选框 / 统计文字的左边缘
@@ -112,29 +121,31 @@ struct RuleFieldSpec
 
 const RuleFieldSpec kRuleSpecs[kRfCount] =
 {
+    // ---- 三行用同一套网格：左起 20、右收 920，组与组之间 8px，标签右边缘到控件 5px ----
+    // 所有控件高度都是 kRuleControlHeight（24），同一行基线完全一致。
+
     // ---- 第 0 行：前缀 / 后缀 / 扩展名（下拉 + 值）/ 大小写 ----
-    // 标签右边缘和右边控件的间距统一留 5px（标签宽 = 文字需要的宽度 + 那 5px 里的 1px 余量）
-    { L"前  缀", 20, 53,  76, 200, 0, 24 },          // 前缀
-    { L"后  缀", 284, 53, 340, 200, 0, 24 },         // 后缀
-    { L"扩展名", 548, 53, 604, 104, 0, 24 * 3 },     // 扩展名下拉（不修改 / 修改）
-    { nullptr,   -1, -1, 712,  40, 0, 24 },          // 扩展名填什么（40 宽，够放 .txt）
-    { L"大小写", 764, 53, 820,  86, 0, 24 * 5 },     // 大小写下拉（4 项，86 宽正好放下"保持原样"）
+    { L"前缀",    20, 53,  78, 200, 0, 24 },         // 前缀
+    { L"后缀",   286, 53, 344, 200, 0, 24 },         // 后缀
+    { L"扩展名", 552, 53, 610, 100, 0, 24 * 3 },     // 扩展名下拉（不修改 / 修改）
+    { nullptr,   -1, -1, 718,  50, 0, 24 },          // 扩展名填什么（50 宽，够放 .txt）
+    { L"大小写", 776, 53, 834,  86, 0, 24 * 3 },     // 大小写下拉（86 宽正好放下"保持原样"）
 
     // ---- 第 1 行：查找（右边「普通 / 正则」按钮）/ 替换为 / 两个复选框 ----
-    { L"查  找",  20, 53,  76, 222, 1, 24 },         // 查找
-    { nullptr,   -1, -1, 302,  70, 1, 28 },          // 查找方式按钮（自绘）
-    { L"替换为", 380, 53, 436, 264, 1, 24 },         // 替换为
-    { nullptr,   -1, -1, 712,  90, 1, 22 },          // 含扩展名
-    { nullptr,   -1, -1, 810, 110, 1, 22 },          // 区分大小写
+    { L"查找",    20, 53,  78, 200, 1, 24 },         // 查找
+    { nullptr,   -1, -1, 286,  70, 1, 24 },          // 查找方式按钮（自绘，跟输入框同高）
+    { L"替换为", 364, 53, 422, 286, 1, 24 },         // 替换为
+    { nullptr,   -1, -1, 716,  80, 1, 24 },          // 含扩展名
+    { nullptr,   -1, -1, 804, 116, 1, 24 },          // 区分大小写
 
-    // ---- 第 2 行：加序号（含三个数字）/ 位置 / 分隔符 / 替换 ----
-    { nullptr,   -1, -1,  20,  84, 2, 22 },          // 加序号
-    { nullptr,   -1, -1, 112,  53, 2, 22 },          // 替换（勾上就只剩序号，原名不要了）
-    { L"起始",  173, 33, 211,  60, 2, 24 },          // 起始
-    { L"步长",  279, 33, 317,  60, 2, 24 },          // 步长
-    { L"位数",  385, 33, 423,  60, 2, 24 },          // 位数
-    { L"位  置", 491, 53, 549, 140, 2, 24 * 3 },     // 位置下拉（2 项）
-    { L"分隔符", 697, 53, 755,  70, 2, 24 }          // 分隔符（70 宽，一般就填一个符号）
+    // ---- 第 2 行：加序号 / 替换 / 三个数字 / 位置 / 分隔符 ----
+    { nullptr,   -1, -1,  20,  84, 2, 24 },          // 加序号
+    { nullptr,   -1, -1, 112,  53, 2, 24 },          // 替换（勾上就只剩序号，原名不要了）
+    { L"起始",  173, 53, 231,  60, 2, 24 },          // 起始
+    { L"步长",  299, 53, 357,  60, 2, 24 },          // 步长
+    { L"位数",  425, 53, 483,  60, 2, 24 },          // 位数
+    { L"位置",  551, 53, 609, 175, 2, 24 * 3 },      // 位置下拉（2 项）
+    { L"分隔符", 792, 53, 850,  70, 2, 24 }          // 分隔符（70 宽，一般就填一个符号）
 };
 
 // 控件 ID
@@ -177,6 +188,7 @@ const COLORREF kBackground      = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
 const COLORREF kHintColor       = RGB(96, 103, 111);
 const COLORREF kDividerColor    = RGB(232, 235, 239);
+const COLORREF kRuleBandBorder  = RGB(226, 230, 236);   // 参数区三行分组框的细边线（不填色，只描边）
 const COLORREF kErrorColor      = RGB(178, 34, 34);
 const COLORREF kOkColor         = RGB(0, 120, 60);
 
@@ -1009,7 +1021,7 @@ void BatchRenameDialog::Layout()
         {
             const RuleFieldSpec& spec = kRuleSpecs[i];
             const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * spec.row;
-            const int y   = top + Scale(4);
+            const int y   = top + Scale(kRuleControlTop);   // 行内控件统一从分组条顶 + 6 开始
 
             // 「查找方式」没有窗口控件，是一块自绘按钮，这里只记下矩形
             if (i == kRfRegexButton)
@@ -1017,7 +1029,7 @@ void BatchRenameDialog::Layout()
                 m_regexButtonRect.left   = Scale(spec.x);
                 m_regexButtonRect.right  = Scale(spec.x) + Scale(spec.width);
                 m_regexButtonRect.top    = y;
-                m_regexButtonRect.bottom = y + Scale(spec.height);
+                m_regexButtonRect.bottom = y + Scale(kRuleControlHeight);
                 continue;
             }
 
@@ -1118,8 +1130,11 @@ void BatchRenameDialog::EnableRuleControls()
     const bool replaceOn = (m_hNumberReplace != nullptr) &&
                            (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-    for (HWND control : { m_hNumberStart, m_hNumberStep, m_hNumberDigits,
-                          m_hNumberReplace })
+    // 注意：「替换」这个复选框故意不放进禁用列表。
+    // 系统在"禁用"状态会给复选框自己刷一块 COLOR_3DFACE(240,240,240) 的灰底，
+    // 父窗口无论返回什么刷子都盖不住，白底分组框里就冒出一个灰方块。
+    // 它本来也只在勾了「加序号」时才起作用，没勾时勾着它也无害，所以保持可点即可。
+    for (HWND control : { m_hNumberStart, m_hNumberStep, m_hNumberDigits })
     {
         if (control != nullptr)
         {
@@ -2623,8 +2638,8 @@ void BatchRenameDialog::Recalculate()
     {
         RECT bottomRect = {};
 
-        bottomRect.left   = Scale(kPadding);
-        bottomRect.top    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 3;
+        bottomRect.left   = Scale(kRuleTop);
+        bottomRect.top    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
         bottomRect.right  = m_applyRect.right;
         bottomRect.bottom = m_applyRect.bottom + Scale(8);
 
@@ -2739,12 +2754,23 @@ void BatchRenameDialog::Draw(HDC dc)
     ::MoveToEx(dc, padding, Scale(kRuleTop - 12), nullptr);
     ::LineTo(dc, clientRect.right - padding, Scale(kRuleTop - 12));
 
-    // 参数区三行之间再来两条淡线，行与行分得清楚一点
-    ::MoveToEx(dc, padding, Scale(kRuleTop) + Scale(kRuleRowHeight), nullptr);
-    ::LineTo(dc, clientRect.right - padding, Scale(kRuleTop) + Scale(kRuleRowHeight));
+    // 参数区三行：每行用一个描边矩形"框成一组"（白底不填色，免得系统复选框刷出白块）。
+    // 行与行之间靠 48 - 36 = 12px 的白缝分开，框线只是把这一组圈起来。
+    {
+        HBRUSH groupBorderBrush = ::CreateSolidBrush(kRuleBandBorder);
 
-    ::MoveToEx(dc, padding, Scale(kRuleTop) + Scale(kRuleRowHeight) * 2, nullptr);
-    ::LineTo(dc, clientRect.right - padding, Scale(kRuleTop) + Scale(kRuleRowHeight) * 2);
+        for (int row = 0; row < 3; ++row)
+        {
+            RECT band = { padding - Scale(kRuleBandInset),
+                          Scale(kRuleTop) + Scale(kRuleRowHeight) * row,
+                          clientRect.right - padding + Scale(kRuleBandInset),
+                          Scale(kRuleTop) + Scale(kRuleRowHeight) * row + Scale(kRuleBandHeight) };
+
+            ::FrameRect(dc, &band, groupBorderBrush);
+        }
+
+        ::DeleteObject(groupBorderBrush);
+    }
 
     ::SelectObject(dc, oldPen);
     ::DeleteObject(dividerPen);
@@ -2775,13 +2801,16 @@ void BatchRenameDialog::Draw(HDC dc)
         }
 
         const int rowTop = Scale(kRuleTop) + Scale(kRuleRowHeight) * spec.row;
+        const int ctlTop = rowTop + Scale(kRuleControlTop);
 
-        RECT labelRect = { Scale(spec.labelX), rowTop,
+        // 标签右对齐到"控件左边再往左 5px"，这样每个标签和它的控件间距都是 5px，
+        // 也不受标签字数影响（"前缀"两个字和"分隔符"三个字看上去一样整齐）。
+        RECT labelRect = { Scale(spec.labelX), ctlTop,
                            Scale(spec.labelX) + Scale(spec.labelWidth),
-                           rowTop + Scale(kRuleRowHeight) };
+                           ctlTop + Scale(kRuleControlHeight) };
 
         ::DrawTextW(dc, spec.label, -1, &labelRect,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     // ---- 查找方式按钮：文字随选中项变（普通 / 正则）----
@@ -2820,9 +2849,11 @@ void BatchRenameDialog::Draw(HDC dc)
     // 有冲突时「应用」不可用，在参数区下面那块空白里说一句原因
     if (conflictCount > 0)
     {
-        RECT warnRect = { padding, Scale(kRuleTop) + Scale(kRuleRowHeight) * 3 + Scale(2),
+        const int bandBottom = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
+
+        RECT warnRect = { padding, bandBottom + Scale(6),
                           clientRect.right - padding,
-                          Scale(kRuleTop) + Scale(kRuleRowHeight) * 3 + Scale(22) };
+                          bandBottom + Scale(22) };
 
         ::SetTextColor(dc, kErrorColor);
         ::DrawTextW(dc, L"有冲突的行会标红，改到没有冲突才能应用。", -1, &warnRect,
@@ -2985,6 +3016,22 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
     {
         HDC dc = reinterpret_cast<HDC>(wParam);
         HWND child = reinterpret_cast<HWND>(lParam);
+        const int childId = (child != nullptr) ? ::GetDlgCtrlID(child) : 0;
+
+        // 复选框（含扩展名 / 区分大小写 / 加序号 / 替换 / 倒序）也会走这条消息，
+        // 但它们没有"填什么"的意思，禁用时只把字压淡、底色始终白（否则会冒灰块）
+        const bool isCheckBox = (childId == kIdIncludeExt || childId == kIdCaseSensitive ||
+                                 childId == kIdNumberEnable || childId == kIdNumberReplace ||
+                                 childId == kIdSortReverse);
+
+        if (isCheckBox)
+        {
+            ::SetBkMode(dc, TRANSPARENT);
+            ::SetTextColor(dc, (child != nullptr && ::IsWindowEnabled(child) == FALSE)
+                                   ? RGB(150, 153, 158)
+                                   : kTitleColor);
+            return reinterpret_cast<LRESULT>(m_whiteBrush);
+        }
 
         // 被禁用的输入框（没勾「加序号」时的起始/步长等、扩展名下拉选了「不修改」时的那个框）：
         // 灰底灰字，一眼看出"现在不能填"。别的控件照旧白底。
@@ -3005,8 +3052,21 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
     case WM_CTLCOLORBTN:
     {
         HDC dc = reinterpret_cast<HDC>(wParam);
+        HWND child = reinterpret_cast<HWND>(lParam);
+
         ::SetBkMode(dc, TRANSPARENT);
-        ::SetTextColor(dc, kTitleColor);
+
+        // 参数区里的复选框没勾「加序号」时会被禁用：这时只把字压淡，
+        // 底色仍旧是白的（不然禁用按钮会自己刷一块灰，在白底分组框里很扎眼）
+        if (child != nullptr && ::IsWindowEnabled(child) == FALSE)
+        {
+            ::SetTextColor(dc, RGB(150, 153, 158));
+        }
+        else
+        {
+            ::SetTextColor(dc, kTitleColor);
+        }
+
         return reinterpret_cast<LRESULT>(m_whiteBrush);
     }
 
