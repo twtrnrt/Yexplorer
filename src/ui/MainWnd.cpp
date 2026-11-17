@@ -158,6 +158,16 @@ static bool IsStartPathUsable(const std::wstring& path)
     }
 
     const DWORD attributes = ::GetFileAttributesW(path.c_str());
+
+    // 压缩包（.zip/.rar/.7z…）磁盘上是文件，但能当文件夹枚举，
+    // 启动参数给它是"要进去浏览"，所以按可用处理（否则会被回退到上次目录）
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+        shell::IsContainerFileExtension(path))
+    {
+        return true;
+    }
+
     return attributes != INVALID_FILE_ATTRIBUTES &&
            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
@@ -1670,32 +1680,38 @@ void MainWindow::DoCopyPath()
     Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 条文件路径到剪贴板");
 }
 
-// 压缩包剪切规则的判定函数定义在下面（右键菜单那一片），这里先声明一下
-static bool IsNonZipArchivePath(const std::wstring& path);
-
 void MainWindow::DoCut()
 {
+    // 压缩包内部：暂不支持剪切
+    //
+    // 容器里的项是虚拟项，剪贴板里放 CF_HDROP（真实路径清单）对被剪的那一项
+    // 无效，粘贴端只会失败。要支持得把剪贴板改成 IDList 通道，这一步还在做，
+    // 所以这里先挡住快捷键，避免"剪了粘不动"的假成功。
+    if (m_currentIsContainer)
+    {
+        Logger::Info(L"剪切：当前在压缩包内部，暂不支持");
+        return;
+    }
+
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
 
-    // 这里要踢掉三类项：
+    // 这里要踢掉两类项：
     //   1. 驱动器（D:\ 这种盘符根）—— 资源管理器里驱动器不允许剪切（搬不走整盘）；
-    //   2. 控制面板等虚拟对象（没有真实文件系统路径）—— 既不能复制也不能剪切；
-    //   3. 除 .zip 以外的压缩包（.rar/.7z/.cab…）—— 系统里它们是「压缩存档」，
-    //      剪了粘过去只是把文件搬走，资源管理器里也不给剪，所以这里同样不生效。
+    //   2. 控制面板等虚拟对象（没有真实文件系统路径）—— 既不能复制也不能剪切。
+    // 压缩包文件本身不在此列：和系统一致，zip/rar 文件都能剪。
     const size_t beforeCount = selected.size();
     selected.erase(std::remove_if(selected.begin(), selected.end(),
                                   [](const std::wstring& path)
                                   {
                                       return !shell::IsFileSystemPath(path) ||
-                                             shell::IsDriveRootPath(path) ||
-                                             IsNonZipArchivePath(path);
+                                             shell::IsDriveRootPath(path);
                                   }),
                    selected.end());
 
     if (selected.size() != beforeCount)
     {
         Logger::Info(L"剪切：跳过 " + std::to_wstring(beforeCount - selected.size()) +
-                     L" 项（驱动器 / 虚拟对象 / 非 zip 压缩包）");
+                     L" 项（驱动器 / 虚拟对象）");
     }
 
     if (selected.empty())
@@ -1873,8 +1889,59 @@ void MainWindow::DoBatchRename()
     }
 }
 
+// 按路径把当前枚举结果里对应条目的绝对 PIDL 取出来（压缩包内部操作用）
+// 返回 false = 有哪一项找不到 PIDL（这时宁可不做，也不要退化成按路径操作）
+bool MainWindow::SelectedEntryPidls(const std::vector<std::wstring>& paths,
+                                    std::vector<std::vector<unsigned char>>& pidls)
+{
+    std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+
+    if (result == nullptr)
+    {
+        return false;
+    }
+
+    pidls.clear();
+    pidls.reserve(paths.size());
+
+    for (const std::wstring& path : paths)
+    {
+        bool found = false;
+
+        for (const shell::ShellEntry& entry : result->entries)
+        {
+            if (::_wcsicmp(entry.fullPath.c_str(), path.c_str()) == 0)
+            {
+                if (entry.pidl.empty())
+                {
+                    return false;
+                }
+
+                pidls.push_back(entry.pidl);
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+    }
+
+    return !pidls.empty();
+}
+
 void MainWindow::DoDelete()
 {
+    // 除 zip 以外的压缩包内部是只读的：系统里删不动，我们菜单也不给这项，
+    // 这里兜一层，防止 Delete 快捷键绕过菜单。
+    if (m_currentIsContainer && !m_currentIsZipContainer)
+    {
+        Logger::Info(L"删除：当前是只读压缩包内部，忽略");
+        return;
+    }
+
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
     if (selected.empty())
     {
@@ -1882,6 +1949,19 @@ void MainWindow::DoDelete()
     }
 
     HWND owner = m_hWnd;
+
+    // ------------------------------------------------------------
+    // 压缩包内部：暂不执行删除
+    //
+    // 容器里的项磁盘上不存在，路径字符串交给 Shell 解析不出来（实测报
+    // "参数错误"）。真正可行的 PIDL 删除通道还在做，这里先挡住，
+    // 避免出现"点了没反应/报错"，更重要的是避免误删整个压缩包。
+    // ------------------------------------------------------------
+    if (m_currentIsContainer)
+    {
+        Logger::Info(L"删除：压缩包内部项暂不支持，已忽略");
+        return;
+    }
 
     // 记下删的是哪些，成功之后直接从列表里摘掉这几行，不用重扫目录
     m_lastOperation  = FileOperationKind::Delete;
@@ -1973,6 +2053,7 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 {
     // 每次弹菜单前把上一次的自绘项数据清掉（下面的 owner-draw 项要用到它们）
     m_menuDrawItems.clear();
+    m_menuPrimaryIsContainerFile = false;
 
     const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
 
@@ -1993,6 +2074,7 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 
         bool isGroupHeader = false;
         bool isFolder      = false;
+        bool isContainerFile = false;
 
         if (result != nullptr)
         {
@@ -2002,10 +2084,15 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
                 const shell::ShellEntry& entry = result->entries[index];
                 isGroupHeader = entry.isGroupHeader || entry.isSpacer;
                 isFolder      = entry.isFolder;
+                isContainerFile = entry.isContainerFile;
             }
         }
 
         primaryIsFolder = isFolder;
+
+        // 记住"选中的是不是压缩包文件"，拼单选文件菜单时要靠它决定
+        // 要不要多给一条「在新窗口中打开」（和文件夹一致）
+        m_menuPrimaryIsContainerFile = isContainerFile;
 
         if (isGroupHeader)
         {
@@ -2140,11 +2227,13 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 //   属性
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// 菜单里「复制 / 剪切」能不能用
+// 「复制 / 剪切」能不能用
 //
 //   · 驱动器（D:\ 这种盘符根）不能剪切 —— 整盘搬不走，资源管理器里也是灰的；
 //   · 控制面板、"此电脑"里的控制项这类虚拟对象（没有真实文件系统路径）
 //     既不能复制也不能剪切。
+// 压缩包文件本身和普通文件一样：zip/rar 都能剪（用户实测系统就是这样，之前
+// 按"除 zip 外禁剪"是记错了，这里已改回）。
 // 这些判断只查字符串，零成本（符合"右键菜单弹出不查注册表、不碰 COM"的要求）。
 // ---------------------------------------------------------------------------
 static bool CanCopyPath(const std::wstring& path)
@@ -2152,45 +2241,50 @@ static bool CanCopyPath(const std::wstring& path)
     return shell::IsFileSystemPath(path);
 }
 
-// ---------------------------------------------------------------------------
-// 「除 .zip 以外的压缩包」——这些不允许剪切
-//
-// 实测（本机）：.rar / .7z / .tar / .gz / .cab / .bz2 / .xz / .tgz 在 Shell 里
-// 都被注册成「压缩存档」，资源管理器里它们的「剪切」是灰的（只有 .zip 能剪）。
-// 这里按扩展名判断：只看字符串、不碰磁盘，符合"右键菜单弹出零成本"的约定。
-// ---------------------------------------------------------------------------
-static bool IsNonZipArchivePath(const std::wstring& path)
-{
-    static const wchar_t* const kArchiveExtensions[] = {
-        L".rar", L".7z",  L".tar", L".gz",   L".cab", L".bz2", L".xz", L".tgz",
-        L".tbz", L".tbz2", L".txz", L".lz",  L".lzma", L".z",  L".zst",
-        L".arj", L".lzh", L".lha",
-    };
-
-    const std::wstring extension = shell::ExtensionKeyForPath(path);
-
-    for (const wchar_t* one : kArchiveExtensions)
-    {
-        if (extension == one)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static bool CanCutPath(const std::wstring& path)
 {
-    // 三条"不能剪"：驱动器、虚拟对象、非 zip 的压缩包
+    // 两条"不能剪"：驱动器、虚拟对象
     return shell::IsFileSystemPath(path) &&
-           !shell::IsDriveRootPath(path) &&
-           !IsNonZipArchivePath(path);
+           !shell::IsDriveRootPath(path);
+}
+
+// ---------------------------------------------------------------------------
+// 压缩包内部的右键菜单（在 zip / rar / 7z 里选中文件时走这里）
+//
+// 系统实际给的项（用户实测资源管理器）：
+//   · zip 内部      : 打开 / 剪切 / 复制 / 删除 / 属性
+//   · 其它压缩包内部 : 打开 / 复制
+//
+// 但"剪切 / 删除 / 属性"要真能干活，必须走容器内项的 PIDL 通道：
+// 容器里的项没有真实磁盘路径，路径字符串交给 Shell 解析不出来（实测会报
+// "参数错误"，还有过把整个压缩包误删的先例）。这条通道还在做，
+// 所以这里先只给「打开 / 复制」——宁可少给，也不给一个点了会出错/出事的项。
+// 通道接好后再把 zip 的 剪切/删除/属性 补回来。
+// ---------------------------------------------------------------------------
+void MainWindow::BuildContainerItemMenu(HMENU menu)
+{
+    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
 }
 
 void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 {
+    // 压缩包内部：按容器能力单独给菜单，早退
+    if (m_currentIsContainer)
+    {
+        BuildContainerItemMenu(menu);
+        return;
+    }
+
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+
+    // 压缩包文件本身和文件夹一样，也能"在新窗口中打开"（Ctrl+双击同理）
+    if (m_menuPrimaryIsContainerFile)
+    {
+        ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
+    }
 
     // 打开方式：只给"普通文件"；菜单内容全部来自内存里的账本，零成本
     {
@@ -2240,6 +2334,14 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 // ---------------------------------------------------------------------------
 void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath)
 {
+    // 压缩包内部的子目录：按容器能力给菜单
+    // （zip 里能进去、能剪能删；rar/7z 里只能「打开 / 复制」，和系统一致）
+    if (m_currentIsContainer)
+    {
+        BuildContainerItemMenu(menu);
+        return;
+    }
+
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
     ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
 
@@ -2282,6 +2384,13 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPat
 // ---------------------------------------------------------------------------
 void MainWindow::BuildMultipleMenu(HMENU menu)
 {
+    // 压缩包内部多选：和单选文件一样按容器能力给项，早退
+    if (m_currentIsContainer)
+    {
+        BuildContainerItemMenu(menu);
+        return;
+    }
+
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -3816,6 +3925,111 @@ bool MainWindow::TryOpenFileWithOurChoice(const std::wstring& filePath,
 }
 
 // ============================================================================
+// 压缩包（zip / rar / 7z…）双击的打开判定
+//
+// 走和普通文件同一本「打开方式」账本，但默认项不一样：
+//   1. 账本里设过默认程序
+//        · 设的是「本程序」→ 就在这个窗口里进去浏览（等同资源管理器双击 zip）
+//        · 设的是别的程序  → 用那个程序打开（.rar 用 WinRAR 这类场景）
+//   2. 没设过 → 弹「打开方式」窗口，候选里多一条「Yexplorer（本程序）」并默认选中；
+//      用户点「打开」就按选中的走；直接关窗口＝按默认（本程序）进去浏览。
+// ============================================================================
+void MainWindow::OpenContainerEntry(const shell::ShellEntry& entry)
+{
+    Logger::Info(L"双击压缩包：[" + entry.name + L"] " + entry.fullPath);
+
+    const std::wstring extension = shell::ExtensionKeyForPath(entry.fullPath);
+
+    // 账本里设过的那一项（拷贝一份，后面配置变动不影响它）
+    auto findConfiguredProgram = [&extension](core::OpenWithItem& program) -> bool
+    {
+        const core::OpenWithEntry* ledger = core::Settings::Instance().FindOpenWith(extension);
+
+        if (ledger == nullptr || ledger->defaultKey.empty())
+        {
+            return false;
+        }
+
+        for (const core::OpenWithItem& item : ledger->items)
+        {
+            if (core::OpenWithKey(item) == ledger->defaultKey)
+            {
+                program = item;
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    core::OpenWithItem program;
+    bool haveProgram = findConfiguredProgram(program);
+
+    if (!haveProgram)
+    {
+        // 没设过（或设的那个已经被删）：弹设置窗口，默认替用户选好「本程序」
+        const bool neverConfigured =
+            core::Settings::Instance().FindOpenWith(extension) == nullptr;
+
+        ui::OpenWithDialog dialog(m_hWnd, &m_iconCache);
+        dialog.ShowModal(extension, neverConfigured, entry.fullPath, /*preferSelf=*/true);
+
+        if (!dialog.OpenRequested())
+        {
+            // 直接关窗口：按默认（本程序）进去浏览，和资源管理器双击 zip 一样
+            NavigateContainerEntry(entry);
+            return;
+        }
+
+        haveProgram = findConfiguredProgram(program);
+
+        if (!haveProgram)
+        {
+            // 极端情况：窗口里没留下默认项（比如账本被清空），退回本程序浏览
+            NavigateContainerEntry(entry);
+            return;
+        }
+    }
+
+    // ---- 本程序：进容器里浏览 ----
+    if (program.kind == L"self")
+    {
+        NavigateContainerEntry(entry);
+        return;
+    }
+
+    // ---- 别的程序：先确认还在，再启动 ----
+    bool diskMissing = false;
+    if (!shell::IsAvailable(program, diskMissing))
+    {
+        SetOpenWithProgramAlive(extension, core::OpenWithKey(program), 0);
+        ShowOpenWithSettings(extension, false, entry.fullPath);
+        return;
+    }
+
+    std::wstring error;
+    if (!shell::Launch(m_hWnd, program, entry.fullPath, error))
+    {
+        std::wstring message = error + L"\n\n要重新选择打开程序吗？";
+        if (::MessageBoxW(m_hWnd, message.c_str(), L"打开压缩包",
+                          MB_OKCANCEL | MB_ICONWARNING) == IDOK)
+        {
+            ShowOpenWithSettings(extension, false, entry.fullPath);
+        }
+        return;
+    }
+
+    SetOpenWithProgramAlive(extension, core::OpenWithKey(program), 1);
+}
+
+// 进压缩包容器里浏览（地址栏写它的名字，向上按钮能回到进来之前的目录）
+void MainWindow::NavigateContainerEntry(const shell::ShellEntry& entry)
+{
+    RecordNavigationOrigin(entry.fullPath, entry.name);
+    NavigateToPath(entry.fullPath);
+}
+
+// ============================================================================
 // 排序
 // ============================================================================
 
@@ -4882,6 +5096,11 @@ void MainWindow::OnEnumerationDone()
         elapsedMs = m_elapsedMs;
     }
 
+    // 记下"当前显示的是不是压缩包内部"：右键菜单、剪切、删除都按它决定能力
+    // （zip 内部能剪能删，rar/7z 这类只读，菜单只给「打开 / 复制」）
+    m_currentIsContainer    = result->isContainer;
+    m_currentIsZipContainer = result->isZipContainer;
+
     // 按当前排序状态排一遍（默认名称升序）
     std::sort(result->entries.begin(), result->entries.end(),
               [this](const shell::ShellEntry& left, const shell::ShellEntry& right)
@@ -5102,6 +5321,20 @@ void MainWindow::OnItemActivated(size_t index)
         // 紧跟的「导航到 / 按 PIDL 打开成功 / 打开失败」就是它的结果，
         // 一眼能对上是哪个项出的问题。
         Logger::Info(L"双击：[" + entry.name + L"] " + entry.fullPath);
+
+        // ------------------------------------------------------------
+        // 压缩包（zip / rar / 7z…）：双击走「打开方式」账本
+        //
+        // 和普通文件一样：
+        //   · 设过默认程序 → 按设的那个打开（本程序 = 进去浏览，别的程序 = 启动它）；
+        //   · 没设过       → 弹打开方式窗口，默认选中「本程序」这一项，
+        //                    用户直接点「打开」就进去浏览。
+        // ------------------------------------------------------------
+        if (entry.isContainerFile)
+        {
+            OpenContainerEntry(entry);
+            return;
+        }
 
         // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」）不一定真能"进去"：
         // 控制面板里「恢复」「凭据管理器」「Windows Defender 防火墙」这些，

@@ -176,6 +176,10 @@ private:
     void DoCut();           // Ctrl+X：记住选中的路径，粘贴时移动
     void DoPaste();         // Ctrl+V：复制/移动到家目录
     void DoDelete();        // Delete：删到回收站
+
+    // 按路径从当前枚举结果里取绝对 PIDL（压缩包内部删除等操作用）
+    bool SelectedEntryPidls(const std::vector<std::wstring>& paths,
+                            std::vector<std::vector<unsigned char>>& pidls);
     void DoNewFolder();     // Ctrl+Shift+N：新建文件夹
 
     // 批量重命名（选中多个时右键「批量重命名」）
@@ -222,6 +226,14 @@ private:
     void BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath);
     void BuildMultipleMenu(HMENU menu);
     void BuildShellItemMenu(HMENU menu, const std::wstring& itemPath);
+
+    // 压缩包内部的右键菜单（zip 给 打开/剪切/复制/删除/属性；其它给 打开/复制）
+    void BuildContainerItemMenu(HMENU menu);
+
+    // 当前右键选中的那一项是不是"压缩包文件"（zip/rar/7z 这类容器）
+    // 由 ShowContextMenu 在拼菜单前填好；BuildSingleFileMenu 靠它决定
+    // 要不要多给一条「在新窗口中打开」。
+    bool m_menuPrimaryIsContainerFile = false;
 
     // 查看 / 新建文件夹 + 新建 这两块公共片段
     void FillViewMenu(HMENU parentMenu);
@@ -328,6 +340,13 @@ private:
     // 按账本打开一个文件。返回 true 表示"这件事我们管了"（成功或已给用户提示），
     // 返回 false 表示"不归我们管"（特殊类型、或者没配置又跳过了），调用方走原来的逻辑。
     bool TryOpenFileWithOurChoice(const std::wstring& filePath, const std::wstring& extension);
+
+    // 双击压缩包（zip / rar / 7z…）的打开判定：走「打开方式」账本，
+    // 没设过就弹设置窗口并默认用本程序，设过就按设过的打开。
+    void OpenContainerEntry(const shell::ShellEntry& entry);
+
+    // 进压缩包容器里浏览（OpenContainerEntry 里「用本程序打开」那条路）
+    void NavigateContainerEntry(const shell::ShellEntry& entry);
 
     // 把某条程序的存在状态记进配置（只在值真的变了才写盘，避免频繁落盘）
     void SetOpenWithProgramAlive(const std::wstring& extension,
@@ -502,6 +521,20 @@ private:
 
     // 复制/移动完成后的那次刷新，是否要把"新出现的项"选中（和资源管理器一致）
     bool                                         m_selectNewAfterEnum = false;
+
+    // ----------------------------------------------------------------
+    // 当前显示的是不是「压缩包内部」
+    //
+    // 枚举结果里带回来的两个标记（见 shell::EnumerateResult）：
+    //   m_currentIsContainer    —— 当前目录是压缩包这类容器
+    //   m_currentIsZipContainer —— 且是 .zip（系统支持写入：能剪、能删）
+    //
+    // 用途：右键菜单里该出现哪些项、Ctrl+X / 删除要不要生效。
+    // 存成成员是为了右键菜单弹出时零成本（不查磁盘、不碰 COM）。
+    // ----------------------------------------------------------------
+    bool                                         m_currentIsContainer = false;
+    bool                                         m_currentIsZipContainer = false;
+
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
 
     // 上次给「此电脑」排分组标题时用的"一行几格"。

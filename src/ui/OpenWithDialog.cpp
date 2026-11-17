@@ -154,11 +154,13 @@ int OpenWithDialog::Scale(int value) const
 
 bool OpenWithDialog::ShowModal(const std::wstring& extension,
                                bool firstTime,
-                               const std::wstring& filePath)
+                               const std::wstring& filePath,
+                               bool preferSelf)
 {
     m_extension = extension;
     m_filePath  = filePath;
     m_firstTime = firstTime;
+    m_preferSelf = preferSelf;
     m_openRequested = false;
 
     // 从配置里拷一份工作副本（改完关窗口才写回，改一半放弃也不影响配置）
@@ -180,6 +182,46 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension,
 
     // ---- 第一次打开窗口：读系统候选 ----
     RefreshCandidatesFromSystem(false);
+
+    // ---- 压缩包（容器）专用：候选里加一条「Yexplorer（本程序）」并默认选它 ----
+    //
+    // 用户要求：第一次双击压缩包也要弹这个窗口，默认项是"我们自己的文件管理器"，
+    // 设过就按设过的。所以这里在系统候选之前插一条 kind="self" 的项，
+    // 让它成为默认；用户改选别的程序后，账本里存的就是那个程序。
+    if (m_preferSelf)
+    {
+        core::OpenWithItem selfItem;
+        selfItem.kind = L"self";
+
+        // path 只用来取图标（本程序的 exe），身份串由 OpenWithKey 固定成 "self:yexplorer"
+        wchar_t modulePath[MAX_PATH] = {};
+        ::GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        selfItem.path    = modulePath;
+        selfItem.name    = L"Yexplorer（本程序）";
+        selfItem.enabled = true;
+        selfItem.alive   = true;
+
+        // 账本里已经存过本程序这一项就用存过的那份（用户可能改过名字）
+        bool selfExists = false;
+        for (const core::OpenWithItem& item : m_entry.items)
+        {
+            if (item.kind == L"self")
+            {
+                selfExists = true;
+                break;
+            }
+        }
+
+        if (!selfExists)
+        {
+            m_entry.items.insert(m_entry.items.begin(), selfItem);
+        }
+
+        if (m_firstTime && m_entry.defaultKey.empty())
+        {
+            m_entry.defaultKey = core::OpenWithKey(selfItem);
+        }
+    }
 
     // ---- 首次询问：把系统当前默认程序预选上 ----
     // 目的是让用户"直接关掉"就等于确认了系统默认，少点一次。

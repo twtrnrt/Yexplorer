@@ -40,6 +40,18 @@ HRESULT MoveItems(const std::vector<std::wstring>& sourcePaths,
 // 删除若干项（进回收站，可撤销）
 HRESULT DeleteItems(const std::vector<std::wstring>& paths, HWND owner);
 
+// ----------------------------------------------------------------------------
+// 按「绝对 PIDL」删除（压缩包容器内部的项专用）
+//
+// 为什么必须单独做一条通道：容器里的项（C:\a.zip\inner.txt）磁盘上不存在，
+// 用路径字符串交给 Shell 是解析不出来的（实测：删除会失败，而且有过把
+// 整个压缩包误删的先例）。只有 PIDL 才能定位到容器内部的那一项。
+//
+// pidlBytes：ShellEntry::pidl（枚举时已经拷好的绝对 PIDL 字节）
+// ----------------------------------------------------------------------------
+HRESULT DeleteShellItemPidls(const std::vector<std::vector<unsigned char>>& pidlBytes,
+                             HWND owner);
+
 // 在指定目录里新建一个文件夹，自动避开重名
 // 比如目录里已有「新建文件夹」，就建「新建文件夹 (2)」
 // 成功时 newFolderPath 返回新建出来的完整路径

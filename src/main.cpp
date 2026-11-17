@@ -19,6 +19,7 @@
 
 #include "core/Logger.h"
 #include "shell/ExplorerProxy.h"   // 管理员身份下部署/移除 System32 里的 explorer.exe 代理
+#include "shell/ShellFolder.h"     // IsContainerFileExtension：压缩包要当目录打开
 #include "ui/MainWnd.h"
 #include "ui/WindowRelay.h"   // "这个目录已经开着了"就交给已有窗口
 
@@ -214,10 +215,15 @@ int WINAPI wWinMain(HINSTANCE hInstance,
         {
             // 判断是不是"存在的文件"。目录、取不到属性的（不存在/无权限）都按原样走：
             // 目录照旧打开；不存在的路径照旧让主窗口回退到默认目录。
+            //
+            // 压缩包（.zip/.rar/.7z…）例外：磁盘上是文件，但要当"目录"打开进去浏览，
+            // 所以不按"文件 → 打开它所在目录并选中"处理，路径原样传下去。
             const DWORD attributes = ::GetFileAttributesW(startupPath.c_str());
+            const bool  isContainerFile = shell::IsContainerFileExtension(startupPath);
 
             if (attributes != INVALID_FILE_ATTRIBUTES &&
-                (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+                !isContainerFile)
             {
                 const size_t slash = startupPath.find_last_of(L"\\/");
 

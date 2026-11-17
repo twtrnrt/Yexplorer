@@ -387,6 +387,151 @@ HRESULT DeleteItems(const std::vector<std::wstring>& paths, HWND owner)
 }
 
 // ============================================================================
+// 按「绝对 PIDL」删除（压缩包容器里的项）
+//
+// 容器里的项没有真实磁盘路径，路径字符串交给 Shell 解析不出来。
+// 这里走外壳自己的右键动词（IContextMenu 的 "delete"）：
+//   1) SHBindToParent 拿到父 IShellFolder 和子 PIDL；
+//   2) GetUIObjectOf 要一个 IContextMenu；
+//   3) InvokeCommand 执行 "delete"。
+// 这也正是资源管理器删除 zip 内文件走的路，行为（弹不弹确认、要不要回收站）
+// 全部交给 shell。
+// ============================================================================
+namespace
+{
+// 对单个绝对 PIDL 执行一个外壳右键动词
+//
+// 不能直接把动词名字符串丢给 InvokeCommand：容器（zip）里的项，其右键菜单
+// 只认"菜单项 ID"，给字符串会返回 E_INVALIDARG（实测）。
+// 所以先 QueryContextMenu 建一份菜单，再用 GetCommandString(GCS_VERBW)
+// 把每个项的动词名读出来，找到名字匹配的那一项，最后按它的 ID 执行。
+HRESULT InvokeShellVerbByPidl(const ITEMIDLIST* absolutePidl, const wchar_t* verb, HWND owner)
+{
+    wil::com_ptr<IShellFolder> parent;
+    PCITEMID_CHILD child = nullptr;
+
+    HRESULT hr = ::SHBindToParent(absolutePidl, IID_IShellFolder, parent.put_void(), &child);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    if (child == nullptr)
+    {
+        return E_FAIL;
+    }
+
+    wil::com_ptr<IContextMenu> contextMenu;
+    hr = parent->GetUIObjectOf(owner, 1, &child,
+                               IID_IContextMenu, nullptr, contextMenu.put_void());
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    // shell 的菜单命令 ID 从 1 开始
+    const UINT idFirst = 1;
+    const UINT idLast  = 0x7FFF;
+
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr)
+    {
+        return E_OUTOFMEMORY;
+    }
+
+    hr = contextMenu->QueryContextMenu(menu, 0, idFirst, idLast, CMF_NORMAL);
+
+    HRESULT result = E_FAIL;
+    bool    found  = false;
+
+    if (SUCCEEDED(hr))
+    {
+        const int menuCount = ::GetMenuItemCount(menu);
+
+        for (int i = 0; i < menuCount; ++i)
+        {
+            const UINT commandId = ::GetMenuItemID(menu, i);
+            if (commandId == 0 || commandId == static_cast<UINT>(-1))
+            {
+                continue;   // 分隔线 / 子菜单
+            }
+
+            const UINT offset = commandId - idFirst;
+
+            wchar_t verbName[128] = {};
+            if (FAILED(contextMenu->GetCommandString(offset, GCS_VERBW, nullptr,
+                                                     reinterpret_cast<CHAR*>(verbName),
+                                                     ARRAYSIZE(verbName)))
+                )
+            {
+                continue;
+            }
+
+            if (::_wcsicmp(verbName, verb) != 0)
+            {
+                continue;
+            }
+
+            CMINVOKECOMMANDINFOEX info = {};
+            info.cbSize  = sizeof(info);
+            info.fMask   = CMIC_MASK_UNICODE | CMIC_MASK_FLAG_NO_UI;
+            info.hwnd    = owner;
+            info.lpVerb  = MAKEINTRESOURCEA(offset);
+            info.lpVerbW = MAKEINTRESOURCEW(offset);
+            info.nShow   = SW_SHOWNORMAL;
+
+            result = contextMenu->InvokeCommand(reinterpret_cast<LPCMINVOKECOMMANDINFO>(&info));
+            found  = true;
+            break;
+        }
+    }
+
+    ::DestroyMenu(menu);
+
+    return found ? result : E_FAIL;
+}
+} // namespace
+
+HRESULT DeleteShellItemPidls(const std::vector<std::vector<unsigned char>>& pidlBytes,
+                             HWND owner)
+{
+    if (pidlBytes.empty())
+    {
+        return E_INVALIDARG;
+    }
+
+    HRESULT lastError = S_OK;
+    bool anyDone = false;
+
+    for (const std::vector<unsigned char>& bytes : pidlBytes)
+    {
+        if (bytes.size() < sizeof(ITEMIDLIST))
+        {
+            continue;
+        }
+
+        const ITEMIDLIST* pidl = reinterpret_cast<const ITEMIDLIST*>(bytes.data());
+
+        const HRESULT hr = InvokeShellVerbByPidl(pidl, L"delete", owner);
+        if (SUCCEEDED(hr))
+        {
+            anyDone = true;
+        }
+        else
+        {
+            lastError = hr;
+        }
+    }
+
+    if (!anyDone)
+    {
+        return FAILED(lastError) ? lastError : E_FAIL;
+    }
+
+    return S_OK;
+}
+
+// ============================================================================
 // 新建文件夹（自动避开重名）
 // ============================================================================
 HRESULT CreateNewFolder(const std::wstring& directory, std::wstring& newFolderPath)

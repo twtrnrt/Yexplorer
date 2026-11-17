@@ -53,10 +53,14 @@ public:
     //   extension：".txt" 这种（无扩展名的传 "(无扩展名)"）
     //   filePath：本次是从哪个文件触发打开这个窗口的（点「打开」时用它启动）；
     //             从右键「添加或管理程序」进来时传空串，此时「打开」按钮不显示。
+    //   preferSelf：候选列表里要不要加一条「Yexplorer（本程序）」，并把它设为默认。
+    //               压缩包（zip/rar…）双击时用 true —— 第一次打开也要弹这个窗口，
+    //               默认就用我们自己的文件管理器进去浏览。
     // 返回 true＝关闭时这个扩展名已经有了默认程序。
     bool ShowModal(const std::wstring& extension,
                    bool firstTime,
-                   const std::wstring& filePath = L"");
+                   const std::wstring& filePath = L"",
+                   bool preferSelf = false);
 
     // 用户是不是点了「打开」（要立刻用默认程序打开 filePath）
     bool OpenRequested() const { return m_openRequested; }
@@ -123,6 +127,10 @@ private:
     std::wstring        m_filePath;        // 本次要打开的文件（空 = 管理入口）
     bool                m_firstTime = false;
     bool                m_openRequested = false;   // 用户点了「打开」
+
+    // 候选列表里是否要加「Yexplorer（本程序）」并默认选中它
+    // （压缩包双击时传 true：没这选项的话用户没地方"用本程序打开压缩包"）
+    bool                m_preferSelf = false;
 
     core::OpenWithEntry m_entry;              // 工作副本（关闭时写回配置）
 

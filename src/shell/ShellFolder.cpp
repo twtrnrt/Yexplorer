@@ -451,6 +451,38 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
     result.path = path;
 
     // ------------------------------------------------------------------
+    // 这个目录本身是不是压缩包这类「容器」
+    //
+    // 判定只看真实磁盘属性：路径存在、且不是目录 —— 那就是压缩包/容器文件
+    // （C:\a.zip）。Shell 能把它当文件夹枚举，但里面的项都是虚拟项，
+    // 菜单能力也和普通目录不同（zip 能删能剪，rar/7z 只读），所以先记下来。
+    // 虚拟命名空间（"::{GUID}"）没有磁盘属性，按普通目录处理。
+    // ------------------------------------------------------------------
+    if (IsFileSystemPath(path))
+    {
+        const DWORD ownAttributes = ::GetFileAttributesW(path.c_str());
+
+        if (ownAttributes != INVALID_FILE_ATTRIBUTES &&
+            (ownAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            result.isContainer = true;
+
+            const std::wstring extension = [&path]
+            {
+                const wchar_t* dot = ::PathFindExtensionW(path.c_str());
+                std::wstring  text = (dot == nullptr) ? L"" : dot;
+                for (auto& ch : text)
+                {
+                    ch = static_cast<wchar_t>(::towlower(ch));
+                }
+                return text;
+            }();
+
+            result.isZipContainer = (extension == L".zip");
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 初始化 COM
     //
     // 后台线程调用本函数时，线程本身还没初始化 COM，这里先初始化。
@@ -479,12 +511,12 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
         // ---------------- 第 1-2 步：路径 → IShellFolder ----------------
         wil::com_ptr<IShellFolder> folder;
 
-        // 父文件夹自身的绝对 PIDL。命名空间目录里的子项要拿它拼出「绝对 PIDL」，
-        // 那个才是打开 applet（控制面板里的字体/恢复/设备管理器…）真正管用的东西，
-        // 详见 ShellFolder.h 里 ShellEntry::pidl 的注释。
+        // 父文件夹自身的绝对 PIDL。命名空间目录、以及压缩包这类容器里的子项
+        // 都要拿它拼出「绝对 PIDL」——虚拟项没有可解析的磁盘路径，
+        // 打开、拖出、删除都得靠 PIDL 才管用（详见 ShellEntry::pidl 注释）。
         // 所有权：函数返回前由下面的 ILFree 归还。
         // 物理目录（C:\…）不必拼，保持为 nullptr。
-        bool pathIsNamespace = false;
+        bool pathIsVirtual = false;
         if (IsTopDesktopPath(path))
         {
             // 命名空间最顶层那个「桌面」：没有解析名，只能直接拿桌面根文件夹
@@ -492,7 +524,7 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
 
             // 桌面根文件夹的 PIDL 就是「空 PIDL」，枚举出的子项本身就是绝对 PIDL，
             // 所以这里不需要往外取一个父 PIDL 来拼。
-            pathIsNamespace = true;
+            pathIsVirtual = true;
         }
         else
         {
@@ -506,12 +538,17 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             THROW_IF_FAILED(shellItem->BindToHandler(nullptr, BHID_SFObject,
                                                      IID_PPV_ARGS(folder.put())));
 
-            // 只有「当前目录是 Shell 命名空间」时才需要给子项存 PIDL；
+            // 什么情况下要给子项存 PIDL：
+            //   1. 当前目录是 Shell 命名空间（"::{GUID}"、"shell:…"）——解析名拼不回来；
+            //   2. 当前目录是压缩包这类容器 —— 里面的项是虚拟子项，磁盘上根本没有它们，
+            //      只能用 PIDL 打开/拖出/删除。
             // 普通磁盘目录里的条目用 fullPath 打开就够了，省掉每项一次 PIDL 拼接。
-            pathIsNamespace = (path.compare(0, 2, L"::") == 0) ||
-                              (path.compare(0, 6, L"shell:") == 0);
+            const bool pathIsNamespace = (path.compare(0, 2, L"::") == 0) ||
+                                         (path.compare(0, 6, L"shell:") == 0);
 
-            if (pathIsNamespace)
+            pathIsVirtual = pathIsNamespace || result.isContainer;
+
+            if (pathIsVirtual)
             {
                 // 取这个目录自身的绝对 PIDL；取不到就退回「不拼」——
                 // 那说明这个目录路径本身能被字符串解析，子项也能用字符串打开。
@@ -627,7 +664,8 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
                 if (realAttributes != INVALID_FILE_ATTRIBUTES &&
                     (realAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
                 {
-                    entry.isFolder = false;
+                    entry.isFolder        = false;
+                    entry.isContainerFile = true;
                 }
             }
 
@@ -696,13 +734,13 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             // ----------------------------------------------------------
             // 把这一项的「绝对 PIDL」拷成一段纯字节存进快照
             //
-            // 只在 Shell 命名空间目录里做（控制面板、此电脑这类）。
-            // 原因：这些目录里的项解析名是"…\0\显示名"，Shell 解析不回来，
-            // 打开时必须用 PIDL（详见 ShellFolder.h 里 ShellEntry::pidl 注释）。
+            // 在 Shell 命名空间目录、以及压缩包这类容器里做（控制面板、此电脑、
+            // C:\a.zip 内部）。原因：这些目录里的项解析名是"…\0\显示名"或者根本
+            // 不存在磁盘路径，Shell 用字符串解析不回来，打开/拖出/删除都必须用 PIDL。
             //
             // 注意必须在 CoTaskMemFree(childPidl) 之前拷，childPidl 是 COM 内存。
             // ----------------------------------------------------------
-            if (pathIsNamespace)
+            if (pathIsVirtual)
             {
                 // 顶层「桌面」的父就是根，子项 PIDL 已经绝对；其他命名空间要拼
                 PIDLIST_ABSOLUTE absolutePidl = childPidl;
@@ -990,6 +1028,36 @@ bool IsFileSystemPath(const std::wstring& path)
     if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
     {
         return true;
+    }
+
+    return false;
+}
+
+bool IsContainerFileExtension(const std::wstring& path)
+{
+    // 常见压缩包/容器扩展名（系统把它们的属性报成"文件夹"，其实磁盘上是文件）
+    static const wchar_t* const kContainerExtensions[] = {
+        L".zip",  L".zipx", L".rar", L".7z",  L".cab", L".tar",  L".gz",
+        L".tgz",  L".bz2",  L".tbz", L".tbz2", L".xz", L".txz",  L".lz",
+        L".lzma", L".zst",  L".arj", L".lzh", L".lha", L".iso",
+    };
+
+    // 直接按 PathFindExtensionW 取扩展名并转小写：
+    // 这里不引用 ShellOpenWith 的 ExtensionKeyForPath，避免模块之间多一条依赖
+    const wchar_t* dot = ::PathFindExtensionW(path.c_str());
+    std::wstring extension = (dot == nullptr) ? L"" : dot;
+
+    for (wchar_t& ch : extension)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+
+    for (const wchar_t* one : kContainerExtensions)
+    {
+        if (extension == one)
+        {
+            return true;
+        }
     }
 
     return false;

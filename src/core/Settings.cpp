@@ -44,6 +44,13 @@ std::wstring OpenWithKey(const OpenWithItem& item)
         return L"uwp:" + item.appId;
     }
 
+    if (item.kind == L"self")
+    {
+        // 「用本程序打开」这一项（压缩包容器双击时用）：整台机器只有一个本程序，
+        // 身份串写死成常量，不跟 exe 路径走——程序挪目录也不用重设账本。
+        return L"self:yexplorer";
+    }
+
     // 普通程序：exe 全路径转小写（Windows 路径不区分大小写）
     std::wstring key = item.path;
     for (wchar_t& ch : key)
