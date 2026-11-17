@@ -140,7 +140,7 @@ const RuleFieldSpec kRuleSpecs[kRfCount] =
     { nullptr,   -1, -1, 348,  36, 1, 24 },          // 查找方式按钮（紧贴输入框，宽度 36）
     { L"替换为", 392, 44, 441, 179, 1, 24 },         // 替换为（让出右边 106px 给范围和次数）
     { nullptr,   -1, -1, 620,  76, 1, 24 * 3 },      // 替换范围下拉（宽度 76 够显示「替换全部」）
-    { nullptr,   -1, -1, 696,  30, 1, 24 },          // 替换几处（30px 窄框，紧贴下拉）
+    { nullptr,   -1, -1, 696,  30, 1, 25 },          // 替换几处（30px 窄框，紧贴下拉，按用户要求向下加高 1px）
     { nullptr,   -1, -1, 734,  80, 1, 24 },          // 含扩展名
     { nullptr,   -1, -1, 822,  90, 1, 24 },          // 区分大小写（右端留 8px 到框线）
 
@@ -569,6 +569,75 @@ bool EnsureRegexCompiled(const std::wstring& pattern)
     }
 
     return g_regexCache.valid;
+}
+
+// ---- 输入框的边框：统一用 #D2D2D2，由父窗口自己画 ----
+// 说明：输入框以前带 WS_BORDER，边框是系统画的深灰（约 #646464），而且它属于控件自己的
+// 客户区（主题化之后 WM_NCPAINT 也改不动），没法通过父窗口的消息把它改色。
+// 所以这里的做法是：输入框一律不带系统边框，边框由 Draw() 画成浅灰；
+// Layout() 里每个输入框往里收 1px，正好把最外那一圈让给这条边框线，
+// 这样整块占的地方跟原来一模一样，不会挤到旁边的控件。
+const COLORREF kEditBorderColor = RGB(0xD2, 0xD2, 0xD2);   // 用户指定的输入框边框色
+
+// 这一格是不是"输入框"（只有输入框走"父窗口画边框 + 内缩 1px"这一套）
+bool IsEditField(int field)
+{
+    switch (field)
+    {
+    case kRfPrefix:
+    case kRfSuffix:
+    case kRfFind:
+    case kRfReplace:
+    case kRfReplaceCount:
+    case kRfExtValue:
+    case kRfNumberStart:
+    case kRfNumberStep:
+    case kRfNumberDigits:
+    case kRfNumberSep:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+// 下拉框的边框也跟着统一成 #D2D2D2（用户说"输入框边框统一"，下拉框紧挨着输入框，
+// 颜色不一样会看着一块深一块浅）。
+// 下拉框的边框画在它自己的客户区里（不是非客户区），所以做法是：等它自己画完，
+// 再拿客户区 DC 沿最外一圈盖一条浅灰线。
+LRESULT CALLBACK LightComboBorderProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                      UINT_PTR /*idSubclass*/, DWORD_PTR /*refData*/)
+{
+    switch (msg)
+    {
+    case WM_PAINT:
+    {
+        const LRESULT result = DefSubclassProc(hWnd, msg, wParam, lParam);
+
+        RECT rcClient = {};
+        ::GetClientRect(hWnd, &rcClient);
+
+        HDC dc = ::GetDC(hWnd);
+        if (dc != nullptr && rcClient.right > 0 && rcClient.bottom > 0)
+        {
+            HBRUSH brush = ::CreateSolidBrush(kEditBorderColor);
+            ::FrameRect(dc, &rcClient, brush);
+            ::DeleteObject(brush);
+            ::ReleaseDC(hWnd, dc);
+        }
+
+        return result;
+    }
+
+    case WM_NCDESTROY:
+        ::RemoveWindowSubclass(hWnd, LightComboBorderProc, 0);
+        break;
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 // UTF-8 读写小工具（板蓝根式的手写转换，不引第三方库）
@@ -1001,7 +1070,7 @@ void BatchRenameDialog::CreateControls()
     {
         HWND edit = ::CreateWindowExW(0, L"EDIT", L"",
                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                      ES_AUTOHSCROLL | WS_BORDER,
+                                      ES_AUTOHSCROLL,   // 不带 WS_BORDER：边框由父窗口画成 #D2D2D2
                                       0, 0, 0, 0, m_hWnd,
                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                       instance, nullptr);
@@ -1034,12 +1103,13 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hReplaceMode, CB_SETCURSEL, 0, 0);
     }
 
-    // 替换几处：只在选了「从左往右 / 从右往左」时能填，默认 1
-    m_hReplaceCount = createEdit(kIdReplaceCount, L"1");
+    // 替换几处：只在选了「从左往右 / 从右往左」时能填。
+    // 默认是「替换全部」，所以一开始留空（空着才说明这格不参与计算）；
+    // 等用户切到另两项，才在 WM_COMMAND 里给它补一个默认的 "1"
+    m_hReplaceCount = createEdit(kIdReplaceCount, L"");
     if (m_hReplaceCount != nullptr)
     {
         ::SendMessageW(m_hReplaceCount, EM_SETLIMITTEXT, 4, 0);   // 最多四位数，够用了
-        ::SetWindowTextW(m_hReplaceCount, L"1");
     }
 
     m_hCaseSensitive = ::CreateWindowExW(0, L"BUTTON", L"区分大小写",
@@ -1187,6 +1257,18 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hSortReverse, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
     }
 
+    // 下拉框的边框也统一成 #D2D2D2（见 LightComboBorderProc）
+    for (HWND child = ::GetWindow(m_hWnd, GW_CHILD); child != nullptr;
+         child = ::GetWindow(child, GW_HWNDNEXT))
+    {
+        wchar_t className[32] = {};
+        ::GetClassNameW(child, className, 32);
+        if (::_wcsicmp(className, L"ComboBox") == 0)
+        {
+            ::SetWindowSubclass(child, LightComboBorderProc, 0, 0);
+        }
+    }
+
     EnableRuleControls();
 }
 
@@ -1260,8 +1342,24 @@ void BatchRenameDialog::Layout()
                 continue;
             }
 
-            ::MoveWindow(control, Scale(spec.x), y,
-                         Scale(spec.width), Scale(spec.height), TRUE);
+            // 输入框不带系统边框了（边框由 Draw 画成 #D2D2D2），
+            // 所以往里收 1px，把最外那一圈让给父窗口画的边框线；
+            // 整体占的位置和原来一样，不会挤到左右相邻的控件
+            if (IsEditField(i))
+            {
+                const int border = 1;
+                ::MoveWindow(control,
+                             Scale(spec.x) + border,
+                             y + border,
+                             Scale(spec.width) - border * 2,
+                             Scale(spec.height) - border * 2,
+                             TRUE);
+            }
+            else
+            {
+                ::MoveWindow(control, Scale(spec.x), y,
+                             Scale(spec.width), Scale(spec.height), TRUE);
+            }
         }
     }
 
@@ -2226,7 +2324,16 @@ void BatchRenameDialog::ApplyTemplateToControls(const RenameTemplate& tpl)
     }
     if (m_hReplaceCount != nullptr)
     {
-        ::SetWindowTextW(m_hReplaceCount, std::to_wstring(tpl.replaceCount).c_str());
+        // 选「替换全部」时这格保持留空；只有另两项才把次数写进去（模板里存的是有效值）
+        if (tpl.replaceMode == 0)
+        {
+            ::SetWindowTextW(m_hReplaceCount, L"");
+        }
+        else
+        {
+            const int count = (tpl.replaceCount >= 1) ? tpl.replaceCount : 1;
+            ::SetWindowTextW(m_hReplaceCount, std::to_wstring(count).c_str());
+        }
     }
     if (m_hIncludeExt != nullptr)
     {
@@ -3914,6 +4021,31 @@ void BatchRenameDialog::Draw(HDC dc)
         ::DeleteObject(groupBorderBrush);
     }
 
+    // ---- 输入框的边框：统一刷成 #D2D2D2 ----
+    // 输入框本身不带系统边框（见 createEdit），边框就在这块画：
+    // 沿着 kRuleSpecs 里那一格的完整矩形描一圈 1px，坐标和 Layout() 摆控件用的是同一份表。
+    {
+        HBRUSH editBorderBrush = ::CreateSolidBrush(kEditBorderColor);
+
+        for (int i = 0; i < kRfCount; ++i)
+        {
+            if (!IsEditField(i))
+            {
+                continue;
+            }
+
+            const RuleFieldSpec& spec = kRuleSpecs[i];
+            const int top = Scale(kRuleTop) + Scale(kRuleRowHeight) * spec.row + Scale(kRuleControlTop);
+
+            RECT editFrame = { Scale(spec.x), top,
+                               Scale(spec.x) + Scale(spec.width),
+                               top + Scale(spec.height) };
+            ::FrameRect(dc, &editFrame, editBorderBrush);
+        }
+
+        ::DeleteObject(editBorderBrush);
+    }
+
     ::SelectObject(dc, oldPen);
     ::DeleteObject(dividerPen);
 
@@ -4319,6 +4451,27 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         // 规则控件的任何改动 → 重算预览（查找方式已经不是控件，走的是自绘按钮 + 菜单）
         if (controlId >= kIdPrefix && controlId <= kIdReplaceCount)
         {
+            // 替换范围一变就顺手管一下右边那个次数框：
+            // 选「替换全部」→ 清空（这格不参与计算，空着更清楚）；
+            // 选「从左往右 / 从右往左」→ 里面空着（或写得不像数字）就补个默认的 1
+            if (controlId == kIdReplaceMode && notification == CBN_SELCHANGE &&
+                m_hReplaceCount != nullptr)
+            {
+                const bool wasSuppressed = m_suppressRecalculate;
+                m_suppressRecalculate = true;   // 下面 SetWindowText 会触发 EN_CHANGE，先压住
+
+                if (ComboSelection(m_hReplaceMode) == 0)
+                {
+                    ::SetWindowTextW(m_hReplaceCount, L"");
+                }
+                else if (ReadInteger(m_hReplaceCount, 0, 0) <= 0)
+                {
+                    ::SetWindowTextW(m_hReplaceCount, L"1");
+                }
+
+                m_suppressRecalculate = wasSuppressed;
+            }
+
             if (notification == EN_CHANGE || notification == CBN_SELCHANGE ||
                 notification == BN_CLICKED)
             {
