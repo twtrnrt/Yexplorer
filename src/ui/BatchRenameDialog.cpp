@@ -49,8 +49,8 @@ const int kListHeight = 246;
 
 // 模板栏（预览列表和规则区之间那一条）：固定 10 个槽，一行排满
 const int kTemplateTop     = 342;
-const int kTemplateSlotW   = 80;   // 每个模板按钮宽
-const int kTemplateSlotGap = 8;    // 槽间距
+const int kTemplateSlotW   = 88;   // 每个模板按钮宽（刚好让 10 个槽从 12 排到 928，跟下面三行分组框同宽）
+const int kTemplateSlotGap = 4;    // 槽间距（原来是 8，收一半）
 const int kTemplateSlotH   = 30;   // 槽高
 
 // 底部一排按钮（取消 / 清空 / 保存 / 应用）
@@ -66,14 +66,9 @@ const int kRuleBandInset    = 8;    // 分组条比内容左右各多出多少
 const int kRuleControlHeight = 24;  // 行内所有控件（输入框 / 下拉 / 复选框 / 按钮）统一高度
 const int kRuleControlTop    = 6;   // 控件相对分组条顶部的偏移：(36-24)/2
 const int kRuleRightX        = 920; // 三行内容的右边界，统一收在这一列
-const int kLeftColumnX  = 20;
+const int kRuleSortDividerX  = 732; // 第三行里"序号"和"排序"之间的竖分隔线位置
 
-// 底部那条线（排序 + 统计 + 四个按钮）：排序下拉 / 倒序复选框 / 统计文字的左边缘
-const int kBottomSortX       = 76;    // 排序下拉左边缘
-const int kBottomSortW       = 86;    // 排序下拉宽度
-const int kBottomReverseX    = 172;   // 倒序复选框左边缘
-const int kBottomReverseW    = 90;    // 倒序复选框宽度
-const int kBottomStatsLeft   = 300;   // 统计文字这一块的左边缘
+// 底部那条线：现在只剩统计文字 + 四个按钮（排序 / 倒序已经搬到参数区第三行）
 
 // ----------------------------------------------------------------------------
 // 参数区（3 行）里每个字段的位置
@@ -105,6 +100,9 @@ enum RuleField
     kRfNumberPos,       // 位置（下拉）
     kRfNumberSep,       // 分隔符
 
+    kRfSortMode,        // 排序依据（下拉）
+    kRfSortReverse,     // 倒序（复选框）
+
     kRfCount
 };
 
@@ -119,33 +117,36 @@ struct RuleFieldSpec
     int            height;     // 控件高（下拉要给展开后的高度）
 };
 
+// 参数区三行：三行各自用一个 1px 细边框"框成一组"（白底只描边，不填色），
+// 行距 48、框高 36，行与行之间留 12px 白缝。
+// 网格：左起 padding、右收 920；标签框按字数给紧（2 字 30 / 3 字 44），
+// 标签右边缘到控件固定 5px，所以每个标签都贴着自己的控件，左边不留空。
 const RuleFieldSpec kRuleSpecs[kRfCount] =
 {
-    // ---- 三行用同一套网格：左起 20、右收 920，组与组之间 8px，标签右边缘到控件 5px ----
-    // 所有控件高度都是 kRuleControlHeight（24），同一行基线完全一致。
-
     // ---- 第 0 行：前缀 / 后缀 / 扩展名（下拉 + 值）/ 大小写 ----
-    { L"前缀",    20, 53,  78, 200, 0, 24 },         // 前缀
-    { L"后缀",   286, 53, 344, 200, 0, 24 },         // 后缀
-    { L"扩展名", 552, 53, 610, 100, 0, 24 * 3 },     // 扩展名下拉（不修改 / 修改）
-    { nullptr,   -1, -1, 718,  50, 0, 24 },          // 扩展名填什么（50 宽，够放 .txt）
-    { L"大小写", 776, 53, 834,  86, 0, 24 * 3 },     // 大小写下拉（86 宽正好放下"保持原样"）
+    { L"前缀",    20, 30,  55, 220, 0, 24 },         // 前缀
+    { L"后缀",   283, 30, 318, 220, 0, 24 },         // 后缀
+    { L"扩展名", 546, 44, 595, 100, 0, 24 * 3 },     // 扩展名下拉（不修改 / 修改）
+    { nullptr,   -1, -1, 703,  50, 0, 24 },          // 扩展名填什么（50 宽，够放 .txt）
+    { L"大小写", 761, 44, 810, 110, 0, 24 * 3 },     // 大小写下拉（"保持原样"放得下）
 
-    // ---- 第 1 行：查找（右边「普通 / 正则」按钮）/ 替换为 / 两个复选框 ----
-    { L"查找",    20, 53,  78, 200, 1, 24 },         // 查找
-    { nullptr,   -1, -1, 286,  70, 1, 24 },          // 查找方式按钮（自绘，跟输入框同高）
-    { L"替换为", 364, 53, 422, 286, 1, 24 },         // 替换为
+    // ---- 第 1 行：查找（紧贴「普通 / 正则」按钮）/ 替换为 / 两个复选框 ----
+    { L"查找",    20, 30,  55, 220, 1, 24 },         // 查找
+    { nullptr,   -1, -1, 275,  36, 1, 24 },          // 查找方式按钮（紧贴输入框，宽度收到 36）
+    { L"替换为", 319, 44, 368, 340, 1, 24 },         // 替换为
     { nullptr,   -1, -1, 716,  80, 1, 24 },          // 含扩展名
     { nullptr,   -1, -1, 804, 116, 1, 24 },          // 区分大小写
 
-    // ---- 第 2 行：加序号 / 替换 / 三个数字 / 位置 / 分隔符 ----
-    { nullptr,   -1, -1,  20,  84, 2, 24 },          // 加序号
-    { nullptr,   -1, -1, 112,  53, 2, 24 },          // 替换（勾上就只剩序号，原名不要了）
-    { L"起始",  173, 53, 231,  60, 2, 24 },          // 起始
-    { L"步长",  299, 53, 357,  60, 2, 24 },          // 步长
-    { L"位数",  425, 53, 483,  60, 2, 24 },          // 位数
-    { L"位置",  551, 53, 609, 175, 2, 24 * 3 },      // 位置下拉（2 项）
-    { L"分隔符", 792, 53, 850,  70, 2, 24 }          // 分隔符（70 宽，一般就填一个符号）
+    // ---- 第 2 行：加序号 / 替换 / 三个数字 / 位置 / 分隔符 ｜ 排序 / 倒序 ----
+    { nullptr,   -1, -1,  20,  64, 2, 24 },          // 加序号
+    { nullptr,   -1, -1,  92,  53, 2, 24 },          // 替换（勾上就只剩序号，原名不要了）
+    { L"起始",  153, 30, 188,  54, 2, 24 },          // 起始
+    { L"步长",  250, 30, 285,  54, 2, 24 },          // 步长
+    { L"位数",  347, 30, 382,  54, 2, 24 },          // 位数
+    { L"位置",  444, 30, 479, 120, 2, 24 * 3 },      // 位置下拉（2 项）
+    { L"分隔符", 607, 44, 656,  60, 2, 24 },         // 分隔符（60 宽，一般就填一个符号）
+    { nullptr,   -1, -1, 740,  96, 2, 24 * 5 },      // 排序下拉（4 项，从底部行搬到这里）
+    { nullptr,   -1, -1, 844,  76, 2, 24 }           // 倒序（复选框）
 };
 
 // 控件 ID
@@ -1016,6 +1017,8 @@ void BatchRenameDialog::Layout()
         controls[kRfNumberDigits] = m_hNumberDigits;
         controls[kRfNumberPos]    = m_hNumberPos;
         controls[kRfNumberSep]    = m_hNumberSep;
+        controls[kRfSortMode]     = m_hSortMode;
+        controls[kRfSortReverse]  = m_hSortReverse;
 
         for (int i = 0; i < kRfCount; ++i)
         {
@@ -1047,7 +1050,8 @@ void BatchRenameDialog::Layout()
     // ---- 模板栏：10 个槽一行排满（全是自绘按钮）----
     {
         const int top  = Scale(kTemplateTop) - Scale(2);
-        const int left = Scale(kLeftColumnX);
+        // 这一行跟下面三个分组框同宽：从 padding-8 起步、到 clientRight-padding+8 收尾
+        const int left = Scale(kPadding) - Scale(kRuleBandInset);
 
         const int slotWidth  = Scale(kTemplateSlotW);
         const int slotGap    = Scale(kTemplateSlotGap);
@@ -1091,28 +1095,8 @@ void BatchRenameDialog::Layout()
     m_cancelRect.bottom = m_applyRect.bottom;
     m_cancelRect.top    = m_applyRect.top;
 
-    // ---- 底部这一行左边：排序下拉 + 倒序复选框（跟四个按钮同高，垂直居中）----
-    {
-        const int sortHeight = Scale(24);
-        const int sortY      = m_applyRect.top + (buttonHeight - sortHeight) / 2;
-
-        if (m_hSortMode != nullptr)
-        {
-            ::MoveWindow(m_hSortMode, Scale(kBottomSortX), sortY,
-                         Scale(kBottomSortW), Scale(24 * 5), TRUE);
-        }
-
-        if (m_hSortReverse != nullptr)
-        {
-            const int checkHeight = Scale(22);
-            ::MoveWindow(m_hSortReverse, Scale(kBottomReverseX),
-                         m_applyRect.top + (buttonHeight - checkHeight) / 2,
-                         Scale(kBottomReverseW), checkHeight, TRUE);
-        }
-    }
-
-    // ---- 统计文字：挤在排序和「取消」中间，居中显示 ----
-    m_statsRect.left   = Scale(kBottomStatsLeft);
+    // ---- 底部这一行左边只剩统计文字了（排序 / 倒序已经搬到参数区第三行右侧）----
+    m_statsRect.left   = padding;
     m_statsRect.right  = m_cancelRect.left - Scale(12);
     m_statsRect.top    = m_applyRect.top;
     m_statsRect.bottom = m_applyRect.bottom;
@@ -2772,6 +2756,15 @@ void BatchRenameDialog::Draw(HDC dc)
         ::DeleteObject(groupBorderBrush);
     }
 
+    // ---- 第三行右侧的排序格：用一条竖线跟左边的"序号"部分隔开，等于单独圈成一格 ----
+    {
+        const int rowTop    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2;
+        const int rowBottom = rowTop + Scale(kRuleBandHeight);
+
+        ::MoveToEx(dc, Scale(kRuleSortDividerX), rowTop + Scale(1), nullptr);
+        ::LineTo(dc, Scale(kRuleSortDividerX), rowBottom - Scale(1));
+    }
+
     ::SelectObject(dc, oldPen);
     ::DeleteObject(dividerPen);
 
@@ -2819,7 +2812,7 @@ void BatchRenameDialog::Draw(HDC dc)
                (m_regexPreset == 0) ? L"普通" : L"正则",
                m_hotRegexButton, m_pressedRegexButton, false);
 
-    // ---- 底部统计（和排序、四个按钮同一条线，居中显示）----
+    // ---- 底部统计（和四个按钮同一条线，在左边空白里居中）----
     int changedCount = 0;
     int conflictCount = 0;
 
