@@ -49,20 +49,19 @@ const int kListHeight = 246;
 
 // 模板栏（预览列表和规则区之间那一条）：固定 10 个槽，一行排满
 const int kTemplateTop     = 342;
-const int kTemplateSlotW   = 88;   // 每个模板按钮宽（刚好让 10 个槽从 12 排到 928，跟下面三行分组框同宽）
-const int kTemplateSlotGap = 4;    // 槽间距（原来是 8，收一半）
+const int kTemplateSlotGap = 4;    // 槽间距（原来是 8，收一半；槽宽在 Layout 里按表格宽度均分算）
 const int kTemplateSlotH   = 30;   // 槽高
 
 // 底部一排按钮（取消 / 清空 / 保存 / 应用）
 const int kBottomButtonW   = 90;
 const int kBottomButtonGap = 12;
 
-// 参数区：三行，每行一条淡底"分组条"，行内控件统一个高度；
-// kRuleRowHeight 是行与行的间距（含分组条之间的空隙），kRuleBandHeight 是分组条高度
+// 参数区：三行，每行一个 1px 细边框"分组框"，行内控件统一高度；
+// kRuleRowHeight 是行与行的间距，kRuleBandHeight 是分组框高度
 const int kRuleTop          = 398;
-const int kRuleRowHeight    = 48;   // 行距（比分组条高，多出来的部分就是行与行之间的白缝）
-const int kRuleBandHeight   = 36;   // 每行分组底色条的高度
-const int kRuleBandInset    = 8;    // 分组条比内容左右各多出多少
+const int kRuleRowHeight    = 48;   // 行距（比分组框高，多出来的部分就是行与行之间的白缝）
+const int kRuleBandHeight   = 36;   // 每行分组框的高度
+const int kRuleBandInset    = 0;    // 分组框跟表格同宽（都从左 padding 到右 padding，不再外扩）
 const int kRuleControlHeight = 24;  // 行内所有控件（输入框 / 下拉 / 复选框 / 按钮）统一高度
 const int kRuleControlTop    = 6;   // 控件相对分组条顶部的偏移：(36-24)/2
 const int kRuleRightX        = 920; // 三行内容的右边界，统一收在这一列
@@ -1050,11 +1049,14 @@ void BatchRenameDialog::Layout()
     // ---- 模板栏：10 个槽一行排满（全是自绘按钮）----
     {
         const int top  = Scale(kTemplateTop) - Scale(2);
-        // 这一行跟下面三个分组框同宽：从 padding-8 起步、到 clientRight-padding+8 收尾
-        const int left = Scale(kPadding) - Scale(kRuleBandInset);
-
-        const int slotWidth  = Scale(kTemplateSlotW);
-        const int slotGap    = Scale(kTemplateSlotGap);
+        // 这一行跟表格（预览列表）同宽：从 padding 起步、到 clientRight-padding 收尾。
+        // 十个槽平均分这段宽度：每格 cell = 总宽/10，槽宽 = cell - 间距，
+        // 最后一格补满到右边界（这样整排正好跟表格右边缘对齐，不会差几个像素）。
+        const int left     = Scale(kPadding);
+        const int totalW   = (clientRect.right - Scale(kPadding)) - left;
+        const int count    = static_cast<int>(BatchRenameDialog::kTemplateSlotCount);
+        const int cell     = (count > 0) ? (totalW / count) : totalW;
+        const int slotGap  = Scale(kTemplateSlotGap);
         const int slotHeight = Scale(kTemplateSlotH);
 
         m_templateRects.resize(BatchRenameDialog::kTemplateSlotCount);
@@ -1062,10 +1064,12 @@ void BatchRenameDialog::Layout()
         for (size_t i = 0; i < m_templateRects.size(); ++i)
         {
             RECT& rect = m_templateRects[i];
+            const int index = static_cast<int>(i);
 
-            rect.left   = left + static_cast<int>(i) * (slotWidth + slotGap);
-            rect.top    = top;
-            rect.right  = rect.left + slotWidth;
+            rect.left  = left + index * cell;
+            rect.top   = top;
+            // 最后一格一直铺到右边界，其余格右边留 slotGap 的间距
+            rect.right = rect.left + ((index == count - 1) ? cell : cell - slotGap);
             rect.bottom = rect.top + slotHeight;
         }
     }
@@ -1110,10 +1114,6 @@ void BatchRenameDialog::EnableRuleControls()
     const bool numberOn = (m_hNumberEnable != nullptr) &&
                           (::SendMessageW(m_hNumberEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-    // 「替换」勾上 = 原文件名整个不要了，只剩序号，这时位置和分隔符都没意义
-    const bool replaceOn = (m_hNumberReplace != nullptr) &&
-                           (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
     // 注意：「替换」这个复选框故意不放进禁用列表。
     // 系统在"禁用"状态会给复选框自己刷一块 COLOR_3DFACE(240,240,240) 的灰底，
     // 父窗口无论返回什么刷子都盖不住，白底分组框里就冒出一个灰方块。
@@ -1126,12 +1126,13 @@ void BatchRenameDialog::EnableRuleControls()
         }
     }
 
-    const bool attachOn = numberOn && !replaceOn;   // 序号要跟原名拼在一起时才用得上
+    // 「位置」「分隔符」一直保持可用（勾了「替换」也不会变灰）：
+    // 替换只是把原名整段顶掉，这两项在替换态暂时不参与计算，取消替换后照原样生效。
     for (HWND control : { m_hNumberPos, m_hNumberSep })
     {
         if (control != nullptr)
         {
-            ::EnableWindow(control, attachOn ? TRUE : FALSE);
+            ::EnableWindow(control, TRUE);
         }
     }
 
