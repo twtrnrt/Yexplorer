@@ -349,6 +349,19 @@ private:
     // 进压缩包容器里浏览（OpenContainerEntry 里「用本程序打开」那条路）
     void NavigateContainerEntry(const shell::ShellEntry& entry);
 
+    // ----------------------------------------------------------------
+    // 打开容器内部的一个文件：先解成只读临时文件，再打开那个临时文件
+    //
+    // 和资源管理器一个做法：容器里的路径（C:\a.rar\inner.txt）磁盘上不存在，
+    // 直接把路径交给 Shell 打不开。所以先解到
+    //   %TEMP%\<本进程固定的 guid>_<压缩包文件名>\
+    // 再启动解出来的真实文件。
+    //
+    // 返回解出来的真实路径；失败返回空串并填 error（中文，可直接弹给用户）。
+    // ----------------------------------------------------------------
+    std::wstring ExtractContainerEntryToTemp(const std::wstring& virtualPath,
+                                             std::wstring& error);
+
     // 把某条程序的存在状态记进配置（只在值真的变了才写盘，避免频繁落盘）
     void SetOpenWithProgramAlive(const std::wstring& extension,
                                  const std::wstring& programKey,
@@ -535,6 +548,12 @@ private:
     // ----------------------------------------------------------------
     bool                                         m_currentIsContainer = false;
     bool                                         m_currentIsZipContainer = false;
+
+    // 解容器内部文件用的临时目录前缀（"{guid}_" 这一段）
+    //
+    // 只在本进程第一次需要时生成一次：同一个压缩包反复双击里面的文件，
+    // 会一直用同一个临时目录（%TEMP%\{guid}_{压缩包名}），不会每次都堆一个新目录。
+    std::wstring                                 m_containerTempTag;
 
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
 

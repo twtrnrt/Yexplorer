@@ -57,6 +57,30 @@ HRESULT DeleteShellItemPidls(const std::vector<std::vector<unsigned char>>& pidl
 // 成功时 newFolderPath 返回新建出来的完整路径
 HRESULT CreateNewFolder(const std::wstring& directory, std::wstring& newFolderPath);
 
+// ----------------------------------------------------------------------------
+// 把压缩包容器内部的一项「提取」到普通目录（也就是解出来一个真实文件）
+//
+// 用途：容器里双击文件要先解到临时目录再打开（和资源管理器一个做法），
+// 以后"容器内复制到外部"也走这一条。
+//
+// 为什么不能用 IFileOperation：容器里的项（C:\a.rar\inner.txt）磁盘上不存在，
+// SHCreateItemFromParsingName 对 rar/7z/tar 直接返回 0x80070002，
+// 只有 SHParseDisplayName 能拿到 PIDL；拿到 PIDL 后用
+// IShellFolder::BindToObject(IID_IStream) 把内容读出来，自己写文件。
+//
+// virtualPath    ：容器内部项的虚拟路径（C:\a.rar\sub\inner.txt）
+// containerRoot  ：它所属的压缩包完整路径（C:\a.rar）——走 Shell 自动化通道要用
+// relativePath   ：这一项在包内的相对路径（sub\inner.txt），决定落到目标目录的哪个子目录
+// targetDirectory：解到哪个普通目录（不存在会自动建）
+// error          ：失败时的原因（中文，可直接给用户看）
+// 返回：解出来的真实文件完整路径；失败返回空串
+// ----------------------------------------------------------------------------
+std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
+                                   const std::wstring& containerRoot,
+                                   const std::wstring& relativePath,
+                                   const std::wstring& targetDirectory,
+                                   std::wstring& error);
+
 // 重命名一项（F2）
 // oldPath：现在的完整路径；newName：新名字（只给名字，不带路径）
 // 名字里含非法字符会直接返回失败，不弹系统框

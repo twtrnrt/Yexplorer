@@ -664,4 +664,451 @@ HRESULT CreateShortcut(const std::wstring& targetPath, const std::wstring& linkP
     return persistFile->Save(linkPath.c_str(), TRUE);
 }
 
+namespace
+{
+
+// HRESULT 转成 "0x80070002" 这种文本，写日志和提示框用
+std::wstring HResultText(HRESULT hr)
+{
+    wchar_t buffer[32] = {};
+    ::_snwprintf_s(buffer, _countof(buffer), _TRUNCATE, L"0x%08X",
+                  static_cast<unsigned int>(hr));
+    return buffer;
+}
+
+// 一级一级建目录；目录已经存在也算成功
+bool EnsureDirectoryExists(const std::wstring& directory)
+{
+    if (directory.empty())
+    {
+        return false;
+    }
+
+    DWORD attributes = ::GetFileAttributesW(directory.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES)
+    {
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+
+    // 先把上级建出来，再建自己
+    std::wstring parent = ParentDirectoryOf(directory);
+    if (!parent.empty() && parent != directory && !EnsureDirectoryExists(parent))
+    {
+        return false;
+    }
+
+    ::CreateDirectoryW(directory.c_str(), nullptr);
+
+    attributes = ::GetFileAttributesW(directory.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// ----------------------------------------------------------------------------
+// 备用提取通道：借 Shell.Application（资源管理器自己的自动化对象）来复制
+//
+// 为什么需要这条路：
+//   WinRAR 给 rar / 7z / tar 提供的"只读压缩包处理器"不支持 IStream
+//   （BindToObject 要 IStream 会返回 0x80004002 E_NOINTERFACE），
+//   但它自己的"复制"通道是可用的：
+//     Shell.Application.Namespace(压缩包).ParseName(包内路径)   → 拿到那一项
+//     Shell.Application.Namespace(目标目录).CopyHere(那一项)     → 就解出来了
+//   实测 zip / rar / 7z / tar 四种都能解出来（含包里的多级子目录）。
+//
+// 注意 CopyHere 是异步的：调用返回时文件可能还没落地，调用方要轮询等。
+// ----------------------------------------------------------------------------
+
+// 按名字调一个自动化方法/属性（拿不到 ITypeInfo，只能走 GetIDsOfNames 这一套）
+HRESULT InvokeAutomation(IDispatch* object, const wchar_t* name,
+                         VARIANT* arguments, unsigned int argumentCount, VARIANT* result)
+{
+    if (object == nullptr)
+    {
+        return E_POINTER;
+    }
+
+    LPOLESTR nameList[1] = {const_cast<LPOLESTR>(name)};
+    DISPID id = 0;
+
+    HRESULT hr = object->GetIDsOfNames(IID_NULL, nameList, 1, LOCALE_SYSTEM_DEFAULT, &id);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    DISPPARAMS parameters = {};
+    parameters.rgvarg = arguments;
+    parameters.cArgs = argumentCount;
+
+    // DISPPARAMS 的参数是"最后一个参数在前"，调用方自己按这个顺序摆好
+    return object->Invoke(id, IID_NULL, LOCALE_SYSTEM_DEFAULT,
+                          DISPATCH_METHOD | DISPATCH_PROPERTYGET,
+                          &parameters, result, nullptr, nullptr);
+}
+
+// 把 BSTR 参数和返回值都收拾干净的用法：这里手写，注意每一处 VariantClear
+HRESULT GetAutomationFolder(IDispatch* shellApp, const std::wstring& path,
+                            wil::com_ptr<IDispatch>& folder)
+{
+    VARIANT argument;
+    ::VariantInit(&argument);
+    argument.vt = VT_BSTR;
+    argument.bstrVal = ::SysAllocString(path.c_str());
+
+    VARIANT value;
+    ::VariantInit(&value);
+
+    HRESULT hr = InvokeAutomation(shellApp, L"Namespace", &argument, 1, &value);
+
+    ::VariantClear(&argument);
+
+    if (FAILED(hr) || value.vt != VT_DISPATCH || value.pdispVal == nullptr)
+    {
+        ::VariantClear(&value);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    folder.attach(value.pdispVal);   // 接管这个引用，不需要再 VariantClear
+    return S_OK;
+}
+
+} // namespace
+
+// 走 Shell 自动化把一项解出来（成功时文件已经落在 outputPath）
+bool ExtractViaShellAutomation(const std::wstring& containerRoot,
+                               const std::wstring& innerPath,
+                               const std::wstring& outputPath,
+                               std::wstring& error)
+{
+    wil::com_ptr<IDispatch> shellApp;
+
+    // 用 ProgID 让 COM 自己去找 CLSID：写死 GUID 在个别机器上会撞到
+    // "类没有注册"（REGDB_E_CLASSNOTREG），按名字找更稳
+    CLSID shellApplicationClsid = {};
+    HRESULT hr = ::CLSIDFromProgID(L"Shell.Application", &shellApplicationClsid);
+
+    if (FAILED(hr))
+    {
+        error = L"系统里找不到 Shell.Application（" + HResultText(hr) + L"）";
+        return false;
+    }
+
+    hr = ::CoCreateInstance(shellApplicationClsid, nullptr, CLSCTX_ALL,
+                            IID_PPV_ARGS(shellApp.put()));
+    if (FAILED(hr) || shellApp == nullptr)
+    {
+        error = L"启动系统 Shell 复制通道失败（" + HResultText(hr) + L"）";
+        return false;
+    }
+
+    // ---- 1) 打开压缩包，拿到它内部的那一项 ----
+    wil::com_ptr<IDispatch> containerFolder;
+    if (FAILED(GetAutomationFolder(shellApp.get(), containerRoot, containerFolder)))
+    {
+        error = L"打不开这个压缩包（" + containerRoot + L"）";
+        return false;
+    }
+
+    VARIANT nameArgument;
+    ::VariantInit(&nameArgument);
+    nameArgument.vt = VT_BSTR;
+    nameArgument.bstrVal = ::SysAllocString(innerPath.c_str());
+
+    VARIANT itemValue;
+    ::VariantInit(&itemValue);
+
+    hr = InvokeAutomation(containerFolder.get(), L"ParseName", &nameArgument, 1, &itemValue);
+    ::VariantClear(&nameArgument);
+
+    if (FAILED(hr) || itemValue.vt != VT_DISPATCH || itemValue.pdispVal == nullptr)
+    {
+        ::VariantClear(&itemValue);
+        error = L"压缩包里找不到这一项：" + innerPath;
+        return false;
+    }
+
+    wil::com_ptr<IDispatch> folderItem;
+    folderItem.attach(itemValue.pdispVal);
+
+    // ---- 2) 准备落地目录 ----
+    //
+    // CopyHere 只认"文件夹"，而且落地时用的是项自己的名字，
+    // 所以这里定到 outputPath 的父目录（对应包内那一层子目录），
+    // 落地后再挪到 outputPath 这个准确位置，避免包内不同目录的同名文件互相覆盖。
+    const std::wstring landingDirectory = ParentDirectoryOf(outputPath);
+
+    wil::com_ptr<IDispatch> destinationFolder;
+    if (FAILED(GetAutomationFolder(shellApp.get(), landingDirectory, destinationFolder)))
+    {
+        error = L"打不开临时目录：" + landingDirectory;
+        return false;
+    }
+
+    // 这一项在包里的名字（落地文件名）
+    std::wstring itemName;
+
+    {
+        VARIANT itemNameValue;
+        ::VariantInit(&itemNameValue);
+
+        if (SUCCEEDED(InvokeAutomation(folderItem.get(), L"Name", nullptr, 0, &itemNameValue)))
+        {
+            if (itemNameValue.vt == VT_BSTR && itemNameValue.bstrVal != nullptr)
+            {
+                itemName = itemNameValue.bstrVal;
+            }
+            ::VariantClear(&itemNameValue);
+        }
+    }
+
+    if (itemName.empty())
+    {
+        // 拿不到名字就用目标文件名兜底
+        size_t lastSeparator = outputPath.find_last_of(L"\\/");
+        itemName = (lastSeparator == std::wstring::npos)
+                       ? outputPath
+                       : outputPath.substr(lastSeparator + 1);
+    }
+
+    std::wstring landingPath = landingDirectory;
+
+    if (landingPath.back() != L'\\' && landingPath.back() != L'/')
+    {
+        landingPath += L'\\';
+    }
+    landingPath += itemName;
+
+    // ---- 3) 复制（CopyHere(项, 标志)）----
+    // 标志 0x14 = 静默 + 不弹确认框，和资源管理器后台解压一个效果
+    VARIANT copyArguments[2];
+    ::VariantInit(&copyArguments[0]);
+    ::VariantInit(&copyArguments[1]);
+
+    copyArguments[0].vt = VT_I4;
+    copyArguments[0].lVal = 0x14;
+
+    copyArguments[1].vt = VT_DISPATCH;
+    copyArguments[1].pdispVal = folderItem.get();
+    folderItem.get()->AddRef();     // VariantClear 会 Release，这里先补一个引用
+
+    hr = InvokeAutomation(destinationFolder.get(), L"CopyHere", copyArguments, 2, nullptr);
+
+    ::VariantClear(&copyArguments[0]);
+    ::VariantClear(&copyArguments[1]);
+
+    if (FAILED(hr))
+    {
+        error = L"系统复制通道拒绝了这个操作（" + HResultText(hr) + L"）";
+        return false;
+    }
+
+    // ---- 4) 等文件真的落盘（CopyHere 是异步的，最多等 5 秒）----
+    bool landed = false;
+
+    for (int attempt = 0; attempt < 100; ++attempt)
+    {
+        DWORD attributes = ::GetFileAttributesW(landingPath.c_str());
+
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            landed = true;
+            break;
+        }
+
+        ::Sleep(50);
+    }
+
+    if (!landed)
+    {
+        error = L"复制超时，文件没有出现：" + landingPath;
+        return false;
+    }
+
+    // ---- 5) 挪到准确位置（名字不一样时改名），再设成只读 ----
+    if (_wcsicmp(landingPath.c_str(), outputPath.c_str()) != 0)
+    {
+        if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+            ::DeleteFileW(outputPath.c_str());
+        }
+
+        if (!::MoveFileExW(landingPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+        {
+            error = L"解出来的文件挪不到目标位置：" + outputPath;
+            return false;
+        }
+    }
+
+    // 只读：和系统解出来的临时文件一样，防止把包里的原件改坏
+    DWORD outputAttributes = ::GetFileAttributesW(outputPath.c_str());
+
+    if (outputAttributes != INVALID_FILE_ATTRIBUTES)
+    {
+        ::SetFileAttributesW(outputPath.c_str(), outputAttributes | FILE_ATTRIBUTE_READONLY);
+    }
+
+    return true;
+}
+
+std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
+                                   const std::wstring& containerRoot,
+                                   const std::wstring& relativePath,
+                                   const std::wstring& targetDirectory,
+                                   std::wstring& error)
+{
+    error.clear();
+
+    if (virtualPath.empty() || targetDirectory.empty())
+    {
+        error = L"路径参数为空";
+        return L"";
+    }
+
+    // ---- 这一项在包内的相对路径（决定落到目标目录里的哪个子目录）----
+    std::wstring innerPath = relativePath;
+
+    while (!innerPath.empty() && (innerPath.front() == L'\\' || innerPath.front() == L'/'))
+    {
+        innerPath.erase(innerPath.begin());
+    }
+
+    if (innerPath.empty())
+    {
+        // 没给相对路径就用虚拟路径自己的文件名
+        size_t lastSeparator = virtualPath.find_last_of(L"\\/");
+        innerPath = (lastSeparator == std::wstring::npos)
+                        ? virtualPath
+                        : virtualPath.substr(lastSeparator + 1);
+    }
+
+    // ---- 目标文件完整路径 ----
+    std::wstring outputPath = targetDirectory;
+
+    if (outputPath.back() != L'\\' && outputPath.back() != L'/')
+    {
+        outputPath += L'\\';
+    }
+    outputPath += innerPath;
+
+    for (wchar_t& ch : outputPath)
+    {
+        if (ch == L'/')
+        {
+            ch = L'\\';
+        }
+    }
+
+    if (!EnsureDirectoryExists(ParentDirectoryOf(outputPath)))
+    {
+        error = L"建不出临时目录：" + ParentDirectoryOf(outputPath);
+        return L"";
+    }
+
+    // ---- 上一次留下的临时文件先清掉（它是只读的，得先去掉只读属性）----
+    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(outputPath.c_str());
+    }
+
+    // ---- 解析内部项的 PIDL（容器里的路径只有 PIDL 认得出来）----
+    PIDLIST_ABSOLUTE absolutePidl = nullptr;
+    HRESULT hr = ::SHParseDisplayName(virtualPath.c_str(), nullptr, &absolutePidl, 0, nullptr);
+
+    if (FAILED(hr) || absolutePidl == nullptr)
+    {
+        error = L"定位容器内部项失败（" + HResultText(hr) + L"）";
+        return L"";
+    }
+
+    // ---- 绑定它所在的文件夹，拿到"最后一段"的 PIDL ----
+    wil::com_ptr<IShellFolder> parentFolder;
+    PCUITEMID_CHILD childPidl = nullptr;
+
+    hr = ::SHBindToParent(absolutePidl, IID_PPV_ARGS(parentFolder.put()), &childPidl);
+
+    if (FAILED(hr) || parentFolder == nullptr || childPidl == nullptr)
+    {
+        ::CoTaskMemFree(absolutePidl);
+        error = L"定位容器内部项失败（" + HResultText(hr) + L"）";
+        return L"";
+    }
+
+    // ---- 读流：压缩包处理器把这一项的内容当成文件流交给我们 ----
+    wil::com_ptr<IStream> stream;
+    hr = parentFolder->BindToObject(childPidl, nullptr, IID_PPV_ARGS(stream.put()));
+
+    ::CoTaskMemFree(absolutePidl);   // childPidl 的内存属于它，用完再放
+
+    if (FAILED(hr) || stream == nullptr)
+    {
+        // WinRAR 给 rar / 7z / tar 的只读处理器要 IStream 会直接拒绝
+        // （实测 0x80004002 E_NOINTERFACE），这时改走 Shell 自动化那条复制通道
+        // （见上面 ExtractViaShellAutomation 的注释）。zip 一般走不到这里。
+        if (ExtractViaShellAutomation(containerRoot, innerPath, outputPath, error))
+        {
+            return outputPath;
+        }
+        return L"";
+    }
+
+    // ---- 写到目标文件：设成只读，跟系统解出来的临时文件一致（防止改坏原件）----
+    HANDLE file = ::CreateFileW(outputPath.c_str(),
+                                GENERIC_WRITE,
+                                0,
+                                nullptr,
+                                CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_READONLY,
+                                nullptr);
+
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        error = L"建不出临时文件：" + outputPath;
+        return L"";
+    }
+
+    // ---- 一块一块读出来写进文件 ----
+    std::vector<char> buffer(64 * 1024);
+    bool succeeded = true;
+
+    while (true)
+    {
+        ULONG readBytes = 0;
+        hr = stream->Read(buffer.data(), static_cast<ULONG>(buffer.size()), &readBytes);
+
+        if (FAILED(hr))
+        {
+            succeeded = false;
+            error = L"读压缩包内容失败（" + HResultText(hr) + L"）";
+            break;
+        }
+
+        if (readBytes == 0)
+        {
+            break;   // 读完了
+        }
+
+        DWORD writtenBytes = 0;
+        if (!::WriteFile(file, buffer.data(), readBytes, &writtenBytes, nullptr) ||
+            writtenBytes != readBytes)
+        {
+            succeeded = false;
+            error = L"写临时文件失败：" + outputPath;
+            break;
+        }
+    }
+
+    ::CloseHandle(file);
+
+    if (!succeeded)
+    {
+        // 写了一半的文件不要留下
+        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(outputPath.c_str());
+        return L"";
+    }
+
+    return outputPath;
+}
+
 } // namespace shellops

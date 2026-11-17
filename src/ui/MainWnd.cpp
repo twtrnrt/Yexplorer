@@ -4061,6 +4061,142 @@ void MainWindow::NavigateContainerEntry(const shell::ShellEntry& entry)
 }
 
 // ============================================================================
+// 打开容器内部的文件（先解成临时文件再打开）
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 这一项是不是「压缩包内部」的虚拟项？是的话它属于哪个压缩包？
+//
+// 判断方法（不碰 COM、不查注册表，只查文件属性，很快）：
+//   路径本身在磁盘上不存在 → 是虚拟路径，往上逐级找；
+//   找到第一段"磁盘上真的是文件"的 → 那就是压缩包本身。
+//
+// 例：C:\a\t.rar\sub\inner.txt
+//        inner.txt 磁盘上没有 → 往上
+//        sub       磁盘上没有 → 往上
+//        t.rar     磁盘上有、且不是目录 → 容器根 = C:\a\t.rar
+//
+// 返回：压缩包完整路径；不在容器里（比如磁盘上的普通文件）返回空串
+// ----------------------------------------------------------------------------
+static std::wstring FindContainerRootPath(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return L"";
+    }
+
+    // 路径本身在磁盘上（是文件或目录）→ 这是普通路径，不在任何容器里
+    if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        return L"";
+    }
+
+    std::wstring current = path;
+
+    while (true)
+    {
+        size_t lastSeparator = current.find_last_of(L"\\/");
+        if (lastSeparator == std::wstring::npos || lastSeparator <= 2)
+        {
+            return L"";
+        }
+
+        current = current.substr(0, lastSeparator);
+
+        DWORD attributes = ::GetFileAttributesW(current.c_str());
+
+        if (attributes != INVALID_FILE_ATTRIBUTES)
+        {
+            // 是文件 → 这就是压缩包；是目录 → 虚拟路径上面接了个真实目录，不在容器里
+            return ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) ? current : L"";
+        }
+    }
+}
+
+std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtualPath,
+                                                     std::wstring& error)
+{
+    error.clear();
+
+    if (virtualPath.empty())
+    {
+        error = L"路径为空";
+        return L"";
+    }
+
+    // ---- 1) 往上找容器根（压缩包本身）----
+    const std::wstring containerRoot = FindContainerRootPath(virtualPath);
+
+    if (containerRoot.empty())
+    {
+        error = L"找不到这个文件所属的压缩包";
+        return L"";
+    }
+
+    // ---- 2) 这一项在包内的相对路径（保留包里的子目录结构）----
+    std::wstring innerPath = virtualPath.substr(containerRoot.size());
+
+    while (!innerPath.empty() && (innerPath.front() == L'\\' || innerPath.front() == L'/'))
+    {
+        innerPath.erase(innerPath.begin());
+    }
+
+    // ---- 3) 临时目录：%TEMP%\{本进程固定的 guid}_{压缩包文件名} ----
+    //
+    // 用固定的 guid（整个进程只生成一次），好处是同一个压缩包反复双击里面的文件
+    // 都解到同一个目录，不会每点一次就在临时目录里堆一个新的文件夹。
+    if (m_containerTempTag.empty())
+    {
+        GUID guid = {};
+        if (SUCCEEDED(::CoCreateGuid(&guid)))
+        {
+            wchar_t guidText[64] = {};
+            if (::StringFromGUID2(guid, guidText, _countof(guidText)) > 0)
+            {
+                std::wstring text(guidText);
+
+                // StringFromGUID2 给的是 {769C474B-...} 这种带花括号的形式，去掉两边
+                if (text.size() >= 2 && text.front() == L'{' && text.back() == L'}')
+                {
+                    text = text.substr(1, text.size() - 2);
+                }
+
+                m_containerTempTag = text + L"_";
+            }
+        }
+
+        if (m_containerTempTag.empty())
+        {
+            // 极端情况兜底：拿不到 GUID 就用运行时长和进程号拼一个
+            m_containerTempTag = L"yexplorer_" +
+                                 std::to_wstring(::GetTickCount64()) + L"_" +
+                                 std::to_wstring(::GetCurrentProcessId()) + L"_";
+        }
+    }
+
+    wchar_t tempPath[MAX_PATH] = {};
+    if (::GetTempPathW(_countof(tempPath), tempPath) == 0)
+    {
+        error = L"取不到系统临时目录";
+        return L"";
+    }
+
+    std::wstring containerName = containerRoot;
+    size_t nameSeparator = containerName.find_last_of(L"\\/");
+    if (nameSeparator != std::wstring::npos)
+    {
+        containerName = containerName.substr(nameSeparator + 1);
+    }
+
+    // GetTempPathW 返回的路径自带末尾反斜杠，直接拼
+    std::wstring tempDirectory = std::wstring(tempPath) + m_containerTempTag + containerName;
+
+    // ---- 4) 真正去解（先读流，读不出来走 Shell 复制通道；失败原因填在 error 里）----
+    return shellops::ExtractContainerEntry(virtualPath, containerRoot, innerPath,
+                                           tempDirectory, error);
+}
+
+// ============================================================================
 // 排序
 // ============================================================================
 
@@ -5420,6 +5556,58 @@ void MainWindow::OnItemActivated(size_t index)
     {
         // 同上：日志里留下"双击了哪一项"，后面跟的就是它的打开结果
         Logger::Info(L"双击：[" + entry.name + L"] " + entry.fullPath);
+
+        // ----------------------------------------------------------
+        // 压缩包容器内部的文件：先解成只读临时文件，再打开那个文件
+        //
+        // 为什么不能直接打开：容器里的路径（C:\a.rar\inner.txt）磁盘上并不存在，
+        // 交给 Shell 会失败（rar/7z/tar 实测打不开，zip 也不稳）。
+        // 资源管理器也是这么干的——先解到 %TEMP%\ 下的临时目录，再打开解出来的那个文件。
+        //
+        // 判定不用 m_currentIsContainer：那个标记只在"当前目录就是压缩包本身"时为真，
+        // 进了包里的子目录（t.rar\sub）就变成 false 了，这里按路径自己往上找容器根。
+        // ----------------------------------------------------------
+        if (!FindContainerRootPath(entry.fullPath).empty())
+        {
+            std::wstring extractError;
+            const std::wstring extractedPath = ExtractContainerEntryToTemp(entry.fullPath,
+                                                                          extractError);
+
+            if (extractedPath.empty())
+            {
+                Logger::Error(L"提取容器内部文件失败：" + entry.fullPath + L"，原因：" + extractError);
+
+                std::wstring message = L"打开失败：\r\n" + extractError;
+                ::MessageBoxW(m_hWnd, message.c_str(), L"打开文件", MB_OK | MB_ICONWARNING);
+                return;
+            }
+
+            Logger::Info(L"已提取到临时文件：" + extractedPath);
+
+            // 解出来就是普通文件了，之后和普通文件走同一套：
+            // 先查「打开方式」账本（比如 .pptx 会按账本用 WPS 打开），没有就交给系统。
+            const std::wstring extractedExtension = shell::ExtensionKeyForPath(extractedPath);
+
+            if (shell::IsExtensionHandled(extractedExtension))
+            {
+                if (TryOpenFileWithOurChoice(extractedPath, extractedExtension))
+                {
+                    return;
+                }
+            }
+
+            HINSTANCE extractedOpenResult = ::ShellExecuteW(m_hWnd, L"open", extractedPath.c_str(),
+                                                            nullptr, nullptr, SW_SHOWNORMAL);
+
+            if (reinterpret_cast<INT_PTR>(extractedOpenResult) <= 32)
+            {
+                Logger::Error(L"打开提取出来的临时文件失败：" + extractedPath);
+                ::MessageBoxW(m_hWnd,
+                              L"打开失败：系统里没有能打开这个文件的程序。",
+                              L"打开文件", MB_OK | MB_ICONWARNING);
+            }
+            return;
+        }
 
         // ----------------------------------------------------------
         // 先走我们自己记的「打开方式」账本
