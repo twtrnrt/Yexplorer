@@ -175,11 +175,16 @@ private:
 
     // 两段式改名：先把所有项改成同目录下的临时名，再改成目标名；
     // 任何一条失败就把已经动过的倒序改回原名，一个都不留。
+    // skipProblemRow 为 true 时，预览表里标红（state==2）的行整行跳过，只改其它行。
     // 成功返回 true；失败返回 false，并把中文原因写进 errorText。
-    bool PerformBatchRename(std::wstring& errorText);
+    bool PerformBatchRename(std::wstring& errorText, bool skipProblemRow = false);
 
     // 居中提示框（MessageBox 会跑到屏幕角落，这里和"模板没保存"那个提醒一样用 TaskDialog）
     void ShowCenteredMessage(const wchar_t* instruction, const std::wstring& content, bool warning);
+
+    // 有异常文件时的三选弹窗：跳过异常继续重命名 / 返回修改 / 取消重命名。
+    // 返回值用文件里定义的 kMsgAbnormal* 编号（直接关掉弹窗或按 Esc 当作"返回修改"）。
+    int ShowAbnormalChoice(const wchar_t* instruction, const std::wstring& content);
 
     // 只重画底部那条状态行（统计文字 / 改名进度 / 失败原因都写在这）
     void UpdateStatusLine();

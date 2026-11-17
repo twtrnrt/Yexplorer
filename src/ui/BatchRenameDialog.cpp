@@ -21,6 +21,7 @@
 #include <uxtheme.h>   // 主题绘制（复选框等控件的原生外观）
 
 #include <algorithm>
+#include <map>
 #include <string.h>
 #include <cwctype>
 #include <regex>
@@ -134,15 +135,18 @@ const RuleFieldSpec kRuleSpecs[kRfCount] =
     { L"大小写", 783, 44, 832,  80, 0, 24 * 3 },     // 大小写下拉（宽度 80 够显示「保持原样」）
 
     // ---- 第 1 行：查找（紧贴「普通 / 正则」按钮）/ 替换为 + 替换范围 + 替换几处 / 两个复选框 ----
+    // 「查找」和「替换为」按用户要求调成一样长（都是 234）；
     // 「替换为」右边紧挨着两格：先一个下拉（替换全部 / 从左往右 / 从右往左），
-    // 再一个 30px 窄框填"替换几处"，两格都不留间隔；没勾范围的全部时窄框才可填
-    { L"查找",    28, 30,  63, 285, 1, 24 },         // 查找
-    { nullptr,   -1, -1, 348,  36, 1, 24 },          // 查找方式按钮（紧贴输入框，宽度 36）
-    { L"替换为", 392, 44, 441, 179, 1, 24 },         // 替换为（让出右边 106px 给范围和次数）
-    { nullptr,   -1, -1, 620,  76, 1, 24 * 3 },      // 替换范围下拉（宽度 76 够显示「替换全部」）
-    { nullptr,   -1, -1, 696,  30, 1, 25 },          // 替换几处（30px 窄框，紧贴下拉，按用户要求向下加高 1px）
-    { nullptr,   -1, -1, 734,  80, 1, 24 },          // 含扩展名
-    { nullptr,   -1, -1, 822,  90, 1, 24 },          // 区分大小写（右端留 8px 到框线）
+    // 再一个 30px 窄框填"替换几处"，两格都不留间隔；
+    // 「含扩展名」「区分大小写」这一套整体右移 10px（跟次数框之间的空隙从 8 变 19），
+    // 右端仍然停在 912（外面框线 920，留 8px）。
+    { L"查找",    28, 30,  63, 234, 1, 24 },         // 查找
+    { nullptr,   -1, -1, 297,  36, 1, 24 },          // 查找方式按钮（紧贴输入框，宽度 36）
+    { L"替换为", 341, 44, 385, 234, 1, 24 },         // 替换为（跟查找一样长）
+    { nullptr,   -1, -1, 619,  76, 1, 24 * 3 },      // 替换范围下拉（宽度 76 够显示「替换全部」）
+    { nullptr,   -1, -1, 695,  30, 1, 25 },          // 替换几处（30px 窄框，紧贴下拉，向下加高 1px）
+    { nullptr,   -1, -1, 744,  76, 1, 24 },          // 含扩展名（用户要求右移 10px）
+    { nullptr,   -1, -1, 828,  84, 1, 24 },          // 区分大小写（宽度收到 84，右端仍到 912）
 
     // ---- 第 2 行：加序号 / 替换 / 三个数字 / 位置 / 分隔符 ｜ 排序 / 倒序 ----
     { nullptr,   -1, -1,  28,  64, 2, 24 },          // 加序号（左端留 8px 到框线）
@@ -571,13 +575,23 @@ bool EnsureRegexCompiled(const std::wstring& pattern)
     return g_regexCache.valid;
 }
 
-// ---- 输入框的边框：统一用 #D2D2D2，由父窗口自己画 ----
+// ---- 输入框的边框：统一用 #ADADAD，由父窗口自己画 ----
 // 说明：输入框以前带 WS_BORDER，边框是系统画的深灰（约 #646464），而且它属于控件自己的
 // 客户区（主题化之后 WM_NCPAINT 也改不动），没法通过父窗口的消息把它改色。
-// 所以这里的做法是：输入框一律不带系统边框，边框由 Draw() 画成浅灰；
-// Layout() 里每个输入框往里收 1px，正好把最外那一圈让给这条边框线，
-// 这样整块占的地方跟原来一模一样，不会挤到旁边的控件。
-const COLORREF kEditBorderColor = RGB(0xD2, 0xD2, 0xD2);   // 用户指定的输入框边框色
+// 所以这里的做法是：输入框一律不带系统边框，边框由 Draw() 画；
+// Layout() 里每个输入框往里收（左右 1px、上面 3px、下面 1px），
+// 左右那 1px 让给边框线，上下不对称是因为单行输入框的字是贴着客户区顶部画的，
+// 收 3px 正好把字压到框子中间（用户说原来的字偏高）。
+const COLORREF kEditBorderColor = RGB(0xAD, 0xAD, 0xAD);   // 用户指定的输入框边框色
+
+// 「存在异常文件」那个弹窗上的三个按钮编号（TaskDialog 自定义按钮用，随便定，避开 IDOK/IDCANCEL）
+const int kMsgAbnormalSkip   = 1201;   // 跳过异常继续重命名
+const int kMsgAbnormalBack   = 1202;   // 返回修改
+const int kMsgAbnormalCancel = 1203;   // 取消重命名（关窗口）
+
+// 模板槽的边框色：参数不是默认值（也就是这个槽里确实存了一套规则）时用蓝灰，
+// 用户在模板行上一眼能分出"空的"和"有内容的"
+const COLORREF kTemplateActiveBorder = RGB(122, 139, 165);
 
 // 这一格是不是"输入框"（只有输入框走"父窗口画边框 + 内缩 1px"这一套）
 bool IsEditField(int field)
@@ -631,6 +645,70 @@ LRESULT CALLBACK LightComboBorderProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 
     case WM_NCDESTROY:
         ::RemoveWindowSubclass(hWnd, LightComboBorderProc, 0);
+        break;
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+// ---- 输入框里的提示词（cue banner）自己画 ----// 系统那套 EM_SETCUEBANNER 的颜色是固定的（偏深灰），改不了；用户要求"浅一点"，
+// 所以这里不挂系统提示词，改成：输入框空着、并且没有焦点的时候，自己在客户区画一行浅色字。
+std::map<HWND, std::wstring> g_editCueTexts;                  // 输入框 → 它的提示词
+const COLORREF kEditCueColor = RGB(184, 187, 192);            // 提示词颜色（比正文浅很多）
+
+LRESULT CALLBACK EditCueProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                             UINT_PTR /*idSubclass*/, DWORD_PTR /*refData*/)
+{
+    switch (msg)
+    {
+    case WM_PAINT:
+    {
+        const LRESULT result = DefSubclassProc(hWnd, msg, wParam, lParam);
+
+        auto it = g_editCueTexts.find(hWnd);
+
+        // 有字就不画；有焦点也不画（跟系统那套的习惯一致：一进去准备打字，提示词就消失）
+        if (it != g_editCueTexts.end() && !it->second.empty() &&
+            ::GetWindowTextLengthW(hWnd) == 0 && ::GetFocus() != hWnd)
+        {
+            HDC dc = ::GetDC(hWnd);
+            if (dc != nullptr)
+            {
+                RECT rcClient = {};
+                ::GetClientRect(hWnd, &rcClient);
+                rcClient.left += 3;   // 跟正文左边对齐一点，别贴死边线
+
+                HFONT font = reinterpret_cast<HFONT>(::SendMessageW(hWnd, WM_GETFONT, 0, 0));
+                HGDIOBJ oldFont = ::SelectObject(dc, font);
+
+                ::SetBkMode(dc, TRANSPARENT);
+                ::SetTextColor(dc, kEditCueColor);
+                ::DrawTextW(dc, it->second.c_str(), -1, &rcClient,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                ::SelectObject(dc, oldFont);
+                ::ReleaseDC(hWnd, dc);
+            }
+        }
+
+        return result;
+    }
+
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    {
+        // 焦点一变，提示词该消失 / 该出现：让整块重画一遍
+        const LRESULT result = DefSubclassProc(hWnd, msg, wParam, lParam);
+        ::InvalidateRect(hWnd, nullptr, FALSE);
+        return result;
+    }
+
+    case WM_NCDESTROY:
+        g_editCueTexts.erase(hWnd);
+        ::RemoveWindowSubclass(hWnd, EditCueProc, 0);
         break;
 
     default:
@@ -1077,7 +1155,10 @@ void BatchRenameDialog::CreateControls()
         if (edit != nullptr)
         {
             ::SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-            ::SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue));
+
+            // 提示词不走系统那套（颜色改不了），记下来由 EditCueProc 自己画成浅色
+            g_editCueTexts[edit] = (cue != nullptr) ? cue : L"";
+            ::SetWindowSubclass(edit, EditCueProc, 0, 0);
         }
         return edit;
     };
@@ -1342,17 +1423,16 @@ void BatchRenameDialog::Layout()
                 continue;
             }
 
-            // 输入框不带系统边框了（边框由 Draw 画成 #D2D2D2），
-            // 所以往里收 1px，把最外那一圈让给父窗口画的边框线；
-            // 整体占的位置和原来一样，不会挤到左右相邻的控件
+            // 输入框不带系统边框了（边框由 Draw 画），
+            // 往里收：左右 1px 让给边框线；上面 3px、下面 1px —— 单行输入框的字
+            // 是贴着客户区顶部画的，上面多收 2px 才能把字压到框子中间
             if (IsEditField(i))
             {
-                const int border = 1;
                 ::MoveWindow(control,
-                             Scale(spec.x) + border,
-                             y + border,
-                             Scale(spec.width) - border * 2,
-                             Scale(spec.height) - border * 2,
+                             Scale(spec.x) + 1,
+                             y + 3,
+                             Scale(spec.width) - 2,
+                             Scale(spec.height) - 4,
                              TRUE);
             }
             else
@@ -1875,6 +1955,29 @@ static bool SameRules(const RenameTemplate& a, const RenameTemplate& b)
            a.sortReverse == b.sortReverse;
 }
 
+// 这套规则是不是"全默认"（等于什么都没设）。
+// 两个用处：① 模板槽边框要不要画成蓝灰（有内容的才画）；② 点模板时要不要把当前参数带进去。
+static bool IsDefaultRules(const RenameTemplate& tpl)
+{
+    // 只要开了"加序号 / 替换"就算动过参数；序号那几个数值只有在开着的时候才有意义，
+    // 关着的时候不管里面残留着什么值（历史模板里就有 pos=0 这种），都算默认
+    return tpl.prefix.empty() &&
+           tpl.suffix.empty() &&
+           tpl.find.empty() &&
+           tpl.replace.empty() &&
+           !tpl.caseSensitive &&
+           !tpl.includeExt &&
+           tpl.regexPreset == 0 &&
+           tpl.replaceMode == 0 &&
+           !tpl.number &&
+           !tpl.numberReplace &&
+           tpl.extMode == 0 &&
+           tpl.extValue.empty() &&
+           tpl.caseMode == 0 &&
+           tpl.sortMode == 0 &&
+           !tpl.sortReverse;
+}
+
 bool BatchRenameDialog::HasSlotChanges() const
 {
     if (m_selectedTemplate < 0 || !m_hasBaseline)
@@ -2029,6 +2132,35 @@ void BatchRenameDialog::OnTemplateSlotClick(int index)
     }
 
     const int previous = m_selectedTemplate;
+
+    // ---- 特殊情况：本来没选模板、当前参数又不是默认的，点了一个"空模板" ----
+    // 这时不套用模板（它的参数是空的，套上去等于把用户刚设的规则全清了），
+    // 而是把这套现成参数"带进"这个槽：槽变成选中状态、参数原样留着，
+    // 用户接着点「保存」就能把当前参数存进这个槽（边框也会跟着变蓝灰）。
+    if (m_selectedTemplate < 0 && IsDefaultRules(m_templates[index]))
+    {
+        RenameTemplate current = {};
+        CaptureCurrentRules(current);
+
+        if (!IsDefaultRules(current))
+        {
+            current.name = m_templates[index].name;   // 槽名沿用，规则用当前的
+
+            m_selectedTemplate = index;
+            m_baseline         = current;
+            m_hasBaseline      = true;
+
+            Recalculate();
+
+            if (previous >= 0 && previous < static_cast<int>(m_templateRects.size()))
+            {
+                InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(previous)]);
+            }
+
+            InvalidatePiece(m_hWnd, m_templateRects[static_cast<size_t>(index)]);
+            return;
+        }
+    }
 
     m_selectedTemplate = index;
     ApplyTemplateToControls(m_templates[index]);
@@ -3538,7 +3670,36 @@ void BatchRenameDialog::OnApplyClick()
         const std::wstring instruction =
             L"存在 " + std::to_wstring(problemCount) + L" 个异常文件，请处理好再进行重命名！";
 
-        ShowCenteredMessage(instruction.c_str(), content, true);
+        // 有异常时的三选：跳过异常继续改名 / 返回修改 / 取消（关窗口放弃）
+        const int choice = ShowAbnormalChoice(instruction.c_str(), content);
+
+        if (choice == kMsgAbnormalCancel)
+        {
+            ::DestroyWindow(m_hWnd);   // 「取消重命名」＝这个窗口不要了，关掉
+            return;
+        }
+
+        if (choice == kMsgAbnormalSkip)
+        {
+            // 跳过标红的那些，其它照改
+            std::wstring errorText;
+
+            if (!PerformBatchRename(errorText, true))
+            {
+                m_statusText    = errorText;
+                m_statusIsError = true;
+
+                SetRunningUi(false);
+                RecalculateNow(true);
+                UpdateStatusLine();
+                return;
+            }
+
+            m_applied = true;
+            ::DestroyWindow(m_hWnd);
+        }
+
+        // 「返回修改」/Esc：什么都不做，窗口留着
         return;
     }
 
@@ -3605,15 +3766,20 @@ bool BatchRenameDialog::PreflightIssues(std::vector<std::wstring>& issues)
     return issues.empty();
 }
 
-bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText)
+bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText, bool skipProblemRow)
 {
     errorText.clear();
 
-    // ---- 列出真正要动的项：新名字和原名一模一样的不碰 ----
+    // ---- 列出真正要动的项：新名字和原名一模一样的不碰；要求跳过异常时，标红的整行跳过 ----
     std::vector<RenamePlan> plans;
 
     for (const auto& row : m_rows)
     {
+        if (skipProblemRow && row.state == 2)
+        {
+            continue;   // 用户选了「跳过异常继续重命名」，这些行不动
+        }
+
         if (row.newName == row.oldName)
         {
             continue;
@@ -3768,6 +3934,47 @@ bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText)
     m_statusIsError = false;
 
     return true;
+}
+
+int BatchRenameDialog::ShowAbnormalChoice(const wchar_t* instruction,
+                                          const std::wstring& content)
+{
+    // 三个按钮的编号（TaskDialog 的自定义按钮用整型 ID，随便定，别和 IDOK 之类撞）
+    TASKDIALOG_BUTTON buttons[3] =
+    {
+        { kMsgAbnormalSkip,   L"跳过异常继续重命名" },
+        { kMsgAbnormalBack,   L"返回修改" },
+        { kMsgAbnormalCancel, L"取消重命名" }
+    };
+
+    TASKDIALOGCONFIG config = {};
+    config.cbSize             = sizeof(config);
+    config.hwndParent         = m_hWnd;
+    config.dwFlags            = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.pszWindowTitle     = L"批量重命名";
+    config.pszMainIcon        = TD_WARNING_ICON;
+    config.pszMainInstruction = instruction;
+    config.pszContent         = content.c_str();
+    config.cButtons           = 3;
+    config.pButtons           = buttons;
+    config.nDefaultButton     = kMsgAbnormalBack;   // 默认停在"返回修改"，别让人误按跳过
+
+    // 宽度跟其它弹窗保持一致（700px 左右），换算方式见 ShowCenteredMessage
+    const LONG baseUnitX = static_cast<LONG>(LOWORD(::GetDialogBaseUnits()));
+    config.cxWidth = (baseUnitX > 0)
+                     ? static_cast<UINT>(::MulDiv(kMessageWidthPx, 4, static_cast<int>(baseUnitX)))
+                     : static_cast<UINT>(kMessageWidthPx / 2);
+
+    int pressed = IDCANCEL;
+    ::TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
+
+    // 直接关掉弹窗（或按 Esc）等于"返回修改"，不关主窗口
+    if (pressed != kMsgAbnormalSkip && pressed != kMsgAbnormalCancel)
+    {
+        return kMsgAbnormalBack;
+    }
+
+    return pressed;
 }
 
 void BatchRenameDialog::ShowCenteredMessage(const wchar_t* instruction,
@@ -4021,11 +4228,31 @@ void BatchRenameDialog::Draw(HDC dc)
         ::DeleteObject(groupBorderBrush);
     }
 
-    // ---- 输入框的边框：统一刷成 #D2D2D2 ----
+    // ---- 输入框的边框：统一刷成 #ADADAD ----
     // 输入框本身不带系统边框（见 createEdit），边框就在这块画：
     // 沿着 kRuleSpecs 里那一格的完整矩形描一圈 1px，坐标和 Layout() 摆控件用的是同一份表。
+    // 因为输入框现在上下内缩了 3/1px，框内顶上会露出父窗口的底，
+    // 所以先把整格按"白 / 灰（禁用时）"填一遍，再描边框，免得灰框上面出现一条白缝。
     {
         HBRUSH editBorderBrush = ::CreateSolidBrush(kEditBorderColor);
+
+        auto controlOfField = [&](int field) -> HWND
+        {
+            switch (field)
+            {
+            case kRfPrefix:       return m_hPrefix;
+            case kRfSuffix:       return m_hSuffix;
+            case kRfFind:         return m_hFind;
+            case kRfReplace:      return m_hReplace;
+            case kRfReplaceCount: return m_hReplaceCount;
+            case kRfExtValue:     return m_hExtValue;
+            case kRfNumberStart:  return m_hNumberStart;
+            case kRfNumberStep:   return m_hNumberStep;
+            case kRfNumberDigits: return m_hNumberDigits;
+            case kRfNumberSep:    return m_hNumberSep;
+            default:              return nullptr;
+            }
+        };
 
         for (int i = 0; i < kRfCount; ++i)
         {
@@ -4040,6 +4267,14 @@ void BatchRenameDialog::Draw(HDC dc)
             RECT editFrame = { Scale(spec.x), top,
                                Scale(spec.x) + Scale(spec.width),
                                top + Scale(spec.height) };
+
+            const HWND control = controlOfField(i);
+            const bool enabled = (control != nullptr) && (::IsWindowEnabled(control) != FALSE);
+
+            HBRUSH fillBrush = ::CreateSolidBrush(enabled ? kBackground : RGB(240, 240, 240));
+            ::FillRect(dc, &editFrame, fillBrush);
+            ::DeleteObject(fillBrush);
+
             ::FrameRect(dc, &editFrame, editBorderBrush);
         }
 
@@ -4172,6 +4407,11 @@ void BatchRenameDialog::DrawTemplateSlot(HDC dc, const RECT& rect, int index)
     {
         face   = kButtonHotFace;
         border = kButtonHotBorder;
+    }
+    else if (!IsDefaultRules(m_templates[index]))
+    {
+        // 这个槽里存了一套规则（不是默认参数）：边框用蓝灰，跟"空槽"分开
+        border = kTemplateActiveBorder;
     }
 
     if (pressed)
