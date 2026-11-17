@@ -1670,20 +1670,33 @@ void MainWindow::DoCopyPath()
     Logger::Info(L"已复制 " + std::to_wstring(selected.size()) + L" 条文件路径到剪贴板");
 }
 
+// 压缩包剪切规则的判定函数定义在下面（右键菜单那一片），这里先声明一下
+static bool IsNonZipArchivePath(const std::wstring& path);
+
 void MainWindow::DoCut()
 {
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
 
-    // 这里要踢掉两类项：
+    // 这里要踢掉三类项：
     //   1. 驱动器（D:\ 这种盘符根）—— 资源管理器里驱动器不允许剪切（搬不走整盘）；
-    //   2. 控制面板等虚拟对象（没有真实文件系统路径）—— 既不能复制也不能剪切。
+    //   2. 控制面板等虚拟对象（没有真实文件系统路径）—— 既不能复制也不能剪切；
+    //   3. 除 .zip 以外的压缩包（.rar/.7z/.cab…）—— 系统里它们是「压缩存档」，
+    //      剪了粘过去只是把文件搬走，资源管理器里也不给剪，所以这里同样不生效。
+    const size_t beforeCount = selected.size();
     selected.erase(std::remove_if(selected.begin(), selected.end(),
                                   [](const std::wstring& path)
                                   {
                                       return !shell::IsFileSystemPath(path) ||
-                                             shell::IsDriveRootPath(path);
+                                             shell::IsDriveRootPath(path) ||
+                                             IsNonZipArchivePath(path);
                                   }),
                    selected.end());
+
+    if (selected.size() != beforeCount)
+    {
+        Logger::Info(L"剪切：跳过 " + std::to_wstring(beforeCount - selected.size()) +
+                     L" 项（驱动器 / 虚拟对象 / 非 zip 压缩包）");
+    }
 
     if (selected.empty())
     {
@@ -2139,9 +2152,40 @@ static bool CanCopyPath(const std::wstring& path)
     return shell::IsFileSystemPath(path);
 }
 
+// ---------------------------------------------------------------------------
+// 「除 .zip 以外的压缩包」——这些不允许剪切
+//
+// 实测（本机）：.rar / .7z / .tar / .gz / .cab / .bz2 / .xz / .tgz 在 Shell 里
+// 都被注册成「压缩存档」，资源管理器里它们的「剪切」是灰的（只有 .zip 能剪）。
+// 这里按扩展名判断：只看字符串、不碰磁盘，符合"右键菜单弹出零成本"的约定。
+// ---------------------------------------------------------------------------
+static bool IsNonZipArchivePath(const std::wstring& path)
+{
+    static const wchar_t* const kArchiveExtensions[] = {
+        L".rar", L".7z",  L".tar", L".gz",   L".cab", L".bz2", L".xz", L".tgz",
+        L".tbz", L".tbz2", L".txz", L".lz",  L".lzma", L".z",  L".zst",
+        L".arj", L".lzh", L".lha",
+    };
+
+    const std::wstring extension = shell::ExtensionKeyForPath(path);
+
+    for (const wchar_t* one : kArchiveExtensions)
+    {
+        if (extension == one)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool CanCutPath(const std::wstring& path)
 {
-    return shell::IsFileSystemPath(path) && !shell::IsDriveRootPath(path);
+    // 三条"不能剪"：驱动器、虚拟对象、非 zip 的压缩包
+    return shell::IsFileSystemPath(path) &&
+           !shell::IsDriveRootPath(path) &&
+           !IsNonZipArchivePath(path);
 }
 
 void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
@@ -3163,8 +3207,10 @@ bool MainWindow::ActivateItemInNewWindow(size_t index)
         return true;    // 标题行、占位格：吞掉，什么都不做
     }
 
+    // 判断要不要"进去"，看 canEnter 而不是 isFolder：压缩包（zip / rar …）
+    // 显示上算文件，但 Shell 能当容器打开，Ctrl+双击同样应该在新窗口里进去看。
     // 文件不在这儿处理：交给默认程序打开，和系统一致
-    if (!entry.isFolder || entry.fullPath.empty())
+    if (!entry.canEnter || entry.fullPath.empty())
     {
         return false;
     }
@@ -3467,6 +3513,7 @@ void MainWindow::DoNewItem(size_t index)
     entry.name     = name;
     entry.fullPath = created;
     entry.isFolder = (items[index].kind == shell::ShellNewKind::Folder);
+    entry.canEnter = entry.isFolder;    // 文件夹才能双击进去；新建的文件/快捷方式不行
 
     WIN32_FILE_ATTRIBUTE_DATA attributeData = {};
     if (::GetFileAttributesExW(created.c_str(), GetFileExInfoStandard, &attributeData))
@@ -4631,6 +4678,7 @@ void MainWindow::DoNewFolder()
         entry.name     = name;
         entry.fullPath = created;
         entry.isFolder = true;
+        entry.canEnter = true;    // 新建的是真文件夹，双击要能进去
         entry.size     = 0;
         ::GetSystemTimeAsFileTime(&entry.modified);
 
@@ -5045,7 +5093,10 @@ void MainWindow::OnItemActivated(size_t index)
         return;
     }
 
-    if (entry.isFolder && !entry.fullPath.empty())
+    // 判断要不要"进去"，看 canEnter 而不是 isFolder：
+    // zip / rar / 7z / cab 这类压缩包显示上算文件（isFolder=false），
+    // 但 Shell 能当容器打开，双击应该进去浏览，和资源管理器一致。
+    if (entry.canEnter && !entry.fullPath.empty())
     {
         // 记一条"双击的是哪一项"：以后排查"双击没反应"时，日志里这条后面
         // 紧跟的「导航到 / 按 PIDL 打开成功 / 打开失败」就是它的结果，

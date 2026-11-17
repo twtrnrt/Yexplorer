@@ -10,8 +10,9 @@
 //     → EnumObjects                  得到 IEnumIDList
 //     → Next() 逐个取子项 PIDL
 //         → GetDisplayNameOf  取显示名
-//         → GetAttributesOf   判断是不是文件夹
+//         → GetAttributesOf   判断"能不能进去"（压缩包也算容器）
 //         → SHCreateItemWithParent + IShellItem2  取大小、修改时间、绝对路径
+//         → GetFileAttributesW 校正"显示上是不是文件夹"（zip/rar 这类按文件显示）
 //
 // COM 释放说明：
 //   PIDL 必须用 CoTaskMemFree 释放（不是 delete）；
@@ -179,6 +180,27 @@ bool IsFolder(IShellFolder* folder, LPCITEMIDLIST childPidl)
 }
 
 // ----------------------------------------------------------------------------
+// 长路径前缀
+//
+// GetFileAttributesW 遇到超过 260 字符的路径会直接失败，得加 \\?\（UNC 用 \\?\UNC\）。
+// 只在真的超长时才加，短路径保持原样（加前缀反而会让某些相对语义失效）。
+// ----------------------------------------------------------------------------
+static std::wstring WithLongPathPrefix(const std::wstring& path)
+{
+    if (path.size() < 260 || path.compare(0, 4, L"\\\\?\\") == 0)
+    {
+        return path;
+    }
+
+    if (path[0] == L'\\' && path[1] == L'\\')
+    {
+        return L"\\\\?\\UNC\\" + path.substr(2);
+    }
+
+    return L"\\\\?\\" + path;
+}
+
+// ----------------------------------------------------------------------------
 // 判断「主文件夹」（顶层桌面）里的某一项，是"系统项"还是"桌面上的东西"
 //
 // 顶层桌面会把两类东西混在一起枚举出来：
@@ -319,8 +341,11 @@ void FillExtraInfo(IShellFolder* folder, LPCITEMIDLIST childPidl, shell::ShellEn
         entry.modified = modified;
     }
 
-    // 大小（文件夹的大小没有意义，不取）
-    if (!entry.isFolder)
+    // 大小
+    //
+    // 这里不再先用 isFolder 过滤：调用时 isFolder 还是「Shell 认得容器吗」的
+    // 中间值（zip 这类压缩包当时算容器），而它们恰恰是需要显示真实大小的。
+    // 文件夹取 PKEY_Size 一般拿不到（返回失败，size 保持 0），不影响列表显示。
     {
         UINT64 size = 0;
         if (SUCCEEDED(item2->GetUInt64(PKEY_Size, &size)))
@@ -570,9 +595,41 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             ShellEntry entry;
             entry.isHidden     = isHidden;
             entry.isSystemFile = isSystemFile;
-            entry.isFolder = IsFolder(folder.get(), childPidl);
+
+            // Shell 那边的「能不能进去」：普通文件夹为真，zip / rar / 7z / cab
+            // 这些压缩包也为真（它带「压缩存档」处理器，双击能进去看内容）
+            entry.canEnter = IsFolder(folder.get(), childPidl);
             entry.name     = GetDisplayName(folder.get(), childPidl);
             FillExtraInfo(folder.get(), childPidl, entry);
+
+            // ----------------------------------------------------------
+            // 校正「显示语义」：Shell 说是容器，但磁盘上其实是文件
+            //
+            // zip / rar / 7z / cab 这类压缩包，Shell 因为它们带「压缩存档」
+            // 文件夹处理器而报 SFGAO_FOLDER。不校正的话，一个 700KB 的 zip 会：
+            //   · 类型列写「文件夹」、大小列空白
+            //   · 排进排序里的「文件夹优先」那一段
+            //   · F2 重命名时整名选中（按文件夹处理）
+            // 所以这里按真实文件属性纠回来：不是目录的，按文件显示；
+            // canEnter 保持为真，双击仍然能进去浏览（和资源管理器一致）。
+            //
+            // 只有 canEnter 为真的项才多查这一次磁盘（普通文件压根不查），
+            // 一个目录里文件夹通常只占少数，开销可以忽略。
+            // ----------------------------------------------------------
+            entry.isFolder = entry.canEnter;
+
+            DWORD realAttributes = INVALID_FILE_ATTRIBUTES;
+
+            if (entry.canEnter && !entry.fullPath.empty() && IsFileSystemPath(entry.fullPath))
+            {
+                realAttributes = ::GetFileAttributesW(WithLongPathPrefix(entry.fullPath).c_str());
+
+                if (realAttributes != INVALID_FILE_ATTRIBUTES &&
+                    (realAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                {
+                    entry.isFolder = false;
+                }
+            }
 
             // ----------------------------------------------------------
             // 补查「真正的」隐藏 / 系统文件属性
@@ -585,7 +642,12 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             // ----------------------------------------------------------
             if (needHidden && !entry.fullPath.empty())
             {
-                const DWORD fileAttributes = ::GetFileAttributesW(entry.fullPath.c_str());
+                // 上面校正 isFolder 时可能已经问过一次了，能复用就复用，
+                // 别对同一个路径重复查两次磁盘
+                const DWORD fileAttributes = (realAttributes != INVALID_FILE_ATTRIBUTES)
+                                                 ? realAttributes
+                                                 : ::GetFileAttributesW(
+                                                       WithLongPathPrefix(entry.fullPath).c_str());
 
                 if (fileAttributes != INVALID_FILE_ATTRIBUTES)
                 {
