@@ -78,7 +78,7 @@ struct RenameTemplate
     int          numberStart   = 1;       // 起始
     int          numberStep    = 1;       // 步长
     int          numberDigits  = 2;       // 位数
-    int          numberPos     = 0;       // 0 = 放后面，1 = 放前面
+    int          numberPos     = 1;       // 0 = 放后面，1 = 放前面（默认放前面）
     std::wstring numberSep     = L"-";    // 分隔符
 
     // 扩展名：0 不修改 / 1 修改（右边那个框填什么就用什么，留空等于去掉扩展名）

@@ -1083,7 +1083,7 @@ void BatchRenameDialog::CreateControls()
         ::SendMessageW(m_hNumberPos, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
         ::SendMessageW(m_hNumberPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"放在名字后面"));
         ::SendMessageW(m_hNumberPos, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"放在名字前面"));
-        ::SendMessageW(m_hNumberPos, CB_SETCURSEL, 0, 0);
+        ::SendMessageW(m_hNumberPos, CB_SETCURSEL, 1, 0);   // 默认「放在名字前面」
     }
 
     // 分隔符：默认就填一个「-」，跟结构体里的默认值一致；
@@ -4213,18 +4213,21 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
                 if (rowIndex < m_rows.size())
                 {
+                    // 这里必须把颜色写进结构体的 clrText，不能对 HDC 用 SetTextColor：
+                    // report 模式下控件自己会重设字体颜色，SetTextColor 改的会被冲掉
+                    // （主列表 FileListView 里也是这么写的）
                     switch (m_rows[rowIndex].state)
                     {
                     case 2:   // 冲突：红字
-                        ::SetTextColor(customDraw->nmcd.hdc, kErrorColor);
+                        customDraw->clrText = kErrorColor;
                         return CDRF_NEWFONT;
 
                     case 1:   // 已修改：正常深色
-                        ::SetTextColor(customDraw->nmcd.hdc, kTitleColor);
+                        customDraw->clrText = kTitleColor;
                         return CDRF_NEWFONT;
 
                     default:  // 未改动：浅灰
-                        ::SetTextColor(customDraw->nmcd.hdc, kHintColor);
+                        customDraw->clrText = kHintColor;
                         return CDRF_NEWFONT;
                     }
                 }
