@@ -331,6 +331,14 @@ bool Settings::Load()
                             continue;
                         }
 
+                        // 「本程序」这一项统一叫 "Yexplorer"：
+                        // 旧账本里存过 "Yexplorer（本程序）"，加载时顺手纠正，
+                        // 下次保存写回新名字（身份串由 OpenWithKey 决定，与名字无关）
+                        if (item.kind == L"self")
+                        {
+                            item.name = L"Yexplorer";
+                        }
+
                         entry.items.push_back(std::move(item));
                     }
                 }

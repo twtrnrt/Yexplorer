@@ -3497,7 +3497,7 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
     if (shell::IsContainerExtension(extension) && !ledgerHasSelf)
     {
         ::AppendMenuW(subMenu, MF_STRING, kCommandOpenWithSelf,
-                      L"Yexplorer（本程序）");
+                      L"Yexplorer");
         ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
     }
 

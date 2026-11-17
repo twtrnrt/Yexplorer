@@ -203,7 +203,7 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension,
         wchar_t modulePath[MAX_PATH] = {};
         ::GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
         selfItem.path    = modulePath;
-        selfItem.name    = L"Yexplorer（本程序）";
+        selfItem.name    = L"Yexplorer";   // 菜单/窗口里就叫 Yexplorer，不带「（本程序）」
         selfItem.enabled = true;
         selfItem.alive   = true;
 
