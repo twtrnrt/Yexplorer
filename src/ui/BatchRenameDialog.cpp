@@ -185,6 +185,12 @@ enum : int
     kIdRenameEdit    = 5105    // 模板右键就地改名用的输入框
 };
 
+// 防抖定时器的编号（和控件 ID 用同一套编号空间，只要不撞就行）
+const UINT_PTR kIdDiskScanTimer = 5200;
+
+// 磁盘检查（占用 / 权限 / 目标名冲突）的防抖时长：停手 30ms 再查
+const int kDiskScanDelayMs = 30;
+
 // 颜色（和「设置」窗口一套）
 const COLORREF kBackground      = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
@@ -300,6 +306,187 @@ std::wstring ToLowerText(std::wstring text)
     ::CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
     return text;
 }
+
+// ============================================================================
+// 落盘改名用到的小工具
+// ============================================================================
+
+// 把目录和文件名拼成完整路径（目录末尾有没有反斜杠都行）
+std::wstring JoinPath(const std::wstring& directory, const std::wstring& name)
+{
+    if (directory.empty())
+    {
+        return name;
+    }
+
+    std::wstring result = directory;
+    if (result.back() != L'\\' && result.back() != L'/')
+    {
+        result += L'\\';
+    }
+    return result + name;
+}
+
+// 从完整路径里切出"所在目录"（不带结尾反斜杠）
+std::wstring ParentDirectoryOf(const std::wstring& path)
+{
+    const size_t slash = path.find_last_of(L"\\/");
+    return (slash == std::wstring::npos) ? std::wstring() : path.substr(0, slash);
+}
+
+// 从完整路径里取文件名
+std::wstring FileNameOfPath(const std::wstring& path)
+{
+    const size_t slash = path.find_last_of(L"\\/");
+    return (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+}
+
+// ----------------------------------------------------------------------------
+// 长路径前缀。
+// MoveFileExW 的普通写法只认 260 个字符以内的路径（MAX_PATH），更长的必须加 \\?\；
+// 网络盘要换成 \\?\UNC\ 的写法。短路径不加前缀，免得改变原有语义。
+// ----------------------------------------------------------------------------
+std::wstring ToLongPath(const std::wstring& path)
+{
+    if (path.size() < 260)
+    {
+        return path;
+    }
+
+    if (path.compare(0, 4, L"\\\\?\\") == 0)
+    {
+        return path;
+    }
+
+    // \\server\share\... → \\?\UNC\server\share\...
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+    {
+        return L"\\\\?\\UNC\\" + path.substr(2);
+    }
+
+    return L"\\\\?\\" + path;
+}
+
+// 这个位置现在有东西吗（文件、文件夹都算）
+bool PathExists(const std::wstring& path)
+{
+    return ::GetFileAttributesW(ToLongPath(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// ----------------------------------------------------------------------------
+// 查一个源文件现在"能不能改名"，返回：
+//   0 正常 / 1 可能被占用 / 2 没有改名权限 / 3 已经不在了
+//
+// 做法是两次"试探性打开"，都只碰元数据、不读文件内容：
+//   第一次：只要 DELETE 权限（改名本质上就是删掉旧名字建新名字），共享全开。
+//          这样能问出"有没有权限"、"文件还在不在"，而且不会跟别的程序抢读；
+//   第二次：独占打开（一个共享模式都不给）。有程序正开着它就会 SHARING_VIOLATION。
+//
+// 注意这套检查只是"提醒"：会被缩略图/杀毒这种只读打开误报，也可能在检查完到
+// 真正改名之间被人抢先打开，所以执行时的失败回滚照样要做。
+// ----------------------------------------------------------------------------
+int ProbeSourceState(const std::wstring& path)
+{
+    const std::wstring longPath = ToLongPath(path);
+
+    HANDLE probe = ::CreateFileW(longPath.c_str(), DELETE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING,
+                                 FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+
+    if (probe == INVALID_HANDLE_VALUE)
+    {
+        const DWORD error = ::GetLastError();
+
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        {
+            return 3;
+        }
+        if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION)
+        {
+            return 1;
+        }
+        if (error == ERROR_ACCESS_DENIED)
+        {
+            return 2;
+        }
+        return 1;   // 说不清的按"可能被占用"处理，反正只是提醒
+    }
+
+    ::CloseHandle(probe);
+
+    probe = ::CreateFileW(longPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                          FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+
+    if (probe == INVALID_HANDLE_VALUE)
+    {
+        const DWORD error = ::GetLastError();
+
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        {
+            return 3;
+        }
+        if (error == ERROR_ACCESS_DENIED)
+        {
+            return 2;
+        }
+        return 1;   // 主要就是 SHARING_VIOLATION
+    }
+
+    ::CloseHandle(probe);
+    return 0;
+}
+
+// ----------------------------------------------------------------------------
+// 把 MoveFileExW 的错误码翻成一句看得懂的中文
+// ----------------------------------------------------------------------------
+std::wstring DescribeMoveError(DWORD error)
+{
+    switch (error)
+    {
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+        return L"文件正被其他程序使用";
+
+    case ERROR_ACCESS_DENIED:
+        return L"没有权限";
+
+    case ERROR_ALREADY_EXISTS:
+    case ERROR_FILE_EXISTS:
+        return L"目标名字已经被别的文件占用";
+
+    case ERROR_INVALID_NAME:
+    case ERROR_INVALID_PARAMETER:
+        return L"名字不合法";
+
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+        return L"文件已经不在原来的位置";
+
+    case ERROR_NOT_SAME_DEVICE:
+        return L"不能跨盘改名";
+
+    default:
+    {
+        wchar_t text[64] = {};
+        ::wsprintfW(text, L"未预期的错误（错误码 %u）", static_cast<unsigned>(error));
+        return text;
+    }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 一次改名计划里的一项
+//   stage：0 = 还叫原名 / 1 = 已经改成临时名 / 2 = 已经改成目标名
+//   （回滚时按这个字段决定"从哪儿改回去"）
+// ----------------------------------------------------------------------------
+struct RenamePlan
+{
+    std::wstring oldPath;
+    std::wstring targetPath;
+    std::wstring tempPath;
+    int          stage = 0;
+};
 
 // ----------------------------------------------------------------------------
 // 整数按位数补前导零
@@ -746,6 +933,12 @@ bool BatchRenameDialog::CreateDialogWindow()
 
     // 先算一遍预览，用户一打开就能看到效果
     Recalculate();
+
+    // 打开的时候就把"能不能改名"查一遍：谁正被别的程序开着、谁没权限、谁已经不在了，
+    // 一进来就在状态列标出来，不用等用户改规则才发现。
+    // （本地盘几百项也就几毫秒；网络盘慢一点，但只查这一次）
+    ScanSourceStates();
+    RecalculateNow(true);
 
     // 光标落在第一个输入框，直接就能开始打字
     if (m_hPrefix != nullptr)
@@ -1554,26 +1747,17 @@ bool BatchRenameDialog::HasSlotChanges() const
 
 bool BatchRenameDialog::ApplyButtonEnabled() const
 {
-    if (!m_regexValid || m_rows.empty())
+    if (m_running || m_rows.empty())
     {
         return false;
     }
 
-    for (const auto& row : m_rows)
-    {
-        if (row.state == 2)     // 有冲突
-        {
-            return false;
-        }
-    }
-
-    // 选中了模板又改过参数：必须先「保存」，否则改了也白改（模板下次载入还是老样子）
-    if (HasSlotChanges())
-    {
-        return false;
-    }
-
-    return true;
+    // 只有一种情况「应用」还是灰的：选中了模板又把参数改了没保存
+    // （这时点下去也说不清是"用这版参数改名"还是"先存模板"，用户要求先保存才能应用）。
+    //
+    // 其它问题（重名 / 已存在同名文件 / 可能被占用 / 正则写错）**一律不变灰**：
+    // 用户点了以后弹窗把原因列出来，一项都不改，窗口留在原地。
+    return !HasSlotChanges();
 }
 
 void BatchRenameDialog::ClearAllRules()
@@ -2647,7 +2831,7 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
     return stem + extension;
 }
 
-void BatchRenameDialog::BuildPreviewRows()
+void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
 {
     m_rows.clear();
 
@@ -2741,7 +2925,73 @@ void BatchRenameDialog::BuildPreviewRows()
         newNames[order[i]] = ComputeNewName(i, m_items[order[i]].name);
     }
 
-    // ---- 状态判定：空名 / 非法字符 / 重名 / 已修改 / 未改动 ----
+    // ---- 目标名是不是已经被目录里别的文件占着（这一条要问磁盘，所以只在 scanDisk 时查）----
+    //
+    // 三个不算冲突的例外：
+    //   1) 目标路径和它自己的原路径只差大小写（纯大小写改名，还是它自己）；
+    //   2) 占着那个名字的是本批里另一项，而那一项自己也要改走 —— 两段式改名会先腾地方；
+    //   3) 那个位置本来就空着。
+    // 除了这三种，遇到同名一律标红：改名绝不能把别人的文件顶掉。
+    if (scanDisk && m_targetState.size() != m_items.size())
+    {
+        m_targetState.assign(m_items.size(), 0);
+    }
+
+    if (scanDisk)
+    {
+        m_targetState.assign(m_items.size(), 0);
+
+        for (size_t i = 0; i < m_items.size(); ++i)
+        {
+            const std::wstring target = JoinPath(ParentDirectoryOf(m_items[i].path), newNames[i]);
+
+            // 例外 1：纯大小写改名
+            if (ToLowerText(target) == ToLowerText(m_items[i].path))
+            {
+                continue;
+            }
+
+            if (!PathExists(target))
+            {
+                continue;   // 例外 3：空位
+            }
+
+            // 例外 2：占着这个名字的是本批里另一项，且它自己也要改走
+            bool vacated = false;
+
+            for (size_t j = 0; j < m_items.size(); ++j)
+            {
+                if (j == i)
+                {
+                    continue;
+                }
+
+                if (ToLowerText(m_items[j].path) != ToLowerText(target))
+                {
+                    continue;
+                }
+
+                // 它自己的新名字和原名不一样 = 它会离开这个名字，把位置让出来
+                if (ToLowerText(newNames[j]) != ToLowerText(m_items[j].name))
+                {
+                    vacated = true;
+                }
+                break;
+            }
+
+            if (!vacated)
+            {
+                m_targetState[i] = 1;
+            }
+        }
+    }
+    else if (m_targetState.size() != m_items.size())
+    {
+        // 还没扫过磁盘（刚打开窗口那一下）：先当没冲突，等防抖扫完再标红
+        m_targetState.assign(m_items.size(), 0);
+    }
+
+    // ---- 状态判定：空名 / 非法字符 / 重名 / 已存在同名 / 可能被占用 / 已修改 / 未改动 ----
     for (size_t i = 0; i < order.size(); ++i)
     {
         const size_t itemIndex = order[i];
@@ -2788,8 +3038,37 @@ void BatchRenameDialog::BuildPreviewRows()
             }
             else if (row.newName == row.oldName)
             {
+                // 这一项名字没变，就不用动它，别的检查也都不用看（免得白标红）
                 row.state     = 0;
                 row.stateText = L"未改动";
+            }
+            else if (itemIndex < m_targetState.size() && m_targetState[itemIndex] == 1)
+            {
+                row.state     = 2;
+                row.stateText = L"已存在同名文件";
+            }
+            else if (itemIndex < m_sourceState.size() && m_sourceState[itemIndex] != 0)
+            {
+                row.state = 2;
+
+                switch (m_sourceState[itemIndex])
+                {
+                case 1:
+                    row.stateText = L"可能被占用";
+                    break;
+
+                case 2:
+                    row.stateText = L"没有改名权限";
+                    break;
+
+                case 3:
+                    row.stateText = L"文件已经不在了";
+                    break;
+
+                default:
+                    row.stateText = L"状态异常";
+                    break;
+                }
             }
             else
             {
@@ -2853,6 +3132,35 @@ void BatchRenameDialog::FillPreviewList()
 
 void BatchRenameDialog::Recalculate()
 {
+    // 改一个字就重算一遍名字（纯内存，很快），保证列表"跟得上手"；
+    // 磁盘那一部分（占用 / 权限 / 目标名冲突）交给 30ms 防抖，别每敲一下都去问硬盘
+    RecalculateNow(false);
+    ScheduleDiskScan();
+}
+
+void BatchRenameDialog::ScheduleDiskScan()
+{
+    if (m_diskScanPending || m_hWnd == nullptr || m_running)
+    {
+        return;
+    }
+
+    ::SetTimer(m_hWnd, kIdDiskScanTimer, kDiskScanDelayMs, nullptr);
+    m_diskScanPending = true;
+}
+
+void BatchRenameDialog::ScanSourceStates()
+{
+    m_sourceState.assign(m_items.size(), 0);
+
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        m_sourceState[i] = ProbeSourceState(m_items[i].path);
+    }
+}
+
+void BatchRenameDialog::RecalculateNow(bool scanDisk)
+{
     // 控件还没建好时（建窗口过程中 SetWindowText 会触发 EN_CHANGE）直接跳过
     if (m_hList == nullptr || m_items.empty())
     {
@@ -2860,25 +3168,371 @@ void BatchRenameDialog::Recalculate()
     }
 
     EnableRuleControls();
-    BuildPreviewRows();
+    BuildPreviewRows(scanDisk);
     FillPreviewList();
 
     // 只重画底部那一条：之前整窗 InvalidateRect，
     // 父窗口会先把整块刷白再等子控件重画，输入一个字就闪一下。
     // 这一块从参数区下面那条空白（冲突提示写在那里）一直盖到底部按钮，
     // 因为「应用」的灰/亮、「保存」的出现、统计文字都在这块里变。
-    if (m_hWnd != nullptr)
+    UpdateStatusLine();
+}
+
+void BatchRenameDialog::UpdateStatusLine()
+{
+    if (m_hWnd == nullptr)
     {
-        RECT bottomRect = {};
-
-        bottomRect.left   = Scale(kRuleTop);
-        bottomRect.top    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
-        bottomRect.right  = m_applyRect.right;
-        bottomRect.bottom = m_applyRect.bottom + Scale(8);
-
-        ::InvalidateRect(m_hWnd, &bottomRect, FALSE);
-        ::UpdateWindow(m_hWnd);
+        return;
     }
+
+    RECT bottomRect = {};
+
+    bottomRect.left   = Scale(kRuleTop);
+    bottomRect.top    = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
+    bottomRect.right  = m_applyRect.right;
+    bottomRect.bottom = m_applyRect.bottom + Scale(8);
+
+    ::InvalidateRect(m_hWnd, &bottomRect, FALSE);
+    ::UpdateWindow(m_hWnd);
+}
+
+// ============================================================================
+// 点「应用」之后的落盘改名
+//
+// 流程（用户拍板的那一版）：
+//   1. 先复检一遍磁盘状态，把"这一步根本改不了"的问题收集起来；
+//   2. 有问题：弹窗列原因（最多 5 条），一项都不改，窗口留在原地；
+//   3. 没问题：两段式改名（原名 → 临时名 → 目标名），状态行显示「正在改名 k/N」；
+//   4. 任何一条失败：整批倒序回滚，状态行写原因，弹窗提醒，窗口不关；
+//   5. 全部成功：才关窗，把结果回传主窗口（由它更新列表 + 压一条整批撤销记录）。
+// ============================================================================
+
+void BatchRenameDialog::OnApplyClick()
+{
+    if (m_running || !ApplyButtonEnabled())
+    {
+        return;
+    }
+
+    // 真正动手前再复检：窗口开着的这段时间里，文件可能被别的程序打开、被人删掉、
+    // 目录里可能冒出同名文件。用最新的磁盘状态重新算一遍预览。
+    ScanSourceStates();
+    RecalculateNow(true);
+
+    std::vector<std::wstring> issues;
+
+    if (!PreflightIssues(issues))
+    {
+        // 最多列 5 条，剩下的折成"等共 N 项"，免得弹窗长得看不完
+        std::wstring content;
+
+        for (size_t i = 0; i < issues.size() && i < 5; ++i)
+        {
+            content += issues[i];
+            content += L"\r\n";
+        }
+
+        if (issues.size() > 5)
+        {
+            content += L"……等共 " + std::to_wstring(issues.size()) + L" 项";
+        }
+
+        ShowCenteredMessage(L"这些项现在不能改名", content, true);
+        return;
+    }
+
+    std::wstring errorText;
+
+    if (!PerformBatchRename(errorText))
+    {
+        // 失败：窗口不关，原因常驻在状态行（红字），用户可以改完规则再点一次
+        m_statusText    = errorText;
+        m_statusIsError = true;
+
+        SetRunningUi(false);
+        RecalculateNow(true);
+        UpdateStatusLine();
+        return;
+    }
+
+    m_applied = true;
+    ::DestroyWindow(m_hWnd);
+}
+
+bool BatchRenameDialog::PreflightIssues(std::vector<std::wstring>& issues)
+{
+    issues.clear();
+
+    // 正则本身写错：名字都算不出来，更别谈改文件
+    if (RegexOn() && !GetTextOf(m_hFind).empty() && !m_regexValid)
+    {
+        issues.push_back(L"「查找」里的正则写法有误，先把写法改对");
+        return false;
+    }
+
+    // 预览表里已经判成 problem 的行，逐条写成"旧名 → 新名：原因"
+    for (const auto& row : m_rows)
+    {
+        if (row.state != 2)
+        {
+            continue;
+        }
+
+        issues.push_back(L"「" + row.oldName + L"」→「" + row.newName + L"」：" + row.stateText);
+    }
+
+    // 一条都不改的情况也说一声，别让用户以为点了没反应
+    if (issues.empty())
+    {
+        bool anyChange = false;
+
+        for (const auto& row : m_rows)
+        {
+            if (row.newName != row.oldName)
+            {
+                anyChange = true;
+                break;
+            }
+        }
+
+        if (!anyChange)
+        {
+            issues.push_back(L"现在的规则没有改动任何一项名字");
+        }
+    }
+
+    return issues.empty();
+}
+
+bool BatchRenameDialog::PerformBatchRename(std::wstring& errorText)
+{
+    errorText.clear();
+
+    // ---- 列出真正要动的项：新名字和原名一模一样的不碰 ----
+    std::vector<RenamePlan> plans;
+
+    for (const auto& row : m_rows)
+    {
+        if (row.newName == row.oldName)
+        {
+            continue;
+        }
+
+        RenamePlan plan = {};
+        plan.oldPath    = m_items[row.itemIndex].path;
+        plan.targetPath = JoinPath(ParentDirectoryOf(plan.oldPath), row.newName);
+        plans.push_back(plan);
+    }
+
+    if (plans.empty())
+    {
+        errorText = L"现在的规则没有改动任何一项名字";
+        return false;
+    }
+
+    // ---- 给每一项定一个同目录下的临时名字 ----
+    //
+    // 两段式改名是为了兜住这些次序问题：
+    //   · a→b、b→a 这种互换名字（直接改会撞上还没让位的 b）；
+    //   · 目标名正被本批里另一项占着。
+    // 临时名只存在几毫秒，正常看不见；带 ~brex_ 前缀，万一崩了也一眼认得出是我们的。
+    for (size_t i = 0; i < plans.size(); ++i)
+    {
+        const std::wstring parent = ParentDirectoryOf(plans[i].oldPath);
+        std::wstring       temp   = JoinPath(parent, L"~brex_" + std::to_wstring(i + 1));
+
+        // 这个临时名要是恰好被占（几乎不可能），往后加序号直到找到空位
+        int suffix = 1;
+        while (PathExists(temp))
+        {
+            temp = JoinPath(parent, L"~brex_" + std::to_wstring(i + 1) + L"_" +
+                                        std::to_wstring(++suffix));
+        }
+
+        plans[i].tempPath = temp;
+    }
+
+    const int total = static_cast<int>(plans.size());
+    const int step  = (total > 20) ? (total / 20) : 1;   // 刷界面的节奏：最多刷二十来回
+
+    SetRunningUi(true);
+
+    // ---- 第一段：原名 → 临时名 ----
+    for (int i = 0; i < total; ++i)
+    {
+        if (!::MoveFileExW(ToLongPath(plans[i].oldPath).c_str(),
+                           ToLongPath(plans[i].tempPath).c_str(), 0))
+        {
+            const DWORD error = ::GetLastError();
+
+            // 这一段失败：前面已经改成临时名的，倒序改回原名
+            int rollbackFailed = 0;
+
+            for (int j = i - 1; j >= 0; --j)
+            {
+                if (!::MoveFileExW(ToLongPath(plans[j].tempPath).c_str(),
+                                   ToLongPath(plans[j].oldPath).c_str(), 0))
+                {
+                    ++rollbackFailed;
+                }
+            }
+
+            errorText = L"第 " + std::to_wstring(i + 1) + L" 项「" +
+                        FileNameOfPath(plans[i].oldPath) + L"」改名失败：" +
+                        DescribeMoveError(error) + L"，本批次一项都没改。";
+
+            if (rollbackFailed > 0)
+            {
+                errorText += L"\r\n注意：有 " + std::to_wstring(rollbackFailed) +
+                             L" 项没能恢复原名，请手动检查。";
+            }
+
+            SetRunningUi(false);
+            return false;
+        }
+
+        plans[i].stage = 1;
+
+        if (i % step == 0 || i + 1 == total)
+        {
+            m_statusText    = L"正在改名 " + std::to_wstring(i + 1) + L"/" +
+                              std::to_wstring(total) + L"…";
+            m_statusIsError = false;
+            UpdateStatusLine();
+        }
+    }
+
+    // ---- 第二段：临时名 → 目标名 ----
+    for (int i = 0; i < total; ++i)
+    {
+        if (!::MoveFileExW(ToLongPath(plans[i].tempPath).c_str(),
+                           ToLongPath(plans[i].targetPath).c_str(), 0))
+        {
+            const DWORD error = ::GetLastError();
+
+            // 整批回滚（倒序）：已经到目标名的改回原名，还在临时名的也改回原名
+            int rollbackFailed = 0;
+
+            for (int j = total - 1; j >= 0; --j)
+            {
+                std::wstring from;
+
+                if (plans[j].stage == 2)
+                {
+                    from = plans[j].targetPath;
+                }
+                else if (plans[j].stage == 1)
+                {
+                    from = plans[j].tempPath;
+                }
+
+                if (from.empty())
+                {
+                    continue;   // 这一项压根没动过
+                }
+
+                if (!::MoveFileExW(ToLongPath(from).c_str(),
+                                   ToLongPath(plans[j].oldPath).c_str(), 0))
+                {
+                    ++rollbackFailed;
+                }
+            }
+
+            errorText = L"第 " + std::to_wstring(i + 1) + L" 项「" +
+                        FileNameOfPath(plans[i].oldPath) + L"」改名失败：" +
+                        DescribeMoveError(error) + L"，已经全部改回原名。";
+
+            if (rollbackFailed > 0)
+            {
+                errorText += L"\r\n注意：有 " + std::to_wstring(rollbackFailed) +
+                             L" 项没能恢复原名，请手动检查。";
+            }
+
+            SetRunningUi(false);
+            return false;
+        }
+
+        plans[i].stage = 2;
+
+        if (i % step == 0 || i + 1 == total)
+        {
+            m_statusText    = L"正在改名 " + std::to_wstring(i + 1) + L"/" +
+                              std::to_wstring(total) + L"…";
+            m_statusIsError = false;
+            UpdateStatusLine();
+        }
+    }
+
+    m_statusText.clear();
+    m_statusIsError = false;
+
+    return true;
+}
+
+void BatchRenameDialog::ShowCenteredMessage(const wchar_t* instruction,
+                                            const std::wstring& content, bool warning)
+{
+    // 和"模板没保存"那个提醒同一套：TaskDialog + 相对属主窗口定位。
+    // （MessageBox 不认居中，实测会弹到屏幕右下角去）
+    TASKDIALOGCONFIG config = {};
+    config.cbSize             = sizeof(config);
+    config.hwndParent         = m_hWnd;
+    config.dwFlags            = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons    = TDCBF_OK_BUTTON;
+    config.pszWindowTitle     = L"批量重命名";
+    config.pszMainIcon        = warning ? TD_WARNING_ICON : nullptr;
+    config.pszMainInstruction = instruction;
+    config.pszContent         = content.c_str();
+    config.nDefaultButton     = IDOK;
+
+    int pressed = IDOK;
+    ::TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
+}
+
+void BatchRenameDialog::SetRunningUi(bool running)
+{
+    m_running = running;
+
+    const HWND controls[] =
+    {
+        m_hPrefix, m_hSuffix, m_hFind, m_hReplace, m_hCaseSensitive, m_hIncludeExt,
+        m_hNumberEnable, m_hNumberReplace, m_hNumberStart, m_hNumberStep, m_hNumberDigits,
+        m_hNumberPos, m_hNumberSep, m_hExtMode, m_hExtValue, m_hCaseMode,
+        m_hSortMode, m_hSortReverse, m_hList, m_hRenameEdit
+    };
+
+    for (HWND control : controls)
+    {
+        if (control != nullptr)
+        {
+            ::EnableWindow(control, running ? FALSE : TRUE);
+        }
+    }
+
+    if (running)
+    {
+        ::SetCursor(::LoadCursorW(nullptr, IDC_WAIT));
+    }
+    else
+    {
+        // 恢复的时候不能一律打开：起始/步长/位数要看「加序号」勾没勾，
+        // 扩展名值框要看「不修改/修改」选了哪个，交给 EnableRuleControls 重新算
+        EnableRuleControls();
+    }
+
+    // 四个按钮的灰/亮是自绘的，这里把它们那一块重画一次
+    RECT buttons = m_cancelRect;
+    RECT temp    = {};
+
+    ::UnionRect(&temp, &buttons, &m_clearRect);
+    buttons = temp;
+    ::UnionRect(&temp, &buttons, &m_saveRect);
+    buttons = temp;
+    ::UnionRect(&temp, &buttons, &m_applyRect);
+    buttons = temp;
+
+    InvalidatePiece(m_hWnd, buttons);
+    ::UpdateWindow(m_hWnd);
 }
 
 // ============================================================================
@@ -3092,18 +3746,42 @@ void BatchRenameDialog::Draw(HDC dc)
 
     ::SelectObject(dc, m_fontSmall);
 
-    wchar_t statsText[256] = {};
-    ::wsprintfW(statsText, L"共 %u 项 · 会改动 %u 项 · 冲突 %u 项",
-                static_cast<unsigned>(m_rows.size()),
-                static_cast<unsigned>(changedCount),
-                static_cast<unsigned>(conflictCount));
+    // 这三行平时显示统计；改名过程中显示进度，失败之后显示失败原因（都写在同一块地方）
+    std::wstring statusText;
 
-    ::SetTextColor(dc, (conflictCount > 0) ? kErrorColor : kHintColor);
-    ::DrawTextW(dc, statsText, -1, &m_statsRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (!m_statusText.empty())
+    {
+        statusText = m_statusText;
+    }
+    else
+    {
+        wchar_t statsText[256] = {};
+        ::wsprintfW(statsText, L"共 %u 项 · 会改动 %u 项 · 有问题 %u 项",
+                    static_cast<unsigned>(m_rows.size()),
+                    static_cast<unsigned>(changedCount),
+                    static_cast<unsigned>(conflictCount));
+        statusText = statsText;
+    }
 
-    // 有冲突时「应用」不可用，在参数区和底部按钮之间那条窄缝里说一句原因
+    if (m_statusIsError)
+    {
+        ::SetTextColor(dc, kErrorColor);
+    }
+    else if (!m_statusText.empty())
+    {
+        ::SetTextColor(dc, kHintColor);
+    }
+    else
+    {
+        ::SetTextColor(dc, (conflictCount > 0) ? kErrorColor : kHintColor);
+    }
+
+    ::DrawTextW(dc, statusText.c_str(), -1, &m_statsRect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // 有问题的行会标红，但「应用」照样能点：点下去会先弹窗把原因列出来，不会直接改文件
     // （表格加高 47px 之后这条缝只剩十几像素，所以把提示压成一行，贴着按钮上沿画）
-    if (conflictCount > 0)
+    if (conflictCount > 0 && m_statusText.empty())
     {
         const int bandBottom = Scale(kRuleTop) + Scale(kRuleRowHeight) * 2 + Scale(kRuleBandHeight);
 
@@ -3112,7 +3790,7 @@ void BatchRenameDialog::Draw(HDC dc)
                           m_applyRect.top - Scale(1) };
 
         ::SetTextColor(dc, kErrorColor);
-        ::DrawTextW(dc, L"有冲突的行会标红，改到没有冲突才能应用。", -1, &warnRect,
+        ::DrawTextW(dc, L"标红的行点「应用」会先弹窗提醒，不会改名。", -1, &warnRect,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
@@ -3120,12 +3798,13 @@ void BatchRenameDialog::Draw(HDC dc)
 
     // ---- 底部四个按钮：取消 / 清空 / 保存 / 应用 ----
     // 「保存」只在选中了某个模板槽时出现（没选中就没有"保存到哪"的说法）
-    DrawButton(dc, m_cancelRect, L"取消", m_hotCancel, m_pressedCancel, false);
-    DrawButton(dc, m_clearRect,  L"清空", m_hotClear,  m_pressedClear,  false);
+    // 改名过程中四个按钮全灰（几十毫秒的事，不支持中途取消）
+    DrawButton(dc, m_cancelRect, L"取消", m_hotCancel, m_pressedCancel, false, !m_running);
+    DrawButton(dc, m_clearRect,  L"清空", m_hotClear,  m_pressedClear,  false, !m_running);
 
     if (m_selectedTemplate >= 0)
     {
-        DrawButton(dc, m_saveRect, L"保存", m_hotSave, m_pressedSave, false);
+        DrawButton(dc, m_saveRect, L"保存", m_hotSave, m_pressedSave, false, !m_running);
     }
 
     DrawButton(dc, m_applyRect, L"应用", m_hotApply, m_pressedApply, true, ApplyButtonEnabled());
@@ -3395,6 +4074,13 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         // 自绘按钮：不是真实窗口，靠 ID 判断（lParam 为 0）
         if (lParam == 0)
         {
+            // 正在改名：四个按钮的点击一律不接（改名只有几十毫秒，不支持中途取消）
+            if (m_running && (controlId == kIdCancel || controlId == kIdClear ||
+                              controlId == kIdSave || controlId == kIdApply))
+            {
+                return 0;
+            }
+
             if (controlId == kIdCancel)
             {
                 if (ConfirmLeaveSlot())
@@ -3418,12 +4104,9 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
             if (controlId == kIdApply)
             {
-                // 有冲突、正则在报错、或者"选了模板又改过参数没保存" → 一律不让应用
-                if (ApplyButtonEnabled())
-                {
-                    m_applied = true;
-                    ::DestroyWindow(hWnd);
-                }
+                // 注意：这里不再"有冲突就不给点"了。
+                // 点下去先复检一遍，有问题就把原因弹出来（不动文件），没问题才真改。
+                OnApplyClick();
                 return 0;
             }
         }
@@ -3447,9 +4130,30 @@ LRESULT BatchRenameDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
     case WM_CLOSE:
         // 右上角 ×：同样要照顾"模板改过没保存"
+        if (m_running)
+        {
+            return 0;   // 正在改名，先不让关
+        }
+
         if (ConfirmLeaveSlot())
         {
             ::DestroyWindow(hWnd);
+        }
+        return 0;
+
+    case WM_TIMER:
+        // 防抖到点：先把进度里那句"正在改名"之类的临时文字清掉不必要，
+        // 然后扫一遍源文件状态（占用 / 权限 / 是否还在）和目标名冲突，再重算一次
+        if (wParam == kIdDiskScanTimer)
+        {
+            ::KillTimer(hWnd, kIdDiskScanTimer);
+            m_diskScanPending = false;
+
+            if (!m_running)
+            {
+                ScanSourceStates();
+                RecalculateNow(true);
+            }
         }
         return 0;
 

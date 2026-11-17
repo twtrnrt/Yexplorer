@@ -125,8 +125,20 @@ private:
 
     int Scale(int value) const;
 
-    // 按当前规则算一遍新名字，并刷新右侧列表与底部统计
+    // 按当前规则算一遍新名字，并刷新右侧列表与底部统计。
+    // 这里只算名字（纯内存），不碰磁盘；磁盘那一部分交给 30ms 防抖定时器。
     void Recalculate();
+
+    // 真正的那一次重算。scanDisk 为 true 时才去问磁盘
+    // （目标名是不是已经被别人占了），由防抖定时器或者「应用」前的复检触发。
+    void RecalculateNow(bool scanDisk);
+
+    // 挂了 30ms 防抖：用户停手之后再去扫一遍磁盘（占用 / 权限 / 目标名冲突）
+    void ScheduleDiskScan();
+
+    // 查每一项"现在能不能改名"：还在不在、有没有权限、是不是正被别的程序用着。
+    // 这个跟规则无关（只看源文件），打开窗口、防抖到点、点应用前各扫一次。
+    void ScanSourceStates();
 
     // 计算一项的新文件名（不含目录）
     std::wstring ComputeNewName(size_t index, const std::wstring& originalName) const;
@@ -145,7 +157,30 @@ private:
     };
 
     // 读所有控件当前值，重算 rows
-    void BuildPreviewRows();
+    void BuildPreviewRows(bool scanDisk);
+
+    // ---- 落盘改名（点「应用」之后真正做的事）----
+
+    // 点「应用」：先复检一遍 → 有问题就弹窗说清楚（不动文件）→ 没问题就去改
+    void OnApplyClick();
+
+    // 收集所有"拦路"的问题（重名 / 已存在同名 / 非法字符 / 可能被占用 / 正则写错 …）。
+    // 返回 true 表示一项问题都没有，可以放心改。
+    bool PreflightIssues(std::vector<std::wstring>& issues);
+
+    // 两段式改名：先把所有项改成同目录下的临时名，再改成目标名；
+    // 任何一条失败就把已经动过的倒序改回原名，一个都不留。
+    // 成功返回 true；失败返回 false，并把中文原因写进 errorText。
+    bool PerformBatchRename(std::wstring& errorText);
+
+    // 居中提示框（MessageBox 会跑到屏幕角落，这里和"模板没保存"那个提醒一样用 TaskDialog）
+    void ShowCenteredMessage(const wchar_t* instruction, const std::wstring& content, bool warning);
+
+    // 只重画底部那条状态行（统计文字 / 改名进度 / 失败原因都写在这）
+    void UpdateStatusLine();
+
+    // 改名过程中把参数控件、四个按钮、列表全部禁掉；结束后按原规则恢复
+    void SetRunningUi(bool running);
 
     // 控件值读取小工具
     std::wstring GetTextOf(HWND control) const;
@@ -305,5 +340,20 @@ private:
     HBRUSH m_disabledBrush = nullptr;   // 被禁用的输入框用这个灰底
 
     // ---- 结果 ----
-    bool m_applied = false;    // 用户点了「应用」
+    bool m_applied = false;    // 用户点了「应用」（并且真的改成功了）
+
+    // ---- 落盘改名 ----
+    // 每一项源文件的"能不能改名"：0 正常 / 1 可能被占用 / 2 没有改名权限 / 3 已经不在了
+    // （只跟源文件有关，跟规则无关，所以规则变了不用重扫，防抖到点再扫一次就行）
+    std::vector<int> m_sourceState;
+
+    // 每一项"算出来的目标名"是不是已经被目录里别的文件占着：0 空位 / 1 已被占
+    // （这个跟规则有关，每次带磁盘扫描的重算都会刷一遍）
+    std::vector<int> m_targetState;
+
+    bool m_diskScanPending = false;   // 防抖定时器已经挂上了，别重复挂
+    bool m_running         = false;   // 正在改名：这时什么都不接
+
+    std::wstring m_statusText;             // 状态行临时文字（空 = 平时那句统计）
+    bool         m_statusIsError = false;  // 状态文字用红字（失败了）还是灰字（进度）
 };

@@ -1741,9 +1741,9 @@ void MainWindow::DoPaste()
 // ============================================================================
 // 批量重命名（右键「批量重命名」）
 //
-// 第一步：先把「批量重命名」窗口做出来（UI 阶段）。
-//   现在窗口里的预览、冲突检查都是真的，点「应用」把每一项目标文件名回传到这里；
-//   真正落盘的改名（含冲突时的不覆盖、失败回滚、撤销记录）放到下一步接。
+// 改名的"落盘"和"失败回滚"都在 BatchRenameDialog 里做完了，这里只负责两件事：
+//   1. 全部成功之后把列表局部更新（不重扫目录），并选中改完名的那几项；
+//   2. 把整批改名压成一条撤销记录 —— 一次 Ctrl+Z 就把整批改回原名。
 // ============================================================================
 void MainWindow::DoBatchRename()
 {
@@ -1774,22 +1774,77 @@ void MainWindow::DoBatchRename()
     BatchRenameDialog dialog;
     std::vector<BatchRenameResult> results;
 
+    // 返回 true 只代表"整批都改成功了"；中途失败时窗口会自己留着提示，
+    // 走的是 false 这条路（文件一个都没变，这里也不用做什么）
     if (!dialog.ShowModal(m_hWnd, paths, results))
     {
         return;
     }
 
-    // 界面阶段先把结果记进日志，看一眼规则算出来的名字对不对
-    Logger::Info(L"批量重命名：确认了 " + std::to_wstring(results.size()) + L" 项");
-
-    for (const auto& result : results)
+    if (results.empty())
     {
-        Logger::Info(L"  " + result.oldPath + L"   →   " + result.newName);
+        return;
     }
 
-    ::MessageBoxW(m_hWnd,
-                  L"界面已确认，改名功能下一步接上（这一版点应用不会真的改文件）。",
-                  L"批量重命名", MB_OK | MB_ICONINFORMATION);
+    Logger::Info(L"批量重命名：已改名 " + std::to_wstring(results.size()) + L" 项");
+
+    // ---- 整批压一条撤销记录（beforePaths 原名，afterPaths 新名）----
+    {
+        UndoRecord record;
+        record.kind = UndoKind::Rename;
+
+        record.beforePaths.reserve(results.size());
+        record.afterPaths.reserve(results.size());
+
+        for (const auto& result : results)
+        {
+            record.beforePaths.push_back(result.oldPath);
+            record.afterPaths.push_back(
+                JoinDirectoryFile(NavigationHistory::ParentPath(result.oldPath), result.newName));
+        }
+
+        PushUndoRecord(record);
+    }
+
+    // ---- 局部更新：只换名字和路径，再按当前的排序规则重排，不重扫目录 ----
+    std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+
+    if (result != nullptr)
+    {
+        std::vector<std::wstring> renamedPaths;
+        renamedPaths.reserve(results.size());
+
+        for (const auto& rename : results)
+        {
+            const std::wstring newPath =
+                JoinDirectoryFile(NavigationHistory::ParentPath(rename.oldPath), rename.newName);
+
+            for (auto& entry : result->entries)
+            {
+                if (_wcsicmp(entry.fullPath.c_str(), rename.oldPath.c_str()) == 0)
+                {
+                    entry.name     = rename.newName;
+                    entry.fullPath = newPath;
+                    renamedPaths.push_back(newPath);
+                    break;
+                }
+            }
+        }
+
+        SortEntries();
+        m_fileListView.SetSortState(m_sortColumn, m_sortAscending);
+        m_fileListView.SetResult(result);
+
+        // 改完名还把这批项选着，方便接着操作（也能一眼看出是它们变了）
+        if (!renamedPaths.empty())
+        {
+            m_fileListView.SelectPaths(renamedPaths);
+            m_fileListView.EnsureVisiblePath(renamedPaths.front());
+        }
+
+        UpdateTitle();
+        UpdateStatusBar();
+    }
 }
 
 void MainWindow::DoDelete()
