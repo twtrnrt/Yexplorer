@@ -869,7 +869,7 @@ constexpr int kDropTipMaxTarget  = 320;  // 目标名最长画这么宽，再长
 constexpr int kDropTipHeight          = 30;
 constexpr int kDropTipSymbolSizeDot   = 12;   // + 号、禁止圈的方框（16 → 14 → 13 → 12）
 constexpr int kDropTipSymbolSizeArrow = 16;   // 箭头的方框（原 18，缩到 90%）
-constexpr int kDropTipSymbolShiftY    = 1;    // + 号和禁止圈居中后下移 1 像素（箭头不动）
+constexpr int kDropTipSymbolShiftY    = -1;   // + 号和禁止圈的垂直偏移（负数 = 上移）；箭头不受影响
 constexpr int kDropTipSupersample     = 4;    // 超采样倍数：4 倍画、再缩回去 = 抗锯齿
 
 // 提示条上要显示的内容：符号 + 动作词 + 目标名，三种颜色分开画
