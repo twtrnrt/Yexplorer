@@ -629,9 +629,13 @@ private:
     std::shared_ptr<std::atomic<LONGLONG>>       m_pasteDoneBytes;
     LONGLONG                                     m_pasteTotalBytes = 0;
 
-    // 状态栏里那条进度条（系统进度条控件的子窗口，纯色平面、只有颜色在推进）。
-    // 平时隐藏；粘贴「虚拟文件」时才创建/显示，结束后隐藏并把状态栏改回一格。
-    HWND                                         m_hPasteBar = nullptr;
+    // 状态栏里那条字符进度条：
+    //   m_pasteBarPosition 当前进度（0..1000）
+    //   m_pasteBarRect     这条条在状态栏客户区里占的矩形（布局时算好）
+    // 状态栏被我们子类化了，它自己画完背景/文字后，PaintPasteBar 在这块矩形里
+    // 补画一串"满块字符"，已完成那段一种颜色、剩下那段另一种颜色。
+    int                                          m_pasteBarPosition = 0;
+    RECT                                         m_pasteBarRect = {};
 
     // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
     std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
@@ -645,11 +649,21 @@ private:
     // 状态栏按"第 i/N 项 + 进度条"更新粘贴进度（界面线程调用）
     void UpdatePasteProgressText(size_t index, int percent);
 
-    // 把状态栏切成"左文字 / 进度条 / 右文字"三段，并把进度条摆到位
-    // （粘贴开始、窗口尺寸变化时调用）
+    // 把状态栏切成"左文字 / 字符进度条 / 右文字"三段
+    // （粘贴开始时调用一次；窗口尺寸变化时再调）
     void LayoutPasteBar();
 
-    // 粘贴结束：收起进度条，状态栏恢复成一整格
+    // 画那条字符进度条（状态栏子类化后，在它画完背景时被调用）
+    // 做法：整条都是同一个"满块字符"，已完成的那段用蓝色、剩下那段用浅灰，
+    // 所以看着是纯平面、粗细完全一致，只有颜色在往前推。
+    void PaintPasteBar();
+
+    // 状态栏的窗口过程（子类化）：先让系统照常画，再补画进度条那一段
+    static LRESULT CALLBACK StatusBarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                                  LPARAM lParam, UINT_PTR idSubclass,
+                                                  DWORD_PTR refData);
+
+    // 粘贴结束：状态栏恢复成一整格
     void RemovePasteBar();
 
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）

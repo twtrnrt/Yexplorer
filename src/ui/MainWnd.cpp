@@ -827,6 +827,12 @@ void MainWindow::CreateChildControls()
         ::SendMessageW(m_hStatusBar, WM_SETFONT, reinterpret_cast<WPARAM>(m_hUiFont), TRUE);
     }
 
+    // 状态栏要能"自己补画"粘贴进度条：子类化它的窗口过程。
+    // 系统状态栏只会写一行文字，画不出"两种颜色的字符条"，
+    // 所以我们让它照常画完背景和文字后，再在那块矩形里补画字符。
+    ::SetWindowSubclass(m_hStatusBar, &MainWindow::StatusBarSubclassProc, 1,
+                        reinterpret_cast<DWORD_PTR>(this));
+
     // ---------------- 6. 键盘快捷键 ----------------
     // 用系统的加速键表，好处是不用去拦截每个控件的按键消息
     //
@@ -2518,45 +2524,31 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
 }
 
 // ----------------------------------------------------------------------------
-// 状态栏里的进度条：切成"左文字 / 进度条 / 右文字"三段
+// 状态栏里的字符进度条：切成"左文字 / 字符条 / 右文字"三段
 //
-// 为什么改用系统的进度条控件（PROGRESS_CLASS），而不是拼字符：
-//   拼字符只能是单色的文字点阵，看着有颗粒/立体感，也没法"只靠颜色推进"。
-//   系统进度条是纯色平面色块，能指定颜色（这里用蓝 #0033CC + 浅灰底），
-//   粗细也固定（统一 10px），看起来干净。
+// 为什么用字符而不是进度条控件：
+//   整条就是状态栏里的一串"满块字符"（█ U+2588 FULL BLOCK）。
+//   所有格子用的是同一个字符，所以每格的高矮、粗细完全一致；
+//   已走完的那段用蓝色、剩下那段用浅灰 —— 只有颜色在往前推，
+//   没有渐变、没有描边、没有立体感，看着就是一条纯平的色带。
 //
-// 布局：
+// 怎么画：
+//   系统状态栏只会"写一行文字"，给不了两种颜色。所以把状态栏子类化，
+//   让它照常画完背景和文字后，我们再在那块矩形里补画字符（PaintPasteBar）。
+//
+// 分段：
 //   第 0 格：左边文字（正在粘贴：第 3/22 项）
-//   第 1 格：进度条的位置（控件盖在这一格上）
+//   第 1 格：字符条（这一格不放文字，留空给我们补画）
 //   第 2 格：右边文字（（按 ESC 取消））
 //
 // 左格宽度按"最坏情况"的文字量算（第 9999/9999 项），这样进度更新时
-// 文字变长变短，进度条都不会左右跳。
+// 文字变长变短，字符条都不会左右跳。
 // ----------------------------------------------------------------------------
 void MainWindow::LayoutPasteBar()
 {
     if (m_hStatusBar == nullptr)
     {
         return;
-    }
-
-    // 进度条控件懒创建：父窗口就是状态栏，跟着状态栏一起显示/隐藏
-    if (m_hPasteBar == nullptr)
-    {
-        m_hPasteBar = ::CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
-                                        WS_CHILD | PBS_SMOOTH,
-                                        0, 0, 10, 10,
-                                        m_hStatusBar, nullptr, m_hInstance, nullptr);
-
-        if (m_hPasteBar == nullptr)
-        {
-            Logger::Warn(L"状态栏进度条创建失败");
-            return;
-        }
-
-        ::SendMessageW(m_hPasteBar, PBM_SETRANGE32, 0, 1000);                  // 千分制，够细
-        ::SendMessageW(m_hPasteBar, PBM_SETBARCOLOR, 0, RGB(0, 51, 204));      // 已完成：蓝
-        ::SendMessageW(m_hPasteBar, PBM_SETBKCOLOR, 0, RGB(240, 240, 240));    // 未完成：浅灰
     }
 
     RECT client = {};
@@ -2581,14 +2573,14 @@ void MainWindow::LayoutPasteBar()
     ::SelectObject(dc, old);
     ::ReleaseDC(m_hStatusBar, dc);
 
-    int leftWidth  = leftSize.cx + 14;      // 左边文字，两侧留点空
-    int rightWidth = rightSize.cx + 12;
+    int leftWidth  = leftSize.cx + Scale(12);
+    int rightWidth = rightSize.cx + Scale(10);
     int barWidth   = totalWidth - leftWidth - rightWidth;
 
-    // 窗口特别窄时优先保住进度条，右文字挤一挤
-    if (barWidth < 80)
+    // 窗口特别窄时优先保住字符条，右文字挤一挤
+    if (barWidth < Scale(80))
     {
-        barWidth   = 80;
+        barWidth   = Scale(80);
         rightWidth = totalWidth - leftWidth - barWidth;
 
         if (rightWidth < 0)
@@ -2600,38 +2592,124 @@ void MainWindow::LayoutPasteBar()
     int parts[3] = { leftWidth, leftWidth + barWidth, -1 };
     ::SendMessageW(m_hStatusBar, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
 
-    // 进度条摆进第 1 格：左右各留 4px，高 10px（粗细一致），垂直居中
-    int barHeight = 10;
-
-    if (barHeight > totalHeight - 8)
-    {
-        barHeight = totalHeight - 8;
-    }
-
-    if (barHeight < 4)
-    {
-        barHeight = 4;
-    }
-
-    int barWidthInside = barWidth - 8;
-    if (barWidthInside < 10)
-    {
-        barWidthInside = 10;
-    }
-
-    ::SetWindowPos(m_hPasteBar, nullptr,
-                   leftWidth + 4, (totalHeight - barHeight) / 2,
-                   barWidthInside, barHeight,
-                   SWP_NOZORDER | SWP_NOACTIVATE);
+    // 第 1 格留空（不写文字），它的位置记下来，补画时用
+    ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(L""));
 
     // 右格文字固定，不随进度变化
     ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(rightText.c_str()));
 
-    ::ShowWindow(m_hPasteBar, SW_SHOW);
+    m_pasteBarRect.left   = leftWidth;
+    m_pasteBarRect.top    = 0;
+    m_pasteBarRect.right  = leftWidth + barWidth;
+    m_pasteBarRect.bottom = totalHeight;
 }
 
 // ----------------------------------------------------------------------------
-// 粘贴结束：收起进度条，状态栏恢复成一整格
+// 在状态栏第 1 格里补画字符进度条
+//
+// 只画字符本身，不铺底色 —— 状态栏自己的背景照旧，看起来才是一条状态栏。
+// ----------------------------------------------------------------------------
+void MainWindow::PaintPasteBar()
+{
+    if (m_hStatusBar == nullptr || ::IsRectEmpty(&m_pasteBarRect))
+    {
+        return;
+    }
+
+    RECT rc = m_pasteBarRect;
+
+    HDC dc = ::GetDC(m_hStatusBar);
+
+    if (dc == nullptr)
+    {
+        return;
+    }
+
+    // 用状态栏自己的字体（和左右两边的文字同一套，看着才是同一条状态栏）
+    HFONT font = reinterpret_cast<HFONT>(::SendMessageW(m_hStatusBar, WM_GETFONT, 0, 0));
+    HGDIOBJ oldFont = ::SelectObject(dc, font != nullptr ? font : ::GetStockObject(DEFAULT_GUI_FONT));
+
+    int      oldBkMode    = ::SetBkMode(dc, TRANSPARENT);
+    COLORREF oldTextColor = ::SetTextColor(dc, RGB(0, 51, 204));
+
+    // 量一个满块字符占多少像素，决定这一格能放几块
+    SIZE block = {};
+    ::GetTextExtentPoint32W(dc, L"\u2588", 1, &block);   // █ 满块
+
+    if (block.cx <= 0)
+    {
+        block.cx = Scale(8);
+    }
+
+    // 左右各留一点空，不贴着文字和右边文字
+    const int leftPad  = Scale(6);
+    const int rightPad = Scale(6);
+    const int usable   = (rc.right - rc.left) - leftPad - rightPad;
+
+    int columns = usable / block.cx;
+
+    if (columns < 1)
+    {
+        columns = 1;
+    }
+
+    int filled = m_pasteBarPosition * columns / 1000;
+
+    if (filled < 0)
+    {
+        filled = 0;
+    }
+    else if (filled > columns)
+    {
+        filled = columns;
+    }
+
+    const int y = rc.top + ((rc.bottom - rc.top) - block.cy) / 2;
+
+    // 已完成：蓝；未完成：浅灰。同一个字符，只有颜色不同
+    for (int i = 0; i < columns; ++i)
+    {
+        ::SetTextColor(dc, i < filled ? RGB(0, 51, 204) : RGB(210, 210, 210));
+        ::TextOutW(dc, rc.left + leftPad + i * block.cx, y, L"\u2588", 1);
+    }
+
+    ::SetTextColor(dc, oldTextColor);
+    ::SetBkMode(dc, oldBkMode);
+    ::SelectObject(dc, oldFont);
+    ::ReleaseDC(m_hStatusBar, dc);
+}
+
+// ----------------------------------------------------------------------------
+// 状态栏的窗口过程（子类化）
+//
+// 目的只有一个：系统按它自己的样式画完状态栏之后，我们立刻在那块矩形里
+// 补画字符进度条。这样既保留了系统的浅色底、右下的缩放抓手、文字对齐，
+// 又能画出"两段颜色"的字符条。
+// ----------------------------------------------------------------------------
+LRESULT CALLBACK MainWindow::StatusBarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                                   LPARAM lParam, UINT_PTR idSubclass,
+                                                   DWORD_PTR refData)
+{
+    // 先让系统照常处理（画背景、写左右两格文字）
+    const LRESULT result = ::DefSubclassProc(hwnd, msg, wParam, lParam);
+
+    MainWindow* self = reinterpret_cast<MainWindow*>(refData);
+
+    if (msg == WM_PAINT && self != nullptr)
+    {
+        self->PaintPasteBar();
+    }
+    else if (msg == WM_NCDESTROY)
+    {
+        // 窗口要销毁了：把自己的子类化摘掉（标准收尾，否则会留悬挂的引用）
+        ::RemoveWindowSubclass(hwnd, &MainWindow::StatusBarSubclassProc, idSubclass);
+    }
+
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// 粘贴结束：状态栏恢复成一整格
 // （之后的 UpdateStatusBar 会把"N 个项目"写回第 0 格）
 // ----------------------------------------------------------------------------
 void MainWindow::RemovePasteBar()
@@ -2641,14 +2719,12 @@ void MainWindow::RemovePasteBar()
         return;
     }
 
-    if (m_hPasteBar != nullptr)
-    {
-        ::ShowWindow(m_hPasteBar, SW_HIDE);
-    }
-
     int parts[1] = { -1 };
     ::SendMessageW(m_hStatusBar, SB_SETPARTS, 1, reinterpret_cast<LPARAM>(parts));
     ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, 0);
+
+    m_pasteBarPosition = 0;
+    ::SetRectEmpty(&m_pasteBarRect);
 }
 
 // ----------------------------------------------------------------------------
@@ -2666,10 +2742,9 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
     // ------------------------------------------------------------------
     // 算整批的完成度（0..1）
     //
-    // 按"字节"算：一格代表相同的字节量，于是大文件占的格子多、走得慢，
-    // 小文件占的格子少、走得快 —— 也就是"一个文件一格，文件越大格子越宽"
-    // 的效果（原来拼字符时是一格一格的，现在换成色块，推进速度保持同样语义）。
-    // 清单里一个大小都没给的时候，退回按"项数"估。
+    // 按字节算：一格代表差不多的字节量，于是大文件占的格子多、走得慢，
+    // 小文件占的格子少、走得快（也就是"一个文件一格，文件越大格子越宽"）。
+    // 清单里一个大小都没给的时候，退回按项数估。
     // ------------------------------------------------------------------
     double progress = 0.0;
 
@@ -2709,27 +2784,25 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
         progress = 1.0;
     }
 
-    // ------------------------------------------------------------------
-    // 进度条：只靠颜色推进（蓝往前长）
-    // ------------------------------------------------------------------
-    if (m_hPasteBar != nullptr)
+    int position = static_cast<int>(progress * 1000.0 + 0.5);
+
+    if (position < 0)
     {
-        int position = static_cast<int>(progress * 1000.0 + 0.5);
-
-        if (position < 0)
-        {
-            position = 0;
-        }
-        else if (position > 1000)
-        {
-            position = 1000;
-        }
-
-        ::SendMessageW(m_hPasteBar, PBM_SETPOS, static_cast<WPARAM>(position), 0);
+        position = 0;
+    }
+    else if (position > 1000)
+    {
+        position = 1000;
     }
 
     // ------------------------------------------------------------------
-    // 左边文字：正在粘贴：第 3/22 项
+    // 字符条：只让"那一段"重画，不整条状态栏刷（省得闪）
+    // ------------------------------------------------------------------
+    m_pasteBarPosition = position;
+    ::InvalidateRect(m_hStatusBar, &m_pasteBarRect, FALSE);
+
+    // ------------------------------------------------------------------
+    // 第 0 格：左边文字"正在粘贴：第 3/22 项"
     // ------------------------------------------------------------------
     std::wstring text = L"正在粘贴";
 
@@ -2738,7 +2811,6 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
         text += L"：第 " + std::to_wstring(index) + L"/" + std::to_wstring(m_pasteTotalItems) + L" 项";
     }
 
-    // 内容没变就不重设，避免状态栏反复重绘
     if (text == m_pasteProgressText)
     {
         return;
