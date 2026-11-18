@@ -645,4 +645,10 @@ private:
     // 两条分隔线的位置：LayoutChildren 里算好，WM_PAINT 直接照着画
     RECT m_addressDividerRect = {};    // 地址栏下面那条横线
     RECT m_paneDividerRect    = {};    // 左栏右边那条竖线
+
+    // 上一次布局时两条线的位置。
+    // 用途：窗口变窄/变矮以后，线会跟着变短，旧线多出来的那一截要把重画区域
+    // 一起算进来，否则旧线会留在界面上擦不掉。
+    RECT m_prevAddressDividerRect = {};
+    RECT m_prevPaneDividerRect    = {};
 };

@@ -6410,7 +6410,7 @@ void MainWindow::LayoutChildren()
     int clientWidth  = clientRect.right  - clientRect.left;
     int clientHeight = clientRect.bottom - clientRect.top;
 
-    int margin     = Scale(8);
+     int margin     = Scale(8);
     int buttonWidth  = Scale(34);
     int buttonHeight = Scale(32);
     int gap        = Scale(4);
@@ -6423,29 +6423,67 @@ void MainWindow::LayoutChildren()
     ::GetWindowRect(m_hStatusBar, &statusRect);
     int statusHeight = statusRect.bottom - statusRect.top;
 
+    // ------------------------------------------------------------------
+    // 子窗口批量布局
+    //
+    // 以前是一个控件一次 SetWindowPos：拖动窗口时每动一个控件都各自重绘一轮，
+    // 父窗口再刷一次背景，一帧要刷十来遍，手感就很"重"。
+    // 改成 Begin/Defer/End 一次性提交：中间不重绘，最后统一刷。
+    // ------------------------------------------------------------------
+    HDWP deferredLayout = ::BeginDeferWindowPos(12);
+
+    // 把控件塞进批量布局；万一中途失败，就先把已排队的提交、再单独摆这一个，
+    // 保证不会漏掉任何控件（宁慢勿错）。
+    auto placeWindow = [&deferredLayout](HWND hwnd, int x, int y, int w, int h)
+    {
+        if (hwnd == nullptr)
+        {
+            return;
+        }
+
+        if (deferredLayout == nullptr)
+        {
+            ::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+
+        HDWP next = ::DeferWindowPos(deferredLayout, hwnd, nullptr,
+                                     x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+
+        if (next == nullptr)
+        {
+            ::EndDeferWindowPos(deferredLayout);
+            deferredLayout = nullptr;
+            ::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+
+        deferredLayout = next;
+    };
+
     // ---- 导航按钮 ----
     int buttonY = (navHeight - buttonHeight) / 2;
     int cursorX = margin;
 
-    m_homeButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    placeWindow(m_homeButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
-    m_backButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    placeWindow(m_backButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
-    m_forwardButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    placeWindow(m_forwardButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
-    m_upButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    placeWindow(m_upButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + gap;
 
-    m_refreshButton.Resize(cursorX, buttonY, buttonWidth, buttonHeight);
+    placeWindow(m_refreshButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
     cursorX += buttonWidth + Scale(8);   // 按钮组和地址栏之间留宽一点
 
     // ---- 计算机图标（地址栏左端，和路径共用白色底）----
     int addressY = (navHeight - addressHeight) / 2;
     int computerWidth = Scale(28);
-    m_thisPcButton.Resize(cursorX, addressY, computerWidth, addressHeight);
+    placeWindow(m_thisPcButton.Handle(), cursorX, addressY, computerWidth, addressHeight);
     cursorX += computerWidth;
 
     // ---- 地址栏 ----
@@ -6456,9 +6494,9 @@ void MainWindow::LayoutChildren()
     {
         addressWidth = Scale(150);
     }
-    m_addressBar.Resize(cursorX, addressY, addressWidth, addressHeight);
+    placeWindow(m_addressBar.Handle(), cursorX, addressY, addressWidth, addressHeight);
 
-    m_settingsButton.Resize(cursorX + addressWidth, addressY, settingsWidth, addressHeight);
+    placeWindow(m_settingsButton.Handle(), cursorX + addressWidth, addressY, settingsWidth, addressHeight);
 
     // ---- 地址栏下面那条横线 ----
     // 整条窗口宽，把上方"路径 + 按钮"的工具条和下面的内容区隔开
@@ -6496,17 +6534,13 @@ void MainWindow::LayoutChildren()
 
         // 左栏铺满整条（0 ~ 竖线）：选中那一行的高亮要占满整条，
         // 图标和文字的 10 像素留白在 NavigationPane 内部处理
-        m_navigationPane.Resize(0, contentY, paneWidth, contentHeight);
+        placeWindow(m_navigationPane.Handle(), 0, contentY, paneWidth, contentHeight);
 
         // 左栏右边那条竖线，宽 1 像素
         m_paneDividerRect.left   = paneWidth;
         m_paneDividerRect.top    = contentY;
         m_paneDividerRect.right  = paneWidth + 1;
         m_paneDividerRect.bottom = contentY + contentHeight;
-
-        // 文件列表从竖线右边开始
-        m_fileListView.Resize(paneWidth + 1, contentY,
-                              clientWidth - paneWidth - 1, contentHeight);
     }
     else
     {
@@ -6516,11 +6550,50 @@ void MainWindow::LayoutChildren()
         }
 
         ::SetRectEmpty(&m_paneDividerRect);
+    }
+
+    // 上面所有子窗口的位置一次性提交（中间过程不重绘，只统一刷一次）
+    if (deferredLayout != nullptr)
+    {
+        ::EndDeferWindowPos(deferredLayout);
+        deferredLayout = nullptr;
+    }
+
+    // 文件列表放在批量提交之后单独摆：
+    // 它内部要按"自己的最终宽度"重排列宽（LayoutColumns），
+    // 所以必须等它的尺寸真正生效之后再算，否则算出来的是旧宽度。
+    if (showPane)
+    {
+        m_fileListView.Resize(paneWidth + 1, contentY,
+                              clientWidth - paneWidth - 1, contentHeight);
+    }
+    else
+    {
         m_fileListView.Resize(0, contentY, clientWidth, contentHeight);
     }
 
-    // 布局变了，窗口自己那两条线要重画
-    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+    // ------------------------------------------------------------------
+    // 只作废两条分隔线（新旧位置取并集），不再整块客户区作废。
+    //
+    // 为什么要并集：窗口变窄/变矮以后线会跟着变短，旧线多出来的那一段
+    // 也在客户区里，光作废新矩形会擦不掉它，所以把上一次画的矩形也算进来。
+    // 背景不用整块重刷：子控件区域被 WS_CLIPCHILDREN 挡住了，
+    // 真正需要重画的只有这两条 1 像素的线所在的细长区域。
+    // ------------------------------------------------------------------
+    RECT dirtyAddress = {};
+    if (::UnionRect(&dirtyAddress, &m_addressDividerRect, &m_prevAddressDividerRect))
+    {
+        ::InvalidateRect(m_hWnd, &dirtyAddress, FALSE);
+    }
+
+    RECT dirtyPane = {};
+    if (::UnionRect(&dirtyPane, &m_paneDividerRect, &m_prevPaneDividerRect))
+    {
+        ::InvalidateRect(m_hWnd, &dirtyPane, FALSE);
+    }
+
+    m_prevAddressDividerRect = m_addressDividerRect;
+    m_prevPaneDividerRect    = m_paneDividerRect;
 }
 
 // 鼠标是不是压在那条竖线上

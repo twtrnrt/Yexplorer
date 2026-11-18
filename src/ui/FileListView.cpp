@@ -29,7 +29,14 @@
 static const int kTimeColumnWidth  = 160;   // 修改日期（默认值，用户拖过之后用拖出来的）
 static const int kTypeColumnWidth  = 120;   // 类型
 static const int kSizeColumnWidth  = 110;   // 大小
-static const int kNameColumnMin    = 260;   // 名称列保底宽度
+static const int kNameColumnMin    = 180;   // 名称列保底宽度
+
+// 表格右侧固定留出的空白带宽（单位：像素）。
+// 目的：文件列表右侧留一块"不属于任何列"的区域，用户可以在那里点右键，
+// 弹出文件夹背景菜单（新建 / 粘贴 / 刷新 / 属性 等），不用去挤两行文件之间的缝隙。
+// 这里是"恒定留"，不判断有没有滚动条：有滚动条时就是"37px 白 + 滚动条"，
+// 好处是任何窗口、任何目录、任何滚动状态表现都一致，不会有"时有时无"的情况。
+static const int kRightBlankWidth  = 37;
 
 // ============================================================================
 // 按字母跳转：超时与匹配
@@ -576,9 +583,15 @@ void FileListView::LayoutColumns()
     RECT clientRect = {};
     ::GetClientRect(m_hWnd, &clientRect);
 
-    int fixedWidth     = m_timeColumnWidth + m_typeColumnWidth + m_sizeColumnWidth;
-    int scrollBarWidth = ::GetSystemMetrics(SM_CXVSCROLL);
-    int nameWidth      = (clientRect.right - clientRect.left) - fixedWidth - scrollBarWidth;
+    // 客户区宽（注意：如果出现了竖直滚动条，这个宽度**已经不含**滚动条）
+    const int clientWidth = clientRect.right - clientRect.left;
+
+    const int fixedWidth = m_timeColumnWidth + m_typeColumnWidth + m_sizeColumnWidth;
+
+    // 名称列 = 剩下的全部宽度，但右侧固定留出 kRightBlankWidth。
+    // 以前这里减的是 SM_CXVSCROLL（滚动条宽度），等于"自动"留出一条 17px 的空白，
+    // 现在改成固定常量，条宽由需求直接定，也不再依赖滚动条状态。
+    int nameWidth = clientWidth - fixedWidth - kRightBlankWidth;
 
     if (nameWidth < kNameColumnMin)
     {
@@ -1045,10 +1058,27 @@ void FileListView::Resize(int x, int y, int width, int height)
         return;
     }
 
+    // ------------------------------------------------------------------
+    // 先关掉重绘，把"改尺寸"和"改列宽"两件事都做完，最后只重绘一次。
+    //
+    // 背景：一次改尺寸会让系统整表重绘一遍（实测这台机器上 42 项 ≈ 40ms），
+    // 紧接着改列宽又会让它再整表重绘一遍 —— 拖窗口时一帧要画两遍。
+    // 中间那遍完全看不到，纯属白花时间，所以这里把两件事合并成一次。
+    // ------------------------------------------------------------------
+    ::SendMessageW(m_hWnd, WM_SETREDRAW, FALSE, 0);
+
     ::SetWindowPos(m_hWnd, nullptr, x, y, width, height,
                    SWP_NOZORDER | SWP_NOACTIVATE);
 
-    LayoutColumns();
+    // 宽度没变就不用重排列宽：
+    // 拖上下边框、或只改高度时宽度是同一个值，而每次 SetColumnWidth(名称列)
+    // 都会让整个列表重排一遍。
+    // 真正的列宽计算仍然在窗口宽度变化、切目录（SetResult）、按 Ctrl+加号时发生。
+    if (width != m_lastLayoutWidth)
+    {
+        m_lastLayoutWidth = width;
+        LayoutColumns();
+    }
 
     // 列表视图的名字占满宽度要跟着窗口走，否则拉宽窗口后右边一片空白、名字还是被截着
     if (m_viewMode == ViewMode::List)
@@ -1057,6 +1087,10 @@ void FileListView::Resize(int x, int y, int width, int height)
     }
 
     // 平铺视图下格子宽度是固定的 300，这里不用跟着窗口改
+
+    // 打开重绘，最后统一刷一次
+    ::SendMessageW(m_hWnd, WM_SETREDRAW, TRUE, 0);
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
 }
 
 void FileListView::SetResult(std::shared_ptr<shell::EnumerateResult> result)

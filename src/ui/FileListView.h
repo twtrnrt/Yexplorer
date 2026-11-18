@@ -319,6 +319,11 @@ private:
     int                                           m_timeColumnWidth = 160;
     int                                           m_typeColumnWidth = 120;
     int                                           m_sizeColumnWidth = 110;
+
+    // 上一次做列宽排版时的控件宽度。
+    // 用途：只有宽度真的变了才需要重排列宽；拖上下边框、或只改高度时宽度不变，
+    // 每次都 SetColumnWidth 会让整个列表白白重排一遍。
+    int                                           m_lastLayoutWidth = -1;
     HFONT                                         m_hFont     = nullptr;
     HFONT                                         m_hHeaderFont = nullptr;   // 分组标题用的粗体字
 
