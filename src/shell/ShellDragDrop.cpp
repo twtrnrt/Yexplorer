@@ -1069,17 +1069,42 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         const COLORREF actionColor = content.forbidden ? kDropTipForbidden : kDropTipAction;
         const COLORREF targetColor = content.forbidden ? kDropTipForbidden : kDropTipTarget;
 
-        // 符号：直接用 Segoe UI Symbol 的字形（矢量、有抗锯齿），颜色跟着状态走
+        // 符号：直接用 Segoe UI Symbol 的字形（矢量、有抗锯齿），颜色跟着状态走。
+        //
+        // 为什么不用 DT_VCENTER：文字和符号是两种字体、字号还差一倍，
+        // 行盒（tmHeight）里 ascent 与 descent 的分配比例不一样，
+        // 两边都按行盒居中时，符号的视觉中心会偏离文字那条中线，看上去就是"字没对齐"。
+        // 这里改成自己算：先求出中文那行字形的视觉中线，再把符号的视觉中线摆到同一条线上。
         if (hasSymbol)
         {
             const std::wstring symbolText = DropTipSymbolText(content.symbol);
             HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
             HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
 
-            RECT rect = { x, client.top, x + symbolSize.cx + 2, client.bottom };
+            TEXTMETRICW symbolMetrics = {};
+            ::GetTextMetricsW(dc, &symbolMetrics);
+
+            // 中文那侧的字度量：DC 里当前选的是符号字体，先切回正文量一次再切回来
+            ::SelectObject(dc, DropTipFont());
+            TEXTMETRICW textMetrics = {};
+            ::GetTextMetricsW(dc, &textMetrics);
+            ::SelectObject(dc, symbolFont);
+
+            // 文字的基线：DT_VCENTER 下 行盒顶 = 内容区顶 + (内容高 - tmHeight)/2，基线 = 行盒顶 + tmAscent
+            const int textLineTop  = client.top + ((client.bottom - client.top) - textMetrics.tmHeight) / 2;
+            const int textBaseline = textLineTop + textMetrics.tmAscent;
+
+            // 汉字字形上下基本填满 em 框，视觉中线 = 基线往上 (ascent - descent)/2
+            const int visualCenter = textBaseline - (textMetrics.tmAscent - textMetrics.tmDescent) / 2;
+
+            // 符号也一样：假设它的字形居中在自己的 em 框里，
+            // 那么把 em 框的上边界摆到 (视觉中线 - tmHeight/2) 就一定对齐
+            const int symbolTop = visualCenter - symbolMetrics.tmHeight / 2;
+
+            RECT rect = { x, symbolTop, x + symbolSize.cx + 2, symbolTop + symbolMetrics.tmHeight + 2 };
             ::SetTextColor(dc, actionColor);
             ::DrawTextW(dc, symbolText.c_str(), static_cast<int>(symbolText.size()), &rect,
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
             if (oldSymbolFont != nullptr)
             {
@@ -1404,8 +1429,15 @@ private:
             }
         }
 
+        // 文字的行盒高度：提示条高度必须按"行盒"（tmHeight）算。
+        // WM_PAINT 里给符号定位用的也是行盒，两边要是各按各的（一边用字符黑框、一边用行盒），
+        // 大字号符号就会贴边甚至被截掉。
+        TEXTMETRICW textMetrics = {};
+        ::GetTextMetricsW(dc, &textMetrics);
+
         // 符号也换成符号字体量（跟 WM_PAINT 里必须一致）
         SIZE symbolSize = {};
+        TEXTMETRICW symbolMetrics = {};
         if (content.symbol != 0)
         {
             const std::wstring symbolText = DropTipSymbolText(content.symbol);
@@ -1414,6 +1446,7 @@ private:
 
             ::GetTextExtentPoint32W(dc, symbolText.c_str(),
                                     static_cast<int>(symbolText.size()), &symbolSize);
+            ::GetTextMetricsW(dc, &symbolMetrics);
 
             if (oldSymbolFont != nullptr)
             {
@@ -1439,10 +1472,12 @@ private:
 
         // 提示条高度要装得下符号：复制的加号是按两倍字号画的，比文字高不少，
         // 只按文字高度算的话，加号上下会被窗口边界截掉。
-        int contentHeight = (actionSize.cy > 0 ? actionSize.cy : targetSize.cy);
-        if (symbolSize.cy > contentHeight)
+        int contentHeight = (textMetrics.tmHeight > 0)
+                            ? textMetrics.tmHeight
+                            : (actionSize.cy > 0 ? actionSize.cy : targetSize.cy);
+        if (symbolMetrics.tmHeight > contentHeight)
         {
-            contentHeight = symbolSize.cy;
+            contentHeight = symbolMetrics.tmHeight;
         }
 
         const int height = contentHeight + kDropTipPaddingY * 2;
