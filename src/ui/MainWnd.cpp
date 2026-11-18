@@ -2575,7 +2575,8 @@ void MainWindow::LayoutPasteBar()
     ::SelectObject(dc, old);
     ::ReleaseDC(m_hStatusBar, dc);
 
-    int leftWidth  = leftSize.cx + Scale(12);
+    // 左文字格：只在其字宽上加一点点空，让进度条紧贴着"项"字后面
+    int leftWidth  = leftSize.cx + Scale(4);
     int rightWidth = rightSize.cx + Scale(10);
 
     // 进度条固定 300px（不是拉满整条状态栏），右边留白无所谓
@@ -2631,9 +2632,22 @@ void MainWindow::PaintPasteBar()
         return;
     }
 
-    // 条本身固定 10px 高、上下居中，两端各留一点空
-    const int barHeight = Scale(10);
-    const int top       = rc.top + ((rc.bottom - rc.top) - barHeight) / 2;
+    // 条本身 18px 高（状态栏装不下时自动缩），上下居中，两端各留一点空
+    const int statusHeight = rc.bottom - rc.top;
+
+    int barHeight = Scale(18);
+
+    if (barHeight > statusHeight - Scale(4))
+    {
+        barHeight = statusHeight - Scale(4);
+    }
+
+    if (barHeight < Scale(6))
+    {
+        barHeight = Scale(6);
+    }
+
+    const int top = rc.top + (statusHeight - barHeight) / 2;
 
     const int barLeft  = rc.left + Scale(3);
     const int barRight = rc.right - Scale(3);
@@ -2646,8 +2660,8 @@ void MainWindow::PaintPasteBar()
 
     RECT track = { barLeft, top, barRight, top + barHeight };
 
-    // 1. 未完成部分：浅灰底
-    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(214, 214, 214));
+    // 1. 未完成部分：浅灰底（188,188,188）
+    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(188, 188, 188));
     ::FillRect(dc, &track, undoneBrush);
     ::DeleteObject(undoneBrush);
 
@@ -2675,7 +2689,8 @@ void MainWindow::PaintPasteBar()
         const int      barWidth = barRight - barLeft;
         const size_t   count    = m_pasteItemSizes->size();
 
-        HBRUSH lineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
+        // 底色改成 188 之后，线要更深一点才看得出来（150 在 188 上几乎分不清）
+        HBRUSH lineBrush = ::CreateSolidBrush(RGB(120, 120, 120));
 
         LONGLONG cumulative = 0;
 
