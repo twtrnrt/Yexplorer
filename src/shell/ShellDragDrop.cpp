@@ -866,10 +866,10 @@ constexpr int kDropTipWordGap    = 4;    // 动作词和目标名之间留的缝
 constexpr int kDropTipMaxTarget  = 320;  // 目标名最长画这么宽，再长就省略号
 
 // 提示条固定高度（用户定的：固定 30，不跟着符号大小变，三种状态一样高）。
-// 30 里上下各留 6 像素，正好放得下 18 像素的箭头。
 constexpr int kDropTipHeight          = 30;
-constexpr int kDropTipSymbolSizeDot   = 16;   // + 号、禁止圈
-constexpr int kDropTipSymbolSizeArrow = 18;   // 箭头：笔画细，给大一点
+constexpr int kDropTipSymbolSizeDot   = 14;   // + 号、禁止圈的方框（原 16，用户要求缩到 90%）
+constexpr int kDropTipSymbolSizeArrow = 16;   // 箭头的方框（原 18，同样缩到 90%）
+constexpr int kDropTipSymbolLiftY     = 1;    // 图标整体上移 1 像素（用户定的）
 constexpr int kDropTipSupersample     = 4;    // 超采样倍数：4 倍画、再缩回去 = 抗锯齿
 
 // 提示条上要显示的内容：符号 + 动作词 + 目标名，三种颜色分开画
@@ -979,9 +979,12 @@ void DrawDropTipSymbol(HDC target, int symbol, int left, int top, int size, COLO
     ::FillRect(canvasDc, &canvasRect, static_cast<HBRUSH>(::GetStockObject(BLACK_BRUSH)));
     ::SetBkMode(canvasDc, TRANSPARENT);
 
-    // 线宽按目标尺寸的 13% 取（16 像素 → 2 像素），再乘超采样倍数
-    const int stroke = (size * 13 + 50) / 100;
-    const int penWidth = ((stroke < 1) ? 1 : stroke) * supersample;
+    // 线宽：默认按目标尺寸的 13% 取（14 像素 → 2 像素）；
+    // 箭头单独取 8%（16 像素 → 1 像素）——它的头只有 4 像素宽，
+    // 杆要是也 2 像素，杆和头就糊成一根斜杠，看不出是箭头了。
+    const int strokePercent = (symbol == 2) ? 8 : 13;
+    const int stroke    = (size * strokePercent + 50) / 100;
+    const int penWidth  = ((stroke < 1) ? 1 : stroke) * supersample;
 
     HPEN   whitePen = ::CreatePen(PS_SOLID, penWidth, RGB(255, 255, 255));
     HGDIOBJ oldPen  = ::SelectObject(canvasDc, whitePen);
@@ -1001,17 +1004,19 @@ void DrawDropTipSymbol(HDC target, int symbol, int left, int top, int size, COLO
         ::LineTo(canvasDc, center, center + arm);
         break;
     }
-    case 2:   // 箭头：一根 45 度斜杆 + 一个实心三角尖（指向左下，跟原来 ⬉ 同方向）
+    case 2:   // 箭头：一根 45 度斜杆 + 一个实心三角尖，指向「左上」
+              // （原来是字体字符 ⬉ U+2B09 = NORTH WEST ARROW，也就是左上；之前画成左下是画错了方向）
     {
-        // 斜杆从右上往左下，正好接到三角尖的斜边中点
-        ::MoveToEx(canvasDc, big * 78 / 100, big * 22 / 100, nullptr);
-        ::LineTo(canvasDc, big * 36 / 100, big * 64 / 100);
+        // 斜杆从右下往左上；末端接到三角尖斜边的中点，接缝才连得上
+        ::MoveToEx(canvasDc, big * 78 / 100, big * 78 / 100, nullptr);
+        ::LineTo(canvasDc, big * 33 / 100, big * 33 / 100);
 
-        // 三角尖：尖在左下，另两点在它正上方、正右方，所以这是个等腰直角三角
+        // 三角尖：尖在左上，另两点在它正下方、正右方。
+        // 跨度 0.26（原来 0.32），用户说头太大，缩一圈。
         POINT triangle[3] = {
-            { big * 18 / 100, big * 82 / 100 },   // 尖
-            { big * 18 / 100, big * 50 / 100 },   // 上角
-            { big * 50 / 100, big * 82 / 100 }    // 右角
+            { big * 18 / 100, big * 18 / 100 },   // 尖
+            { big * 18 / 100, big * 44 / 100 },   // 下角
+            { big * 44 / 100, big * 18 / 100 }    // 右角
         };
         ::SelectObject(canvasDc, ::GetStockObject(WHITE_BRUSH));
         ::Polygon(canvasDc, triangle, 3);
@@ -1199,7 +1204,8 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (hasSymbol)
         {
             const int symbolSize = DropTipSymbolSize(content.symbol);
-            const int symbolTop  = client.top + ((client.bottom - client.top) - symbolSize) / 2;
+            const int symbolTop  = client.top + ((client.bottom - client.top) - symbolSize) / 2
+                                   - kDropTipSymbolLiftY;   // 用户要求整体上移 1 像素
 
             DrawDropTipSymbol(dc, content.symbol, x, symbolTop, symbolSize, actionColor);
 
