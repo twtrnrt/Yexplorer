@@ -2523,6 +2523,10 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     m_menuDrawItems.clear();
     m_menuPrimaryIsContainerFile = false;
 
+    // 屏蔽「剪切 / 删除」的标记（「主文件夹」里的桌面、文档这些系统入口用），
+    // 每次弹菜单先清掉，下面判定场景时再按需要打开
+    m_menuSuppressDeleteCut = false;
+
     // 这次右键是"按住 Shift 点的"吗？
     // 是的话「删除」执行永久删除（不进回收站），菜单文字保持和资源管理器一样（仍是「删除」），
     // 只是点下去之后系统会弹"确实要永久删除"的确认框。
@@ -2548,6 +2552,7 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
         bool isGroupHeader = false;
         bool isFolder      = false;
         bool isContainerFile = false;
+        bool isSystemItem  = false;
 
         if (result != nullptr)
         {
@@ -2558,8 +2563,16 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
                 isGroupHeader = entry.isGroupHeader || entry.isSpacer;
                 isFolder      = entry.isFolder;
                 isContainerFile = entry.isContainerFile;
+                isSystemItem  = entry.isSystemItem;
             }
         }
+
+        // 「主文件夹」（本程序对顶层桌面容器的叫法）里的系统入口 —— 桌面、文档、
+        // 下载、图片、音乐这些 —— 不给「剪切」和「删除」：
+        // 它们是 Shell 重定向的已知文件夹（位置记在用户配置里），搬不走也删不得，
+        // 系统资源管理器里同样没有这两项。其余目录（比如 C:\Users\xxx）里的同名文件夹
+        // 不算系统项，照旧给。
+        m_menuSuppressDeleteCut = isSystemItem && shell::IsTopDesktopPath(m_history.Current());
 
         primaryIsFolder = isFolder;
 
@@ -2834,7 +2847,15 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPat
     ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING | (CanCutPath(folderPath) ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
+
+    // 「主文件夹」里的系统入口（桌面 / 文档 / 下载 / 图片 / 音乐…）不给「剪切」：
+    // 这些是 Shell 重定向的已知文件夹，位置由用户配置决定，搬不走；
+    // 系统资源管理器的「主文件夹」里也没有这一项。
+    if (!m_menuSuppressDeleteCut)
+    {
+        ::AppendMenuW(menu, MF_STRING | (CanCutPath(folderPath) ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
+    }
+
     ::AppendMenuW(menu, MF_STRING | (CanCopyPath(folderPath) ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
     ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
 
@@ -2843,9 +2864,13 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPat
     FillUndoItem(menu);
 
     // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
-    ::AppendMenuW(menu, MF_STRING,
-                  m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
-                  L"删除(&D)");
+    // 主文件夹里的系统入口同样不给「删除」（删掉就是删掉整个"桌面/文档"入口）
+    if (!m_menuSuppressDeleteCut)
+    {
+        ::AppendMenuW(menu, MF_STRING,
+                      m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
+                      L"删除(&D)");
+    }
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");

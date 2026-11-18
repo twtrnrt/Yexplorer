@@ -262,6 +262,12 @@ private:
     // 由 ShowContextMenu 在拼菜单前填好。
     bool m_menuPermanentDelete = false;
 
+    // 这次右键的对象要不要屏蔽「剪切」和「删除」？
+    // 只有「主文件夹」里的桌面 / 文档 / 下载 / 图片 / 音乐这些系统入口才会打开
+    // （它们是 Shell 重定向的已知文件夹，位置固定，搬不走也删不得）。
+    // 同样由 ShowContextMenu 在拼菜单前填好。
+    bool m_menuSuppressDeleteCut = false;
+
     // 查看 / 新建文件夹 + 新建 这两块公共片段
     void FillViewMenu(HMENU parentMenu);
     void FillNewFolderAndNewMenu(HMENU menu);
