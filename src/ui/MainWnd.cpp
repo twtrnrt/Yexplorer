@@ -1035,6 +1035,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         LayoutChildren();
 
+        // 正在粘贴虚拟文件时，状态栏宽度变了，进度条要重新摆位（不然会错位/被截断）
+        if (m_pasteInProgress.load())
+        {
+            LayoutPasteBar();
+        }
+
         // 窗口宽度变了，「此电脑」平铺一行能放几块卡片就变了，
         // 分组标题后面的占位格数要跟着重算，否则标题行填不满、卡片会乱跑
         RefreshThisPcGrouping();
@@ -1522,10 +1528,11 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             m_pasteTotalItems = 0;
             m_lastStatusText.clear();   // 让下面的 UpdateStatusBar 真的把计数写回去
 
-            // 进度条的数据也一并收掉（下次粘贴会重新建）
+            // 进度条数据一并收掉，状态栏恢复成一整格（下次粘贴会重新建）
             m_pasteItemSizes.reset();
             m_pasteDoneBytes.reset();
             m_pasteTotalBytes = 0;
+            RemovePasteBar();
         }
 
         if (SUCCEEDED(hr))
@@ -1926,7 +1933,12 @@ void MainWindow::StartEnumeration(const std::wstring& path)
     }
 
     // 等后台文件操作收尾（大文件正在复制时会等它结束，或者用户在进度框点了取消）
-    if (m_operationThread.joinable())
+    //
+    // 例外：粘贴「虚拟文件」（远程桌面那类）不等。
+    // 那种粘贴大文件可能要几分钟，等它等于用户一点"切到别的目录"就整个卡住。
+    // 它写的是"开始粘贴时定下的那个目录"，跟用户现在看哪个目录无关；
+    // 写完自己会发 WM_APP_OPERATION_DONE 刷新，不会留下不一致。
+    if (m_operationThread.joinable() && !m_pasteInProgress.load())
     {
         m_operationThread.join();
     }
@@ -2295,11 +2307,13 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
     m_operationPaths.clear();                       // 没有源路径可记
     m_operationTargetDirectory = targetDirectory;
 
-    // 状态栏切成进度显示，并把 ESC 取消打开
+    // 状态栏切成进度显示（左文字 / 蓝条 / 右文字），并把 ESC 取消打开
     m_pasteInProgress.store(true);
     m_pasteTotalItems   = 0;
     m_pasteProgressText = L"正在粘贴…";
     m_lastStatusText.clear();   // 让收尾时能立刻把"N 个项目"写回去
+
+    LayoutPasteBar();
     ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(m_pasteProgressText.c_str()));
 
     HWND                                      notifyWindow = m_hWnd;
@@ -2504,126 +2518,137 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
 }
 
 // ----------------------------------------------------------------------------
-// 拼一条字符进度条（纯文字，不用控件，也不自绘）
-//   progress 0..1
-//   columns  一共几格
+// 状态栏里的进度条：切成"左文字 / 进度条 / 右文字"三段
 //
-// 满格用 █（U+2588 全块），空格用 ░（U+2591 浅底），
-// 半格用 ▏▎▍▌▋▊▉（U+258F..U+2589，1/8 递进）——
-// 这样进度能一格一格地"长"，不会一下跳一整格。
+// 为什么改用系统的进度条控件（PROGRESS_CLASS），而不是拼字符：
+//   拼字符只能是单色的文字点阵，看着有颗粒/立体感，也没法"只靠颜色推进"。
+//   系统进度条是纯色平面色块，能指定颜色（这里用蓝 #0033CC + 浅灰底），
+//   粗细也固定（统一 10px），看起来干净。
 //
-// 这几个字符实测在状态栏字体里都有字形、而且宽度一致（都是 12px @96dpi），
-// 所以整条看起来是齐的。
-// ----------------------------------------------------------------------------
-static std::wstring BuildPasteProgressBar(double progress, int columns)
-{
-    // 1/8 到 7/8 的块字符（下标就是"几份之八"）
-    static const wchar_t* kEighthBlocks[8] =
-    {
-        L"", L"▏", L"▎", L"▍", L"▌", L"▋", L"▊", L"▉"
-    };
-
-    if (columns < 1)
-    {
-        columns = 1;
-    }
-
-    if (progress < 0.0)
-    {
-        progress = 0.0;
-    }
-    else if (progress > 1.0)
-    {
-        progress = 1.0;
-    }
-
-    // 先算"填满了几个整格"，剩下的不足一格用 1/8 块表示
-    const double filled = progress * static_cast<double>(columns);
-    int full  = static_cast<int>(filled);
-    int eighth = static_cast<int>((filled - static_cast<double>(full)) * 8.0 + 0.5);
-
-    if (eighth >= 8)
-    {
-        ++full;
-        eighth = 0;
-    }
-
-    if (full >= columns)
-    {
-        full   = columns;
-        eighth = 0;
-    }
-
-    std::wstring bar;
-    bar.reserve(static_cast<size_t>(columns) + 4);
-
-    for (int i = 0; i < full; ++i)
-    {
-        bar += L"█";
-    }
-
-    if (eighth > 0)
-    {
-        bar += kEighthBlocks[eighth];
-    }
-
-    for (int i = full + (eighth > 0 ? 1 : 0); i < columns; ++i)
-    {
-        bar += L"░";
-    }
-
-    return bar;
-}
-
-// ----------------------------------------------------------------------------
-// 状态栏这条进度条能放几格
+// 布局：
+//   第 0 格：左边文字（正在粘贴：第 3/22 项）
+//   第 1 格：进度条的位置（控件盖在这一格上）
+//   第 2 格：右边文字（（按 ESC 取消））
 //
-// 不能写死格数：字符宽度随字体/DPI 变，写死会在高分屏上顶出状态栏被截断。
-// 这里现场量 一个"█"有多宽，再用状态栏客户宽度减去前后文字大概占的位置。
+// 左格宽度按"最坏情况"的文字量算（第 9999/9999 项），这样进度更新时
+// 文字变长变短，进度条都不会左右跳。
 // ----------------------------------------------------------------------------
-int MainWindow::PasteProgressBarColumns()
+void MainWindow::LayoutPasteBar()
 {
     if (m_hStatusBar == nullptr)
     {
-        return 16;
+        return;
     }
 
-    // 量字符宽度（用状态栏自己的字体）
+    // 进度条控件懒创建：父窗口就是状态栏，跟着状态栏一起显示/隐藏
+    if (m_hPasteBar == nullptr)
+    {
+        m_hPasteBar = ::CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
+                                        WS_CHILD | PBS_SMOOTH,
+                                        0, 0, 10, 10,
+                                        m_hStatusBar, nullptr, m_hInstance, nullptr);
+
+        if (m_hPasteBar == nullptr)
+        {
+            Logger::Warn(L"状态栏进度条创建失败");
+            return;
+        }
+
+        ::SendMessageW(m_hPasteBar, PBM_SETRANGE32, 0, 1000);                  // 千分制，够细
+        ::SendMessageW(m_hPasteBar, PBM_SETBARCOLOR, 0, RGB(0, 51, 204));      // 已完成：蓝
+        ::SendMessageW(m_hPasteBar, PBM_SETBKCOLOR, 0, RGB(240, 240, 240));    // 未完成：浅灰
+    }
+
+    RECT client = {};
+    ::GetClientRect(m_hStatusBar, &client);
+
+    const int totalWidth  = client.right - client.left;
+    const int totalHeight = client.bottom - client.top;
+
+    // 量文字宽度（用状态栏自己的字体，高 DPI 下自动跟着放大）
+    const std::wstring worstLeftText = L"正在粘贴：第 9999/9999 项";
+    const std::wstring rightText     = L"（按 ESC 取消）";
+
     HDC   dc   = ::GetDC(m_hStatusBar);
     HFONT font = reinterpret_cast<HFONT>(::SendMessageW(m_hStatusBar, WM_GETFONT, 0, 0));
-    HGDIOBJ old = ::SelectObject(dc, font != nullptr ? font
-                                                     : ::GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ old = ::SelectObject(dc, font != nullptr ? font : ::GetStockObject(DEFAULT_GUI_FONT));
 
-    SIZE cell = {};
-    ::GetTextExtentPoint32W(dc, L"█", 1, &cell);
+    SIZE leftSize  = {};
+    SIZE rightSize = {};
+    ::GetTextExtentPoint32W(dc, worstLeftText.c_str(), static_cast<int>(worstLeftText.size()), &leftSize);
+    ::GetTextExtentPoint32W(dc, rightText.c_str(),     static_cast<int>(rightText.size()),     &rightSize);
 
     ::SelectObject(dc, old);
     ::ReleaseDC(m_hStatusBar, dc);
 
-    if (cell.cx <= 0)
+    int leftWidth  = leftSize.cx + 14;      // 左边文字，两侧留点空
+    int rightWidth = rightSize.cx + 12;
+    int barWidth   = totalWidth - leftWidth - rightWidth;
+
+    // 窗口特别窄时优先保住进度条，右文字挤一挤
+    if (barWidth < 80)
     {
-        return 16;
+        barWidth   = 80;
+        rightWidth = totalWidth - leftWidth - barWidth;
+
+        if (rightWidth < 0)
+        {
+            rightWidth = 0;
+        }
     }
 
-    RECT rc = {};
-    ::GetClientRect(m_hStatusBar, &rc);
+    int parts[3] = { leftWidth, leftWidth + barWidth, -1 };
+    ::SendMessageW(m_hStatusBar, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
 
-    // 前后那串文字（"正在粘贴：第 12/34 项 [] （按 ESC 取消）"）大概占 30 个字符宽，
-    // 再留一点余量给右侧的缩放手柄（SBARS_SIZEGRIP）
-    const int reservedCells = 32;
+    // 进度条摆进第 1 格：左右各留 4px，高 10px（粗细一致），垂直居中
+    int barHeight = 10;
 
-    int columns = static_cast<int>((rc.right - rc.left) / cell.cx) - reservedCells;
-
-    if (columns < 8)
+    if (barHeight > totalHeight - 8)
     {
-        columns = 8;
-    }
-    else if (columns > 24)
-    {
-        columns = 24;      // 太长了看着不精致，24 格已经够看出进度了
+        barHeight = totalHeight - 8;
     }
 
-    return columns;
+    if (barHeight < 4)
+    {
+        barHeight = 4;
+    }
+
+    int barWidthInside = barWidth - 8;
+    if (barWidthInside < 10)
+    {
+        barWidthInside = 10;
+    }
+
+    ::SetWindowPos(m_hPasteBar, nullptr,
+                   leftWidth + 4, (totalHeight - barHeight) / 2,
+                   barWidthInside, barHeight,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+
+    // 右格文字固定，不随进度变化
+    ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(rightText.c_str()));
+
+    ::ShowWindow(m_hPasteBar, SW_SHOW);
+}
+
+// ----------------------------------------------------------------------------
+// 粘贴结束：收起进度条，状态栏恢复成一整格
+// （之后的 UpdateStatusBar 会把"N 个项目"写回第 0 格）
+// ----------------------------------------------------------------------------
+void MainWindow::RemovePasteBar()
+{
+    if (m_hStatusBar == nullptr)
+    {
+        return;
+    }
+
+    if (m_hPasteBar != nullptr)
+    {
+        ::ShowWindow(m_hPasteBar, SW_HIDE);
+    }
+
+    int parts[1] = { -1 };
+    ::SendMessageW(m_hStatusBar, SB_SETPARTS, 1, reinterpret_cast<LPARAM>(parts));
+    ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -2642,7 +2667,8 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
     // 算整批的完成度（0..1）
     //
     // 按"字节"算：一格代表相同的字节量，于是大文件占的格子多、走得慢，
-    // 小文件占的格子少、走得快 —— 也就是"一个文件一格，文件越大格子越宽"。
+    // 小文件占的格子少、走得快 —— 也就是"一个文件一格，文件越大格子越宽"
+    // 的效果（原来拼字符时是一格一格的，现在换成色块，推进速度保持同样语义）。
     // 清单里一个大小都没给的时候，退回按"项数"估。
     // ------------------------------------------------------------------
     double progress = 0.0;
@@ -2684,11 +2710,27 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
     }
 
     // ------------------------------------------------------------------
-    // 拼文案：正在粘贴：第 3/5 项 [██████░░░░░░░░░░] （按 ESC 取消）
+    // 进度条：只靠颜色推进（蓝往前长）
     // ------------------------------------------------------------------
-    const int          columns = PasteProgressBarColumns();
-    const std::wstring bar     = BuildPasteProgressBar(progress, columns);
+    if (m_hPasteBar != nullptr)
+    {
+        int position = static_cast<int>(progress * 1000.0 + 0.5);
 
+        if (position < 0)
+        {
+            position = 0;
+        }
+        else if (position > 1000)
+        {
+            position = 1000;
+        }
+
+        ::SendMessageW(m_hPasteBar, PBM_SETPOS, static_cast<WPARAM>(position), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // 左边文字：正在粘贴：第 3/22 项
+    // ------------------------------------------------------------------
     std::wstring text = L"正在粘贴";
 
     if (m_pasteTotalItems > 0 && index > 0)
@@ -2696,9 +2738,7 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
         text += L"：第 " + std::to_wstring(index) + L"/" + std::to_wstring(m_pasteTotalItems) + L" 项";
     }
 
-    text += L" [" + bar + L"] （按 ESC 取消）";
-
-    // 内容没变就不重设，避免状态栏反复重绘看着像闪
+    // 内容没变就不重设，避免状态栏反复重绘
     if (text == m_pasteProgressText)
     {
         return;

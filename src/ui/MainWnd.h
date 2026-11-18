@@ -629,6 +629,10 @@ private:
     std::shared_ptr<std::atomic<LONGLONG>>       m_pasteDoneBytes;
     LONGLONG                                     m_pasteTotalBytes = 0;
 
+    // 状态栏里那条进度条（系统进度条控件的子窗口，纯色平面、只有颜色在推进）。
+    // 平时隐藏；粘贴「虚拟文件」时才创建/显示，结束后隐藏并把状态栏改回一格。
+    HWND                                         m_hPasteBar = nullptr;
+
     // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
     std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
 
@@ -638,11 +642,15 @@ private:
     // 粘贴虚拟文件（远程桌面那类）。剪贴板里没有这类东西时返回 false。
     bool DoPasteVirtualFiles(const std::wstring& targetDirectory);
 
-    // 状态栏按"第 i/N 项 + 字符进度条"更新粘贴进度（界面线程调用）
+    // 状态栏按"第 i/N 项 + 进度条"更新粘贴进度（界面线程调用）
     void UpdatePasteProgressText(size_t index, int percent);
 
-    // 状态栏里这条字符进度条能放几格（按状态栏实际宽度和字体算，随 DPI 自适应）
-    int PasteProgressBarColumns();
+    // 把状态栏切成"左文字 / 进度条 / 右文字"三段，并把进度条摆到位
+    // （粘贴开始、窗口尺寸变化时调用）
+    void LayoutPasteBar();
+
+    // 粘贴结束：收起进度条，状态栏恢复成一整格
+    void RemovePasteBar();
 
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
     enum class FileOperationKind { None, Copy, Move, Delete };
