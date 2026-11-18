@@ -2438,6 +2438,7 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
 
         size_t consecutiveFailures = 0;
         bool   sourceLost          = false;
+        bool   clipboardReplaced   = false;   // 粘贴途中剪贴板被本机换掉
         size_t stoppedAt           = total;   // 在哪一项停下的（提示"还剩多少"用）
 
         for (size_t i = 0; i < total; ++i)
@@ -2538,6 +2539,18 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
             ++failures;
             Logger::Warn(L"粘贴「" + info.name + L"」失败：" + error);
 
+            // 剪贴板被本机换掉了（用户在这台电脑上按了复制/剪切）：
+            // 旧对象大概率已经读不到数据了，立刻停 —— 不必等连续 5 项都失败，
+            // 后面的提示也要说实话（是"剪贴板被替换"，不是"远程断开"）
+            if (session.ClipboardReplaced())
+            {
+                clipboardReplaced = true;
+                stoppedAt         = i;
+
+                Logger::Warn(L"粘贴途中剪贴板被替换（本机做了复制/剪切），提前停止");
+                break;
+            }
+
             // 连续失败太多了：不再一项一项硬跑，直接判定源已断开
             ++consecutiveFailures;
 
@@ -2561,6 +2574,15 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
             if (cancelled)
             {
                 *messageOut = L"已取消粘贴，没有粘完的文件已经删掉了。";
+            }
+            else if (clipboardReplaced)
+            {
+                const size_t remaining = (total > stoppedAt) ? (total - stoppedAt) : 0;
+
+                *messageOut = L"粘贴途中剪贴板被替换了（你在这台电脑上做了复制或剪切）：剩余 " +
+                              std::to_wstring(remaining) + L" 项没有粘（已成功 " +
+                              std::to_wstring(done) + L" 项）。\n"
+                              L"远程拷过来的文件还在传输时，请先别在本机复制/剪切别的东西。";
             }
             else if (sourceLost)
             {

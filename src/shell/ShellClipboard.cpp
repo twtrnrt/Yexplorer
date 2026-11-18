@@ -507,6 +507,7 @@ void VirtualFileSession::Close()
 {
     m_files.clear();
     m_lastError.clear();
+    m_clipboardSeq = 0;
 
     if (m_dataObject != nullptr)
     {
@@ -514,6 +515,17 @@ void VirtualFileSession::Close()
         m_dataObject->Release();
         m_dataObject = nullptr;
     }
+}
+
+bool VirtualFileSession::ClipboardReplaced() const
+{
+    // 没记过序列号（比如还没 Open）就不判，免得误报
+    if (m_clipboardSeq == 0)
+    {
+        return false;
+    }
+
+    return ::GetClipboardSequenceNumber() != m_clipboardSeq;
 }
 
 bool VirtualFileSession::IsOpen() const
@@ -555,6 +567,9 @@ bool VirtualFileSession::Open()
     // 清单优先用宽字符版；没有再用 ANSI 版兜底
     if (ReadDescriptor(true))
     {
+        // 记下"这一批内容"的剪贴板序列号。之后谁在本机复制/剪切，
+        // 系统会把这个号 +1，我们据此判断"数据源是不是被换掉了"。
+        m_clipboardSeq = ::GetClipboardSequenceNumber();
         return true;
     }
 
@@ -562,6 +577,7 @@ bool VirtualFileSession::Open()
 
     if (ReadDescriptor(false))
     {
+        m_clipboardSeq = ::GetClipboardSequenceNumber();
         return true;
     }
 
@@ -765,6 +781,16 @@ bool VirtualFileSession::Refetch()
         return false;
     }
 
+    // 剪贴板内容被别人换掉了（用户在本机复制/剪切了别的东西）：
+    // 绝不能拿这个新对象去配旧清单 —— 那样 lindex 取到的是别的文件的内容，
+    // 会悄悄写进原来的文件名下。这里直接拒绝换对象，让调用方继续用旧对象；
+    // 旧对象还能读就继续粘，读不到就由调用方立刻停（ClipboardReplaced() 已经为真）。
+    if (ClipboardReplaced())
+    {
+        m_lastError = L"剪贴板内容已被替换";
+        return false;
+    }
+
     IDataObject* fresh = nullptr;
 
     const HRESULT hr = ::OleGetClipboard(&fresh);
@@ -782,6 +808,9 @@ bool VirtualFileSession::Refetch()
     }
 
     m_dataObject = fresh;
+
+    // 换了新对象，序列号基线也跟着更新（否则下一次比对会把"自己换的"当成人家的改动）
+    m_clipboardSeq = ::GetClipboardSequenceNumber();
     return true;
 }
 

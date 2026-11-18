@@ -124,12 +124,24 @@ public:
 
     // 重新问系统要一个剪贴板数据对象（清单保留不动）。
     // 远程桌面那种剪贴板代理一旦某次取数失败会整体失效，换一个新对象通常能恢复。
+    //
+    // 注意：如果剪贴板内容已经被别人换掉了（此时 ClipboardReplaced() 为真），
+    // 这里会拒绝换对象并返回 false —— 绝不能拿新对象的数据去配旧清单，
+    // 否则会把别的文件内容写进原来的文件名下。
     bool Refetch();
+
+    // 剪贴板内容是不是在 Open() 之后被替换过（用户在本机复制/剪切了别的东西）。
+    // 用剪贴板序列号判断，代价近乎零。
+    bool ClipboardReplaced() const;
 
 private:
     IDataObject*                 m_dataObject = nullptr;   // 剪贴板数据对象（自己 AddRef 的）
     std::vector<VirtualFileInfo> m_files;                  // 解析出来的清单
     std::wstring                 m_lastError;
+
+    // Open() 成功那一刻的剪贴板序列号。系统剪贴板每变一次这个号就 +1，
+    // 拿它跟当前值比对就知道"用户是不是又复制了别的东西"。
+    DWORD                        m_clipboardSeq = 0;
 
     // 单次尝试（不重试）。retriable 告诉调用方"这次失败是不是还能再试一次"：
     // true  = 剪贴板那边读不出来（值得换对象重试）
