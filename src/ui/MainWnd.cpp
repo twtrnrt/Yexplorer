@@ -6522,6 +6522,18 @@ void MainWindow::LayoutChildren()
 
     int paneWidth = CurrentPaneWidth();
 
+    // 分隔线两侧各让出这么多像素，交给主窗口当"抓取热区"。
+    //
+    // 为什么必须让出来：左栏和文件列表是两个独立子窗口，鼠标落在它们身上时
+    // WM_LBUTTONDOWN / WM_SETCURSOR 只会发给子窗口，主窗口收不到。
+    // 以前竖线只有 1 像素归主窗口，实际上要精确点到那 1 个像素才能拖，
+    // 表现就是"有时候能拖、有时候拖不动"。现在两个子窗口各后退 4 像素，
+    // 中间 9 像素都归主窗口；因为左栏、列表、父窗口背景都是白底，
+    // 视觉上完全看不出差别，只是竖线两侧多了一点空白。
+    // 注意：这个数值必须和 IsOnPaneDivider() 里的容差一致，否则会出现
+    // "光标变成左右箭头了但按下去拖不动"。
+    const int splitterHit = Scale(4);
+
     // 窗口太窄时收起左栏，保证列表还有足够宽度可看
     bool showPane = (m_navigationPane.Handle() != nullptr)
                     && (clientWidth - paneWidth) >= Scale(360);
@@ -6533,10 +6545,12 @@ void MainWindow::LayoutChildren()
         ::ShowWindow(m_navigationPane.Handle(), SW_SHOW);
 
         // 左栏铺满整条（0 ~ 竖线）：选中那一行的高亮要占满整条，
-        // 图标和文字的 10 像素留白在 NavigationPane 内部处理
-        placeWindow(m_navigationPane.Handle(), 0, contentY, paneWidth, contentHeight);
+        // 图标和文字的 10 像素留白在 NavigationPane 内部处理。
+        // 右边让出 splitterHit 像素，让给分隔线的热区。
+        placeWindow(m_navigationPane.Handle(), 0, contentY,
+                    paneWidth - splitterHit, contentHeight);
 
-        // 左栏右边那条竖线，宽 1 像素
+        // 左栏右边那条竖线，宽 1 像素（线仍画在原来的位置，不跟着让）
         m_paneDividerRect.left   = paneWidth;
         m_paneDividerRect.top    = contentY;
         m_paneDividerRect.right  = paneWidth + 1;
@@ -6562,10 +6576,11 @@ void MainWindow::LayoutChildren()
     // 文件列表放在批量提交之后单独摆：
     // 它内部要按"自己的最终宽度"重排列宽（LayoutColumns），
     // 所以必须等它的尺寸真正生效之后再算，否则算出来的是旧宽度。
+    // 左边同样让出 splitterHit 像素给分隔线热区。
     if (showPane)
     {
-        m_fileListView.Resize(paneWidth + 1, contentY,
-                              clientWidth - paneWidth - 1, contentHeight);
+        m_fileListView.Resize(paneWidth + splitterHit + 1, contentY,
+                              clientWidth - paneWidth - splitterHit - 1, contentHeight);
     }
     else
     {
@@ -6605,10 +6620,14 @@ bool MainWindow::IsOnPaneDivider(int clientX) const
         return false;
     }
 
-    int splitX    = CurrentPaneWidth();
-    int tolerance = Scale(3);
+    int splitX = CurrentPaneWidth();
 
-    return clientX >= splitX - tolerance && clientX <= splitX + 1 + tolerance;
+    // 热区半径：必须和 LayoutChildren() 里的 splitterHit 一致。
+    // 左栏在 splitX - 4 处收边、列表在 splitX + 5 处开始，
+    // 所以 splitX 左右各 4 像素都是主窗口自己的地盘，鼠标消息能收到。
+    int tolerance = Scale(4);
+
+    return clientX >= splitX - tolerance && clientX <= splitX + tolerance;
 }
 
 // 拖动分隔线：把左栏宽度改成鼠标所在的位置
