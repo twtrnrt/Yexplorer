@@ -2632,10 +2632,10 @@ void MainWindow::PaintPasteBar()
         return;
     }
 
-    // 条本身 18px 高（状态栏装不下时自动缩），上下居中，两端各留一点空
+    // 条本身 15px 高（状态栏装不下时自动缩），上下居中，两端各留一点空
     const int statusHeight = rc.bottom - rc.top;
 
-    int barHeight = Scale(18);
+    int barHeight = Scale(15);
 
     if (barHeight > statusHeight - Scale(4))
     {
@@ -2660,8 +2660,8 @@ void MainWindow::PaintPasteBar()
 
     RECT track = { barLeft, top, barRight, top + barHeight };
 
-    // 1. 未完成部分：浅灰底（188,188,188）
-    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(188, 188, 188));
+    // 1. 未完成部分：浅灰底（214,214,214）
+    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(214, 214, 214));
     ::FillRect(dc, &track, undoneBrush);
     ::DeleteObject(undoneBrush);
 
@@ -2677,7 +2677,9 @@ void MainWindow::PaintPasteBar()
     if (filledX > barLeft)
     {
         RECT doneRect = { barLeft, top, filledX, top + barHeight };
-        HBRUSH doneBrush = ::CreateSolidBrush(RGB(0, 51, 204));
+
+        // 已完成部分：15,123,15（绿）
+        HBRUSH doneBrush = ::CreateSolidBrush(RGB(15, 123, 15));
         ::FillRect(dc, &doneRect, doneBrush);
         ::DeleteObject(doneBrush);
     }
@@ -2689,8 +2691,8 @@ void MainWindow::PaintPasteBar()
         const int      barWidth = barRight - barLeft;
         const size_t   count    = m_pasteItemSizes->size();
 
-        // 底色改成 188 之后，线要更深一点才看得出来（150 在 188 上几乎分不清）
-        HBRUSH lineBrush = ::CreateSolidBrush(RGB(120, 120, 120));
+        // 底色 214 上，150 的线看得清
+        HBRUSH lineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
 
         LONGLONG cumulative = 0;
 
