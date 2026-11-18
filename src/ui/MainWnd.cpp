@@ -2524,25 +2524,27 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
 }
 
 // ----------------------------------------------------------------------------
-// 状态栏里的字符进度条：切成"左文字 / 字符条 / 右文字"三段
+// 状态栏里的进度条：切成"左文字 / 进度条 / 右文字"三段
 //
-// 为什么用字符而不是进度条控件：
-//   整条就是状态栏里的一串"满块字符"（█ U+2588 FULL BLOCK）。
-//   所有格子用的是同一个字符，所以每格的高矮、粗细完全一致；
-//   已走完的那段用蓝色、剩下那段用浅灰 —— 只有颜色在往前推，
-//   没有渐变、没有描边、没有立体感，看着就是一条纯平的色带。
+// 形状：
+//   一条固定 300px 的细横条（不是拉满整条状态栏），高 10px、上下居中。
+//   左段是已完成的蓝色，右段是未完成的浅灰 —— 纯平面，只有颜色在往前推。
+//
+// 分隔线：
+//   按"每个文件占多大"提前在条上画好 1px 竖线（按字节累计算位置）。
+//   蓝条越过哪根线，就说明那个文件已经传完了。
 //
 // 怎么画：
 //   系统状态栏只会"写一行文字"，给不了两种颜色。所以把状态栏子类化，
-//   让它照常画完背景和文字后，我们再在那块矩形里补画字符（PaintPasteBar）。
+//   让它照常画完背景和文字后，我们再在那块矩形里补画这条（PaintPasteBar）。
 //
 // 分段：
 //   第 0 格：左边文字（正在粘贴：第 3/22 项）
-//   第 1 格：字符条（这一格不放文字，留空给我们补画）
+//   第 1 格：进度条（这一格不放文字，留空给我们补画）
 //   第 2 格：右边文字（（按 ESC 取消））
 //
 // 左格宽度按"最坏情况"的文字量算（第 9999/9999 项），这样进度更新时
-// 文字变长变短，字符条都不会左右跳。
+// 文字变长变短，进度条都不会左右跳。
 // ----------------------------------------------------------------------------
 void MainWindow::LayoutPasteBar()
 {
@@ -2575,18 +2577,16 @@ void MainWindow::LayoutPasteBar()
 
     int leftWidth  = leftSize.cx + Scale(12);
     int rightWidth = rightSize.cx + Scale(10);
-    int barWidth   = totalWidth - leftWidth - rightWidth;
 
-    // 窗口特别窄时优先保住字符条，右文字挤一挤
-    if (barWidth < Scale(80))
+    // 进度条固定 300px（不是拉满整条状态栏），右边留白无所谓
+    int barWidth = Scale(300);
+
+    const int available = totalWidth - leftWidth - rightWidth;
+
+    if (barWidth > available)
     {
-        barWidth   = Scale(80);
-        rightWidth = totalWidth - leftWidth - barWidth;
-
-        if (rightWidth < 0)
-        {
-            rightWidth = 0;
-        }
+        // 窗口太窄时缩到可用宽度，但至少留一点，别画成一条线
+        barWidth = (available > Scale(80)) ? available : Scale(80);
     }
 
     int parts[3] = { leftWidth, leftWidth + barWidth, -1 };
@@ -2605,9 +2605,15 @@ void MainWindow::LayoutPasteBar()
 }
 
 // ----------------------------------------------------------------------------
-// 在状态栏第 1 格里补画字符进度条
+// 在状态栏第 1 格里补画进度条
 //
-// 只画字符本身，不铺底色 —— 状态栏自己的背景照旧，看起来才是一条状态栏。
+// 画法（一条 300px 的细条，不是字符了）：
+//   1. 整条先铺浅灰 = 还没传的部分
+//   2. 左边按进度铺蓝 = 已经传完的部分（只有颜色在往前推，纯平面）
+//   3. 按"每个文件占多大"提前画好 1px 竖线；蓝条越过哪根线，就说明那个文件传完了
+//
+// 线的位置按字节累计算：第 i 个文件传完时，进度正好是"前 i 项总字节 / 全部字节"，
+// 所以一根线 = 一个文件的边界，线跟实际进度天然对齐（进度本身也是按字节加权算的）。
 // ----------------------------------------------------------------------------
 void MainWindow::PaintPasteBar()
 {
@@ -2625,57 +2631,74 @@ void MainWindow::PaintPasteBar()
         return;
     }
 
-    // 用状态栏自己的字体（和左右两边的文字同一套，看着才是同一条状态栏）
-    HFONT font = reinterpret_cast<HFONT>(::SendMessageW(m_hStatusBar, WM_GETFONT, 0, 0));
-    HGDIOBJ oldFont = ::SelectObject(dc, font != nullptr ? font : ::GetStockObject(DEFAULT_GUI_FONT));
+    // 条本身固定 10px 高、上下居中，两端各留一点空
+    const int barHeight = Scale(10);
+    const int top       = rc.top + ((rc.bottom - rc.top) - barHeight) / 2;
 
-    int      oldBkMode    = ::SetBkMode(dc, TRANSPARENT);
-    COLORREF oldTextColor = ::SetTextColor(dc, RGB(0, 51, 204));
+    const int barLeft  = rc.left + Scale(3);
+    const int barRight = rc.right - Scale(3);
 
-    // 量一个满块字符占多少像素，决定这一格能放几块
-    SIZE block = {};
-    ::GetTextExtentPoint32W(dc, L"\u2588", 1, &block);   // █ 满块
-
-    if (block.cx <= 0)
+    if (barRight <= barLeft)
     {
-        block.cx = Scale(8);
+        ::ReleaseDC(m_hStatusBar, dc);
+        return;
     }
 
-    // 左右各留一点空，不贴着文字和右边文字
-    const int leftPad  = Scale(6);
-    const int rightPad = Scale(6);
-    const int usable   = (rc.right - rc.left) - leftPad - rightPad;
+    RECT track = { barLeft, top, barRight, top + barHeight };
 
-    int columns = usable / block.cx;
+    // 1. 未完成部分：浅灰底
+    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(214, 214, 214));
+    ::FillRect(dc, &track, undoneBrush);
+    ::DeleteObject(undoneBrush);
 
-    if (columns < 1)
+    // 2. 已完成部分：蓝色，长度按进度
+    int filledX = barLeft + static_cast<int>(
+        static_cast<double>(barRight - barLeft) * m_pasteBarPosition / 1000.0 + 0.5);
+
+    if (filledX > barRight)
     {
-        columns = 1;
+        filledX = barRight;
     }
 
-    int filled = m_pasteBarPosition * columns / 1000;
-
-    if (filled < 0)
+    if (filledX > barLeft)
     {
-        filled = 0;
-    }
-    else if (filled > columns)
-    {
-        filled = columns;
+        RECT doneRect = { barLeft, top, filledX, top + barHeight };
+        HBRUSH doneBrush = ::CreateSolidBrush(RGB(0, 51, 204));
+        ::FillRect(dc, &doneRect, doneBrush);
+        ::DeleteObject(doneBrush);
     }
 
-    const int y = rc.top + ((rc.bottom - rc.top) - block.cy) / 2;
-
-    // 已完成：蓝；未完成：浅灰。同一个字符，只有颜色不同
-    for (int i = 0; i < columns; ++i)
+    // 3. 文件边界线：每个文件结束的位置一根 1px 竖线
+    //   （最后一项的边界就是条的右端，不画；文件夹大小是 0，线会重合，也无所谓）
+    if (m_pasteItemSizes != nullptr && m_pasteTotalBytes > 0)
     {
-        ::SetTextColor(dc, i < filled ? RGB(0, 51, 204) : RGB(210, 210, 210));
-        ::TextOutW(dc, rc.left + leftPad + i * block.cx, y, L"\u2588", 1);
+        const int      barWidth = barRight - barLeft;
+        const size_t   count    = m_pasteItemSizes->size();
+
+        HBRUSH lineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
+
+        LONGLONG cumulative = 0;
+
+        for (size_t i = 0; i + 1 < count; ++i)
+        {
+            cumulative += (*m_pasteItemSizes)[i];
+
+            const int x = barLeft + static_cast<int>(
+                static_cast<double>(barWidth) * static_cast<double>(cumulative) /
+                static_cast<double>(m_pasteTotalBytes) + 0.5);
+
+            if (x <= barLeft || x >= barRight)
+            {
+                continue;   // 头尾不画，避免和边框重合
+            }
+
+            RECT line = { x, top, x + 1, top + barHeight };
+            ::FillRect(dc, &line, lineBrush);
+        }
+
+        ::DeleteObject(lineBrush);
     }
 
-    ::SetTextColor(dc, oldTextColor);
-    ::SetBkMode(dc, oldBkMode);
-    ::SelectObject(dc, oldFont);
     ::ReleaseDC(m_hStatusBar, dc);
 }
 
