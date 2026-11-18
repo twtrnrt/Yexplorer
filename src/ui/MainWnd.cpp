@@ -2561,8 +2561,7 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
                 *messageOut = L"粘贴过程中被打断了：" +
                               std::to_wstring(remaining) + L" 项没能粘（已成功 " +
                               std::to_wstring(done) + L" 项）。\n"
-                              L"注意：传输过程使用复制或剪切会中断传输。"
-                              L"请等粘完后再操作剪贴板，或者分批粘。";
+                              L"注意：传输过程使用复制/剪切会中断传输。";
             }
             else if (failures > 0)
             {
@@ -2681,8 +2680,8 @@ void MainWindow::LayoutPasteBar()
         longestLeftText = L"正在粘贴：第 " + count + L"/" + count + L" 项";
     }
 
-    // 右格：取消方式 + 传输期间的操作提醒（提醒是固定文案，不随进度变化）
-    const std::wstring rightText = L"（按 ESC 取消）　传输过程中请不要使用复制或剪切功能";
+    // 右格：取消方式 + 传输期间的提醒（固定文案，不随进度变化）
+    const std::wstring rightText = L"（按 ESC 取消）　传输完成前不要使用复制/剪切功能";
 
     HDC   dc   = ::GetDC(m_hStatusBar);
     HFONT font = reinterpret_cast<HFONT>(::SendMessageW(m_hStatusBar, WM_GETFONT, 0, 0));
