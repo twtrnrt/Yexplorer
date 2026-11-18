@@ -2651,13 +2651,6 @@ void MainWindow::PaintPasteBar()
 
     RECT rc = m_pasteBarRect;
 
-    HDC dc = ::GetDC(m_hStatusBar);
-
-    if (dc == nullptr)
-    {
-        return;
-    }
-
     // 条本身 15px 高（状态栏装不下时自动缩），上下居中，两端各留一点空
     const int statusHeight = rc.bottom - rc.top;
 
@@ -2680,72 +2673,108 @@ void MainWindow::PaintPasteBar()
 
     if (barRight <= barLeft)
     {
-        ::ReleaseDC(m_hStatusBar, dc);
         return;
     }
 
-    RECT track = { barLeft, top, barRight, top + barHeight };
+    const int barWidth = barRight - barLeft;
 
-    // 1. 未完成部分：浅灰底（214,214,214）
-    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(214, 214, 214));
-    ::FillRect(dc, &track, undoneBrush);
-    ::DeleteObject(undoneBrush);
-
-    // 2. 已完成部分：蓝色，长度按进度
-    int filledX = barLeft + static_cast<int>(
-        static_cast<double>(barRight - barLeft) * m_pasteBarPosition / 1000.0 + 0.5);
-
-    if (filledX > barRight)
-    {
-        filledX = barRight;
-    }
-
-    if (filledX > barLeft)
-    {
-        RECT doneRect = { barLeft, top, filledX, top + barHeight };
-
-        // 已完成部分：15,123,15（绿）
-        HBRUSH doneBrush = ::CreateSolidBrush(RGB(15, 123, 15));
-        ::FillRect(dc, &doneRect, doneBrush);
-        ::DeleteObject(doneBrush);
-    }
-
-    // 3. 文件边界线：每个文件结束的位置一根 1px 竖线
-    //   位置只在"清单到达 / 条宽变化"时算一次并去重（同一像素只留一根），
-    //   所以每帧的绘制量最多就是"条宽"那么多根，跟文件数彻底无关。
+    // 线的位置补算（只在清单到达/条宽变化后做一次）
     if (m_pasteBarLinesDirty)
     {
-        BuildPasteBarLines(barRight - barLeft);
+        BuildPasteBarLines(barWidth);
         m_pasteBarLinesDirty = false;
     }
 
+    // ------------------------------------------------------------------
+    // 双缓冲：先在内存位图里把整条画完，再一次性 BitBlt 到状态栏
+    //
+    // 为什么不直接画在状态栏上：直接画是"铺灰底 → 铺绿 → 一根根画线"，
+    // 三个步骤在屏幕上逐步发生，文件多、线条多的时候就被看成闪。
+    // 画到内存里再整块贴上去，屏幕上只出现最终结果，不会闪。
+    // ------------------------------------------------------------------
+    HDC screenDc = ::GetDC(m_hStatusBar);
+
+    if (screenDc == nullptr)
+    {
+        return;
+    }
+
+    HDC     memDc  = ::CreateCompatibleDC(screenDc);
+    HBITMAP bitmap = ::CreateCompatibleBitmap(screenDc, barWidth, barHeight);
+
+    if (memDc == nullptr || bitmap == nullptr)
+    {
+        if (memDc != nullptr)
+        {
+            ::DeleteDC(memDc);
+        }
+
+        if (bitmap != nullptr)
+        {
+            ::DeleteObject(bitmap);
+        }
+
+        ::ReleaseDC(m_hStatusBar, screenDc);
+        return;
+    }
+
+    HGDIOBJ oldBitmap = ::SelectObject(memDc, bitmap);
+
+    // 内存里以 (0,0) 作为条的左上角，所以下面所有坐标都是"条内坐标"
+    RECT track = { 0, 0, barWidth, barHeight };
+
+    // 1. 未完成部分：浅灰底（214,214,214）
+    HBRUSH undoneBrush = ::CreateSolidBrush(RGB(214, 214, 214));
+    ::FillRect(memDc, &track, undoneBrush);
+    ::DeleteObject(undoneBrush);
+
+    // 2. 已完成部分：15,123,15（绿），长度按进度
+    int filledWidth = static_cast<int>(
+        static_cast<double>(barWidth) * m_pasteBarPosition / 1000.0 + 0.5);
+
+    if (filledWidth > barWidth)
+    {
+        filledWidth = barWidth;
+    }
+
+    if (filledWidth > 0)
+    {
+        RECT doneRect = { 0, 0, filledWidth, barHeight };
+        HBRUSH doneBrush = ::CreateSolidBrush(RGB(15, 123, 15));
+        ::FillRect(memDc, &doneRect, doneBrush);
+        ::DeleteObject(doneBrush);
+    }
+
+    // 3. 文件边界线：每根 1px；已经走到的用绿色，没走到的用灰 150
     if (!m_pasteBarLineOffsets.empty())
     {
-        // 未到的线用灰 150（在 214 底色上看得清）；
-        // 已经被进度条"走过"的线，用跟进度条一样的颜色 —— 看着就像那根线被吃进去了
         HBRUSH pendingLineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
         HBRUSH passedLineBrush  = ::CreateSolidBrush(RGB(15, 123, 15));
 
         for (int offset : m_pasteBarLineOffsets)
         {
-            const int x = barLeft + offset;
-
-            if (x <= barLeft || x >= barRight)
+            if (offset <= 0 || offset >= barWidth)
             {
-                continue;   // 双保险：极端情况下也别画到边框上
+                continue;   // 双保险：别画到条的边框上
             }
 
-            HBRUSH brush = (x <= filledX) ? passedLineBrush : pendingLineBrush;
+            HBRUSH brush = (offset <= filledWidth) ? passedLineBrush : pendingLineBrush;
 
-            RECT line = { x, top, x + 1, top + barHeight };
-            ::FillRect(dc, &line, brush);
+            RECT line = { offset, 0, offset + 1, barHeight };
+            ::FillRect(memDc, &line, brush);
         }
 
         ::DeleteObject(pendingLineBrush);
         ::DeleteObject(passedLineBrush);
     }
 
-    ::ReleaseDC(m_hStatusBar, dc);
+    // 4. 一次贴到状态栏上
+    ::BitBlt(screenDc, barLeft, top, barWidth, barHeight, memDc, 0, 0, SRCCOPY);
+
+    ::SelectObject(memDc, oldBitmap);
+    ::DeleteObject(bitmap);
+    ::DeleteDC(memDc);
+    ::ReleaseDC(m_hStatusBar, screenDc);
 }
 
 // ----------------------------------------------------------------------------
