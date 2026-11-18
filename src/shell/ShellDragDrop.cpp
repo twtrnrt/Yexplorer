@@ -867,9 +867,9 @@ constexpr int kDropTipMaxTarget  = 320;  // 目标名最长画这么宽，再长
 
 // 提示条固定高度（用户定的：固定 30，不跟着符号大小变，三种状态一样高）。
 constexpr int kDropTipHeight          = 30;
-constexpr int kDropTipSymbolSizeDot   = 13;   // + 号、禁止圈的方框（16 → 14 → 13，用户两次要求缩小）
+constexpr int kDropTipSymbolSizeDot   = 12;   // + 号、禁止圈的方框（16 → 14 → 13 → 12）
 constexpr int kDropTipSymbolSizeArrow = 16;   // 箭头的方框（原 18，缩到 90%）
-constexpr int kDropTipSymbolLiftY     = 1;    // 图标整体上移 1 像素（用户定的；箭头另外单独下移，见绘制处）
+constexpr int kDropTipSymbolShiftY    = 1;    // + 号和禁止圈居中后下移 1 像素（箭头不动）
 constexpr int kDropTipSupersample     = 4;    // 超采样倍数：4 倍画、再缩回去 = 抗锯齿
 
 // 提示条上要显示的内容：符号 + 动作词 + 目标名，三种颜色分开画
@@ -1066,6 +1066,11 @@ void DrawDropTipSymbol(HDC target, int symbol, int left, int top, int size, COLO
         const int foregroundG = static_cast<int>((color >> 8) & 0xFF);
         const int foregroundB = static_cast<int>((color >> 16) & 0xFF);
 
+        // 抗锯齿开关按符号分开：
+        //   箭头（symbol 2）走硬边——用户实测硬边的箭头反而更利落；
+        //   + 号和禁止圈走半透明过渡——圆环和细线用硬边会碎成台阶，用户说"不开没法看"。
+        const bool smoothAllowed = (symbol != 2);
+
         for (int y = 0; y < size; ++y)
         {
             for (int x = 0; x < size; ++x)
@@ -1082,12 +1087,10 @@ void DrawDropTipSymbol(HDC target, int symbol, int left, int top, int size, COLO
                 }
                 rawCoverage /= (supersample * supersample);
 
-                // 二值化：够一半覆盖率就算实色，不够就完全透明。
-                //
-                // 为什么不做"半透明过渡"（真抗锯齿）：小图标上一条线只有 2 像素宽，
-                // 线的边界只要没正好落在像素边界上，抗锯齿就会把它摊成"1 像素实 + 2 像素灰"，
-                // 看起来整根线发虚、糊在一起。系统自带的小图标是不抗锯齿的，所以显得实。
-                const int coverage = (rawCoverage >= 128) ? 255 : 0;
+                // 硬边模式：覆盖率过半就算实色，其余全透明（笔画实心，但边缘有台阶）
+                // 平滑模式：直接用覆盖率做半透明过渡（边缘柔和，不发虚的时候更耐看）
+                const int coverage = smoothAllowed ? rawCoverage
+                                                   : ((rawCoverage >= 128) ? 255 : 0);
                 const int inverse  = 255 - coverage;
                 const int offset   = (y * size + x) * 4;
                 dest[offset + 0] = static_cast<BYTE>((backgroundB * inverse + foregroundB * coverage) / 255);
@@ -1211,10 +1214,9 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         {
             const int symbolSize = DropTipSymbolSize(content.symbol);
 
-            // 垂直位置：默认居中再上移 1 像素；箭头单独下移 1 像素（用户要求），
-            // 也就是箭头不加上移量，+ 号和禁止圈照旧。
-            const int lift = (content.symbol == 2) ? 0 : kDropTipSymbolLiftY;
-            const int symbolTop = client.top + ((client.bottom - client.top) - symbolSize) / 2 - lift;
+            // 垂直位置：默认居中。+ 号和禁止圈再往下 1 像素（用户定的），箭头不动。
+            const int shift     = (content.symbol == 2) ? 0 : kDropTipSymbolShiftY;
+            const int symbolTop = client.top + ((client.bottom - client.top) - symbolSize) / 2 + shift;
 
             DrawDropTipSymbol(dc, content.symbol, x, symbolTop, symbolSize, actionColor);
 
