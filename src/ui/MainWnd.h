@@ -115,6 +115,9 @@ static const int kCommandFocusAddressBar = 3218;  // Alt+D / Ctrl+L：焦点跳�
 static const int kCommandDeletePermanent = 3219;  // Shift+Delete / Shift+右键删除：永久删除（带确认）
 static const int kCommandAutoFitColumns  = 3220;  // Ctrl+加号：列宽自适应内容
 
+// 右键「在终端中打开」（文件夹、文件夹空白处、盘符根都给）
+static const int kCommandOpenTerminal   = 3221;
+
 class MainWindow
 {
 public:
@@ -199,6 +202,10 @@ private:
 
     // 批量重命名（选中多个时右键「批量重命名」）
     void DoBatchRename();
+
+    // 在指定文件夹里开一个终端窗口（右键「在终端中打开」）
+    // 优先 Windows Terminal，没有就退回 cmd.exe
+    void DoOpenTerminalIn(const std::wstring& folderPath);
 
     // ---- 后台执行文件操作（避免复制大文件时界面卡住）----
     void RunFileOperationAsync(std::function<HRESULT()> operation);

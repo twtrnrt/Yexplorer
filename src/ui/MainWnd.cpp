@@ -1218,6 +1218,22 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
+        case kCommandOpenTerminal:
+        {
+            // 「在终端中打开」：选中一个文件夹/盘符就用它，否则用当前目录
+            // （只在空白处、单个文件夹、盘符这三种场景出现，所以这里不会拿到文件路径）
+            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+            const std::wstring target = (selected.size() == 1 && shell::IsFileSystemPath(selected.front()))
+                                        ? selected.front()
+                                        : m_history.Current();
+
+            if (shell::IsFileSystemPath(target))
+            {
+                DoOpenTerminalIn(target);
+            }
+            return 0;
+        }
         case kCommandProperties:
             ShowPropertiesForSelection();
             return 0;
@@ -2094,6 +2110,109 @@ void MainWindow::DoPaste()
 }
 
 // ============================================================================
+// 在指定文件夹里开一个终端窗口（右键「在终端中打开」）
+//
+// 优先用 Windows 11 的 Windows Terminal（wt.exe -d <目录>），没装就退回
+// 系统自带的 cmd.exe。两者都是新开一个独立窗口，工作目录就是目标文件夹。
+//
+// 只在"点了这一项"的时候才去查 wt.exe 在不在（一次 GetFileAttributes），
+// 右键菜单弹出时不做任何探测，依旧零成本。
+// ============================================================================
+void MainWindow::DoOpenTerminalIn(const std::wstring& folderPath)
+{
+    // 目录可能在弹出菜单之后被删掉/改名了：先确认一次，免得开出一个错误的工作目录
+    const DWORD attributes = ::GetFileAttributesW(folderPath.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+    {
+        Logger::Warn(L"在终端中打开：目录不存在或不是文件夹 " + folderPath);
+        ::MessageBoxW(m_hWnd, L"这个文件夹已经不存在了，无法在其中打开终端。",
+                      L"在终端中打开", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    // UNC 路径（\\server\share）不能直接当进程的当前目录，cmd 得靠 pushd 切进去
+    const bool isUncPath = (folderPath.size() >= 2 && folderPath[0] == L'\\' && folderPath[1] == L'\\');
+
+    // ---- 1. 先试 Windows Terminal ----
+    // Store 版终端的入口是 WindowsApps 下的别名文件，按固定路径拼出来看一眼就够了，
+    // 不查注册表、不碰 COM（符合"右键菜单相关操作都轻量"的约定）。
+    std::wstring wtPath;
+    {
+        wchar_t localAppData[MAX_PATH] = {};
+        if (::GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0)
+        {
+            wtPath = std::wstring(localAppData) + L"\\Microsoft\\WindowsApps\\wt.exe";
+        }
+    }
+
+    if (!wtPath.empty() && ::GetFileAttributesW(wtPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        // wt -d "目录"：直接在该目录打开一个标签页
+        const std::wstring arguments = L"-d \"" + folderPath + L"\"";
+        const HINSTANCE result = ::ShellExecuteW(m_hWnd, L"open", wtPath.c_str(), arguments.c_str(),
+                                                 nullptr, SW_SHOWNORMAL);
+
+        // ShellExecute 返回值大于 32 才算成功（32 及以下都是错误码）
+        if (reinterpret_cast<INT_PTR>(result) > 32)
+        {
+            Logger::Info(L"在终端中打开（Windows Terminal）：" + folderPath);
+            return;
+        }
+
+        // 终端启动失败就把球踢给 cmd，别让用户白点一次
+        Logger::Warn(L"在终端中打开：Windows Terminal 启动失败，改用 cmd");
+    }
+
+    // ---- 2. 退回 cmd.exe ----
+    std::wstring comspec = L"C:\\Windows\\System32\\cmd.exe";
+    {
+        wchar_t buffer[MAX_PATH] = {};
+        if (::GetEnvironmentVariableW(L"COMSPEC", buffer, MAX_PATH) > 0)
+        {
+            comspec = buffer;
+        }
+    }
+
+    const std::wstring commandLine = isUncPath
+        ? (L"\"" + comspec + L"\" /k pushd \"" + folderPath + L"\"")
+        : (L"\"" + comspec + L"\"");
+
+    // CreateProcessW 会改动命令行缓冲区，必须传一份可写的拷贝（不能直接传 const 串）
+    std::vector<wchar_t> commandLineBuffer(commandLine.begin(), commandLine.end());
+    commandLineBuffer.push_back(L'\0');
+
+    STARTUPINFOW startupInfo = {};
+    startupInfo.cb          = sizeof(startupInfo);
+    startupInfo.dwFlags     = STARTF_USESHOWWINDOW;
+    startupInfo.wShowWindow = SW_SHOWNORMAL;
+
+    PROCESS_INFORMATION processInfo = {};
+
+    const BOOL created = ::CreateProcessW(comspec.c_str(),
+                                          commandLineBuffer.data(),
+                                          nullptr, nullptr, FALSE,
+                                          CREATE_NEW_CONSOLE,
+                                          nullptr,
+                                          isUncPath ? nullptr : folderPath.c_str(),
+                                          &startupInfo, &processInfo);
+
+    if (!created)
+    {
+        const DWORD error = ::GetLastError();
+        Logger::Warn(L"在终端中打开：cmd 启动失败，错误码 " + std::to_wstring(error) + L"，目录 " + folderPath);
+        ::MessageBoxW(m_hWnd, L"打开终端失败，请检查该文件夹是否存在或是否有访问权限。",
+                      L"在终端中打开", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // 进程/线程句柄用完就关，不然每开一次终端就漏两个句柄
+    ::CloseHandle(processInfo.hThread);
+    ::CloseHandle(processInfo.hProcess);
+
+    Logger::Info(L"在终端中打开（cmd）：" + folderPath);
+}
+
+// ============================================================================
 // 批量重命名（右键「批量重命名」）
 //
 // 改名的"落盘"和"失败回滚"都在 BatchRenameDialog 里做完了，这里只负责两件事：
@@ -2540,6 +2659,14 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
 
     FillNewFolderAndNewMenu(menu);
 
+    // 「在终端中打开」：只在真实文件系统目录里给
+    // （压缩包内部是虚拟路径，控制面板那类 "::{GUID}" 也不是真实目录，都没有工作目录可用）
+    if (!m_currentIsContainer && shell::IsFileSystemPath(m_history.Current()))
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kCommandOpenTerminal, L"在终端中打开");
+    }
+
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
 }
@@ -2701,6 +2828,14 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPat
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
 
+    // 「在终端中打开」：文件夹是真实目录，可以直接当终端的工作目录
+    // （压缩包内部的子目录在上面已经早退了，走不到这里）
+    if (shell::IsFileSystemPath(folderPath))
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kCommandOpenTerminal, L"在终端中打开");
+    }
+
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
 }
@@ -2773,12 +2908,22 @@ void MainWindow::BuildMultipleMenu(HMENU menu)
 //   打开
 //   在新窗口中打开
 //   ─────
+//   在终端中打开        （只有盘符根这种真实路径才给）
+//   ─────
 //   属性
 // ---------------------------------------------------------------------------
-void MainWindow::BuildShellItemMenu(HMENU menu, const std::wstring& /*itemPath*/)
+void MainWindow::BuildShellItemMenu(HMENU menu, const std::wstring& itemPath)
 {
     ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
     ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
+
+    // 盘符根（"D:\"）是真实目录，可以当终端的工作目录；
+    // "此电脑""控制面板"这类虚拟对象没有真实路径，不给这一项
+    if (shell::IsFileSystemPath(itemPath))
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kCommandOpenTerminal, L"在终端中打开");
+    }
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
