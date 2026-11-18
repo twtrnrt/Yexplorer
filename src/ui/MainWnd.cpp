@@ -6527,12 +6527,12 @@ void MainWindow::LayoutChildren()
     // 为什么必须让出来：左栏和文件列表是两个独立子窗口，鼠标落在它们身上时
     // WM_LBUTTONDOWN / WM_SETCURSOR 只会发给子窗口，主窗口收不到。
     // 以前竖线只有 1 像素归主窗口，实际上要精确点到那 1 个像素才能拖，
-    // 表现就是"有时候能拖、有时候拖不动"。现在两个子窗口各后退 4 像素，
-    // 中间 9 像素都归主窗口；因为左栏、列表、父窗口背景都是白底，
+    // 表现就是"有时候能拖、有时候拖不动"。现在两个子窗口各后退 2 像素，
+    // 中间 5 像素都归主窗口；因为左栏、列表、父窗口背景都是白底，
     // 视觉上完全看不出差别，只是竖线两侧多了一点空白。
     // 注意：这个数值必须和 IsOnPaneDivider() 里的容差一致，否则会出现
     // "光标变成左右箭头了但按下去拖不动"。
-    const int splitterHit = Scale(4);
+    const int splitterHit = Scale(2);
 
     // 窗口太窄时收起左栏，保证列表还有足够宽度可看
     bool showPane = (m_navigationPane.Handle() != nullptr)
@@ -6623,9 +6623,9 @@ bool MainWindow::IsOnPaneDivider(int clientX) const
     int splitX = CurrentPaneWidth();
 
     // 热区半径：必须和 LayoutChildren() 里的 splitterHit 一致。
-    // 左栏在 splitX - 4 处收边、列表在 splitX + 5 处开始，
-    // 所以 splitX 左右各 4 像素都是主窗口自己的地盘，鼠标消息能收到。
-    int tolerance = Scale(4);
+    // 左栏在 splitX - 2 处收边、列表在 splitX + 3 处开始，
+    // 所以 splitX 左右各 2 像素都是主窗口自己的地盘，鼠标消息能收到。
+    int tolerance = Scale(2);
 
     return clientX >= splitX - tolerance && clientX <= splitX + tolerance;
 }
