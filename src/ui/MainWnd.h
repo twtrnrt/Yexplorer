@@ -23,6 +23,10 @@
 #include <windows.h>
 #include <commctrl.h>
 
+// 任务栏按钮进度（ITaskbarList3）只在这一处用到，头文件里不需要整套 shobjidl.h，
+// 前向声明一下就行（真正的定义在 MainWnd.cpp 的 <shobjidl.h> 里）。
+struct ITaskbarList3;
+
 #include <memory>
 #include <mutex>
 #include <string>
@@ -643,6 +647,10 @@ private:
     std::vector<int>                             m_pasteBarLineOffsets;
     bool                                         m_pasteBarLinesDirty = true;
 
+    // 任务栏按钮上的进度条（ITaskbarList3）。拿不到就是 nullptr，
+    // 所有调用点都先判空 —— 精简系统/某些会话里这个接口可能不给。
+    ITaskbarList3*                               m_taskbarList = nullptr;
+
     // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
     std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
 
@@ -654,6 +662,9 @@ private:
 
     // 状态栏按"第 i/N 项 + 进度条"更新粘贴进度（界面线程调用）
     void UpdatePasteProgressText(size_t index, int percent);
+
+    // 拿任务栏按钮进度接口（成功就缓存在 m_taskbarList，失败就保持 nullptr 静默跳过）
+    void InitTaskbarProgress();
 
     // 把状态栏切成"左文字 / 字符进度条 / 右文字"三段
     // （粘贴开始时调用一次；窗口尺寸变化时再调）

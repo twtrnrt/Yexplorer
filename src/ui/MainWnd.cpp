@@ -487,6 +487,13 @@ MainWindow::~MainWindow()
         ::DeleteObject(m_hUiFont);
         m_hUiFont = nullptr;
     }
+
+    // 任务栏进度接口用完要还回去
+    if (m_taskbarList != nullptr)
+    {
+        m_taskbarList->Release();
+        m_taskbarList = nullptr;
+    }
 }
 
 // ============================================================================
@@ -832,6 +839,9 @@ void MainWindow::CreateChildControls()
     // 所以我们让它照常画完背景和文字后，再在那块矩形里补画字符。
     ::SetWindowSubclass(m_hStatusBar, &MainWindow::StatusBarSubclassProc, 1,
                         reinterpret_cast<DWORD_PTR>(this));
+
+    // 任务栏按钮上的进度条（有就挂上，没有就算了）
+    InitTaskbarProgress();
 
     // ---------------- 6. 键盘快捷键 ----------------
     // 用系统的加速键表，好处是不用去拦截每个控件的按键消息
@@ -1539,6 +1549,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             m_pasteDoneBytes.reset();
             m_pasteTotalBytes = 0;
             RemovePasteBar();
+
+            // 任务栏按钮上的进度也收掉
+            if (m_taskbarList != nullptr)
+            {
+                m_taskbarList->SetProgressState(m_hWnd, TBPF_NOPROGRESS);
+            }
         }
 
         if (SUCCEEDED(hr))
@@ -2330,6 +2346,13 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
     LayoutPasteBar();
     ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(m_pasteProgressText.c_str()));
 
+    // 任务栏按钮上也挂一条进度（切到别的程序也能看到剩多少）
+    if (m_taskbarList != nullptr)
+    {
+        m_taskbarList->SetProgressState(m_hWnd, TBPF_NORMAL);
+        m_taskbarList->SetProgressValue(m_hWnd, 0, 1000);
+    }
+
     HWND                                      notifyWindow = m_hWnd;
     const std::wstring                        target       = targetDirectory;
     std::shared_ptr<std::atomic<bool>>        cancelFlag   = m_pasteCancelRequested;
@@ -2529,6 +2552,46 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
     });
 
     return true;
+}
+
+// ----------------------------------------------------------------------------
+// 任务栏按钮上的进度条（ITaskbarList3）
+//
+// 用途：粘贴大文件时用户可能切到别的程序去干别的，任务栏按钮上那条进度能一眼
+// 看到还剩多少。颜色/粗细由系统定（正常=主题绿、暂停=黄、错误=红），改不了。
+//
+// 失败：精简系统、某些远程/服务会话里可能拿不到这个对象或 HrInit 失败，
+// 那就保持 nullptr，所有调用点判空跳过 —— 状态栏那条照旧工作，不影响功能。
+// ----------------------------------------------------------------------------
+void MainWindow::InitTaskbarProgress()
+{
+    if (m_taskbarList != nullptr || m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    ITaskbarList3* list = nullptr;
+
+    const HRESULT createHr = ::CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                                                IID_PPV_ARGS(&list));
+
+    if (FAILED(createHr) || list == nullptr)
+    {
+        Logger::Warn(L"任务栏进度不可用（创建失败）：" + std::to_wstring(static_cast<long long>(createHr)));
+        return;
+    }
+
+    const HRESULT initHr = list->HrInit();
+
+    if (FAILED(initHr))
+    {
+        Logger::Warn(L"任务栏进度不可用（HrInit 失败）：" + std::to_wstring(static_cast<long long>(initHr)));
+        list->Release();
+        return;
+    }
+
+    m_taskbarList = list;
+    Logger::Info(L"任务栏进度已就绪");
 }
 
 // ----------------------------------------------------------------------------
@@ -2958,6 +3021,12 @@ void MainWindow::UpdatePasteProgressText(size_t index, int percent)
     // ------------------------------------------------------------------
     m_pasteBarPosition = position;
     PaintPasteBar();
+
+    // 任务栏按钮上的进度跟状态栏同步（0..1000）
+    if (m_taskbarList != nullptr)
+    {
+        m_taskbarList->SetProgressValue(m_hWnd, static_cast<ULONGLONG>(position), 1000ULL);
+    }
 
     // ------------------------------------------------------------------
     // 第 0 格：左边文字"正在粘贴：第 3/22 项"
