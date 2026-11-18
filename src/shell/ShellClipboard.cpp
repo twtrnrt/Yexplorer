@@ -726,6 +726,70 @@ bool VirtualFileSession::ReadDescriptor(bool wideVersion)
 bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPath,
                                  const ProgressCallback& onProgress, std::wstring& error)
 {
+    // 最多试 3 次：第一次用现有对象；如果失败原因是"剪贴板读不出来"，
+    // 就重新问系统要一个新的数据对象再试（远程桌面那种代理一旦出错就整体失效，
+    // 换新对象通常能救回来 —— 用户实测"中间某一项失败后后面全部失败"就是这个）。
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        if (attempt > 0 && !Refetch())
+        {
+            break;   // 剪贴板已经没了（对方清空 / 会话断开），再试没意义
+        }
+
+        bool retriable = false;
+
+        if (ExtractOnce(index, destinationPath, onProgress, error, retriable))
+        {
+            return true;
+        }
+
+        if (!retriable)
+        {
+            return false;   // 写盘失败、取消、重名之类，重试没用
+        }
+
+        if (attempt > 0)
+        {
+            // 已经重试过了还失败：把话说明白，别让用户以为只是文件坏了
+            error += L"（已重试 " + std::to_wstring(attempt + 1) + L" 次）";
+        }
+    }
+
+    return false;
+}
+
+bool VirtualFileSession::Refetch()
+{
+    if (m_files.empty())
+    {
+        return false;
+    }
+
+    IDataObject* fresh = nullptr;
+
+    const HRESULT hr = ::OleGetClipboard(&fresh);
+
+    if (FAILED(hr) || fresh == nullptr)
+    {
+        m_lastError = L"重新读取剪贴板失败：" + SystemErrorText(static_cast<DWORD>(hr));
+        return false;
+    }
+
+    // 旧的还回去，换成新的（清单不清空：用户要粘的还是同一批文件）
+    if (m_dataObject != nullptr)
+    {
+        m_dataObject->Release();
+    }
+
+    m_dataObject = fresh;
+    return true;
+}
+
+bool VirtualFileSession::ExtractOnce(size_t index, const std::wstring& destinationPath,
+                                     const ProgressCallback& onProgress, std::wstring& error,
+                                     bool& retriable)
+{
+    retriable = false;
     error.clear();
 
     if (!IsOpen())
@@ -783,6 +847,8 @@ bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPa
 
     if (FAILED(hr))
     {
+        // 这一路失败是"剪贴板那边不给数据"，属于可重试（换新对象再要一次）
+        retriable = true;
         error = L"取文件内容失败（HRESULT=" + HresultHex(hr) + L"），"
                 L"可能是远程会话已断开或剪贴板内容已失效";
         return false;
@@ -823,6 +889,7 @@ bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPa
     }
 
     bool                canceled = false;
+    bool                readFailed = false;   // 读剪贴板那一步失败（可重试）
     std::wstring        writeError;
     LONGLONG            written    = 0;
     LONGLONG            lastTickMs = 0;
@@ -870,6 +937,7 @@ bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPa
             if (readHr != S_OK && readHr != S_FALSE)
             {
                 writeError = L"读剪贴板数据失败（HRESULT=" + HresultHex(readHr) + L"）";
+                readFailed = true;   // 这一路是可重试的（剪贴板那边断了，换新对象再要）
                 break;
             }
 
@@ -929,6 +997,15 @@ bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPa
         }
 
         ::DeleteFileW(longPath.c_str());
+
+        // 取消 / 写盘出错 → 重试也没用；读剪贴板失败、内容没传完 → 换新对象还能再试
+        if (!canceled)
+        {
+            const bool shortContent = (writeError.empty() && info.hasSize && info.size >= 0 &&
+                                       written < info.size);
+
+            retriable = (readFailed || shortContent);
+        }
 
         if (canceled)
         {
