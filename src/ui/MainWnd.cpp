@@ -2626,6 +2626,9 @@ void MainWindow::LayoutPasteBar()
     m_pasteBarRect.top    = 0;
     m_pasteBarRect.right  = leftWidth + barWidth;
     m_pasteBarRect.bottom = totalHeight;
+
+    // 条的位置/宽度变了，分隔线的像素位置要重算
+    m_pasteBarLinesDirty = true;
 }
 
 // ----------------------------------------------------------------------------
@@ -2708,33 +2711,30 @@ void MainWindow::PaintPasteBar()
     }
 
     // 3. 文件边界线：每个文件结束的位置一根 1px 竖线
-    //   （最后一项的边界就是条的右端，不画；文件夹大小是 0，线会重合，也无所谓）
-    if (m_pasteItemSizes != nullptr && m_pasteTotalBytes > 0)
+    //   位置只在"清单到达 / 条宽变化"时算一次并去重（同一像素只留一根），
+    //   所以每帧的绘制量最多就是"条宽"那么多根，跟文件数彻底无关。
+    if (m_pasteBarLinesDirty)
     {
-        const int      barWidth = barRight - barLeft;
-        const size_t   count    = m_pasteItemSizes->size();
+        BuildPasteBarLines(barRight - barLeft);
+        m_pasteBarLinesDirty = false;
+    }
 
+    if (!m_pasteBarLineOffsets.empty())
+    {
         // 未到的线用灰 150（在 214 底色上看得清）；
         // 已经被进度条"走过"的线，用跟进度条一样的颜色 —— 看着就像那根线被吃进去了
         HBRUSH pendingLineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
         HBRUSH passedLineBrush  = ::CreateSolidBrush(RGB(15, 123, 15));
 
-        LONGLONG cumulative = 0;
-
-        for (size_t i = 0; i + 1 < count; ++i)
+        for (int offset : m_pasteBarLineOffsets)
         {
-            cumulative += (*m_pasteItemSizes)[i];
-
-            const int x = barLeft + static_cast<int>(
-                static_cast<double>(barWidth) * static_cast<double>(cumulative) /
-                static_cast<double>(m_pasteTotalBytes) + 0.5);
+            const int x = barLeft + offset;
 
             if (x <= barLeft || x >= barRight)
             {
-                continue;   // 头尾不画，避免和边框重合
+                continue;   // 双保险：极端情况下也别画到边框上
             }
 
-            // 进度条已经越过这根线 → 用进度条的颜色；还没到 → 用灰色
             HBRUSH brush = (x <= filledX) ? passedLineBrush : pendingLineBrush;
 
             RECT line = { x, top, x + 1, top + barHeight };
@@ -2749,11 +2749,62 @@ void MainWindow::PaintPasteBar()
 }
 
 // ----------------------------------------------------------------------------
+// 算一次"文件分隔线"的像素位置（存成条内偏移，已去重）
+//
+// 为什么只算一次、还要去重：
+//   文件几百上千个的时候，绝大多数线的 x 会落在同一像素列上（条才 300px 宽）。
+//   原来每帧都按文件数逐根重算、逐根 FillRect，等于把同一根线重复画几百次：
+//   既浪费，又让这一格的重绘变慢，用户看到的就是"进度条在闪"。
+//   现在按像素去重后缓存，每帧最多只画"条宽"那么多根，开销跟文件数无关。
+// ----------------------------------------------------------------------------
+void MainWindow::BuildPasteBarLines(int barWidth)
+{
+    m_pasteBarLineOffsets.clear();
+
+    if (m_pasteItemSizes == nullptr || m_pasteTotalBytes <= 0 || barWidth <= 0)
+    {
+        return;
+    }
+
+    const size_t count = m_pasteItemSizes->size();
+
+    if (count < 2)
+    {
+        return;   // 只有一项，没有"文件之间"的边界
+    }
+
+    LONGLONG cumulative = 0;
+    int      lastOffset = -1;
+
+    for (size_t i = 0; i + 1 < count; ++i)
+    {
+        cumulative += (*m_pasteItemSizes)[i];
+
+        const int offset = static_cast<int>(
+            static_cast<double>(barWidth) * static_cast<double>(cumulative) /
+            static_cast<double>(m_pasteTotalBytes) + 0.5);
+
+        if (offset <= 0 || offset >= barWidth)
+        {
+            continue;   // 贴着条的两端，不画
+        }
+
+        if (offset == lastOffset)
+        {
+            continue;   // 和上一根落在同一像素 → 只留一根（就是"重叠的线合并"）
+        }
+
+        m_pasteBarLineOffsets.push_back(offset);
+        lastOffset = offset;
+    }
+}
+
+// ----------------------------------------------------------------------------
 // 状态栏的窗口过程（子类化）
 //
 // 目的只有一个：系统按它自己的样式画完状态栏之后，我们立刻在那块矩形里
-// 补画字符进度条。这样既保留了系统的浅色底、右下的缩放抓手、文字对齐，
-// 又能画出"两段颜色"的字符条。
+// 补画进度条。这样既保留了系统的浅色底、右下的缩放抓手、文字对齐，
+// 又能画出"两段颜色 + 分隔线"的那种条。
 // ----------------------------------------------------------------------------
 LRESULT CALLBACK MainWindow::StatusBarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
                                                    LPARAM lParam, UINT_PTR idSubclass,
@@ -2793,6 +2844,8 @@ void MainWindow::RemovePasteBar()
     ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 2, 0);
 
     m_pasteBarPosition = 0;
+    m_pasteBarLineOffsets.clear();
+    m_pasteBarLinesDirty = true;
     ::SetRectEmpty(&m_pasteBarRect);
 }
 

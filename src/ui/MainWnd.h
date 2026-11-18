@@ -637,6 +637,12 @@ private:
     int                                          m_pasteBarPosition = 0;
     RECT                                         m_pasteBarRect = {};
 
+    // 分隔线位置（相对条左端的像素偏移，已经去重：同一像素只留一根）。
+    // 清单到达、或窗口尺寸变化时重算一次；之后每帧只遍历这个列表画线，
+    // 开销跟"文件数"彻底脱钩（最多就是条宽那么多个像素）。
+    std::vector<int>                             m_pasteBarLineOffsets;
+    bool                                         m_pasteBarLinesDirty = true;
+
     // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
     std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
 
@@ -657,6 +663,9 @@ private:
     // 一条固定 300px 的细横条：已完成蓝、未完成浅灰；
     // 并按每个文件的大小提前画好 1px 分隔线，蓝越过线 = 那个文件传完了。
     void PaintPasteBar();
+
+    // 算一次分隔线位置并存成"像素偏移列表"（同一像素只留一根）
+    void BuildPasteBarLines(int barWidth);
 
     // 状态栏的窗口过程（子类化）：先让系统照常画，再补画进度条那一段
     static LRESULT CALLBACK StatusBarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
