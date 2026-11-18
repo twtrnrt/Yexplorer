@@ -369,6 +369,17 @@ static bool CompareEntries(const shell::ShellEntry& left,
         return left.isFolder;
     }
 
+    // 驱动器按盘符字母排（C、D、E…），不按显示名：
+    // 卷标各不相同的时候（"系统 (C:)"、"DATA (D:)"）按名字排会乱序，
+    // 系统「此电脑」也是按盘符排的。
+    // 只在按名称排（第 0 列）时算，两条都必须是驱动器（driveLetter 非 0）。
+    if (column == 0 && left.driveLetter != 0 && right.driveLetter != 0 &&
+        left.driveLetter != right.driveLetter)
+    {
+        const bool leftFirst = (left.driveLetter < right.driveLetter);
+        return ascending ? leftFirst : !leftFirst;
+    }
+
     int result = 0;
 
     switch (column)

@@ -419,6 +419,10 @@ void FillDriveInfo(shell::ShellEntry& entry)
 
     const std::wstring rootPath = std::wstring(1, letter) + L":\\";
 
+    // 先把盘符记下来：排序要用（驱动器按盘符字母排，不按显示名）。
+    // 放在下面几个提前 return 之前，保证空光驱这类查不到容量的项也有盘符。
+    entry.driveLetter = letter;
+
     entry.driveType = static_cast<int>(::GetDriveTypeW(rootPath.c_str()));
 
     // 无效的根目录：查容量没意义，跳过
