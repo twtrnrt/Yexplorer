@@ -1097,14 +1097,22 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // 汉字字形上下基本填满 em 框，视觉中线 = 基线往上 (ascent - descent)/2
             const int visualCenter = textBaseline - (textMetrics.tmAscent - textMetrics.tmDescent) / 2;
 
-            // 符号也一样：假设它的字形居中在自己的 em 框里，
-            // 那么把 em 框的上边界摆到 (视觉中线 - tmHeight/2) 就一定对齐
-            const int symbolTop = visualCenter - symbolMetrics.tmHeight / 2;
+            // 符号的基线：让它的 em 中心落在文字那条中线上
+            const int symbolBaseline = visualCenter + (symbolMetrics.tmAscent - symbolMetrics.tmDescent) / 2;
 
-            RECT rect = { x, symbolTop, x + symbolSize.cx + 2, symbolTop + symbolMetrics.tmHeight + 2 };
+            // 这里必须用 DT_BOTTOM 而不是 DT_TOP。
+            // DT_TOP 是把"字符黑框顶"贴到 rect.top，而黑框顶比 em 框顶低一个
+            // tmInternalLeading（两倍字号下能有 6 像素），符号就会整体往下沉，
+            // 表现就是"加号的横线跑到文字底部去了"。
+            // DT_BOTTOM 是"降部底贴 rect.bottom"，基线 = rect.bottom - tmDescent，
+            // 跟内部行距无关，位置可以算准。
+            RECT rect = { x,
+                          symbolBaseline - symbolMetrics.tmHeight,
+                          x + symbolSize.cx + 2,
+                          symbolBaseline + symbolMetrics.tmDescent };
             ::SetTextColor(dc, actionColor);
             ::DrawTextW(dc, symbolText.c_str(), static_cast<int>(symbolText.size()), &rect,
-                        DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+                        DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
 
             if (oldSymbolFont != nullptr)
             {
