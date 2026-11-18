@@ -1439,6 +1439,25 @@ unsigned long long FileListView::SelectedTotalSize() const
     return total;
 }
 
+unsigned long long FileListView::SizeOfPath(const std::wstring& path) const
+{
+    if (m_result == nullptr || path.empty())
+    {
+        return 0;
+    }
+
+    for (const auto& entry : m_result->entries)
+    {
+        if (entry.fullPath == path)
+        {
+            // 目录没有"大小"这个概念，按 0 算
+            return entry.isFolder ? 0 : entry.size;
+        }
+    }
+
+    return 0;
+}
+
 void FileListView::SelectAll()
 {
     if (m_hWnd == nullptr)

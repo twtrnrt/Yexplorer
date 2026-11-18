@@ -168,6 +168,10 @@ public:
     // 只看已经枚举好的大小，不额外查磁盘。
     unsigned long long SelectedTotalSize() const;
 
+    // 某一个路径的字节数（按完整路径查，找不到返回 0；目录按 0 算）。
+    // 拖出压缩包里的项时用它算"这一项解完该有多大"，进度条靠这个算百分比。
+    unsigned long long SizeOfPath(const std::wstring& path) const;
+
     // 排序规则（用于新建项时判断插到哪个位置）
     void SetComparator(Comparator comparator) { m_comparator = std::move(comparator); }
 

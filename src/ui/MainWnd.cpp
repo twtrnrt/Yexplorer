@@ -26,6 +26,9 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
+#include <thread>     // 拖出压缩包里的项：解压丢后台线程，主线程刷进度
+#include <atomic>     // 后台线程解压完成标志
+#include <memory>     // shared_ptr（把解压结果从后台线程递回主线程）
 
 #pragma comment(lib, "propsys.lib")
 
@@ -4087,41 +4090,20 @@ void MainWindow::NavigateContainerEntry(const shell::ShellEntry& entry)
 // 打开容器内部的文件（先解成临时文件再打开）
 // ============================================================================
 
-std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtualPath,
-                                                     std::wstring& error)
+// 某个压缩包里解出来的东西落在哪个临时目录（%TEMP%\{本进程固定 guid}_{压缩包文件名}）
+//
+// 单独抽出来是因为"打开压缩包里的文件"和"拖出压缩包里的项"两处都要用，
+// 而且拖出那边还要靠它算出"这一项会解到哪个文件"来显示真实进度。
+std::wstring MainWindow::ContainerTempDirectoryFor(const std::wstring& containerRoot)
 {
-    error.clear();
-
-    if (virtualPath.empty())
-    {
-        error = L"路径为空";
-        return L"";
-    }
-
-    // ---- 1) 往上找容器根（压缩包本身）----
-    //
-    // 例：C:\a\t.rar\sub\inner.txt → C:\a\t.rar
-    // 判断逻辑和右键菜单用的是同一套（shell::ContainerRootForPath），
-    // 只查文件属性、不碰 COM，很快。
-    const std::wstring containerRoot = shell::ContainerRootForPath(virtualPath);
-
     if (containerRoot.empty())
     {
-        error = L"找不到这个文件所属的压缩包";
         return L"";
     }
 
-    // ---- 2) 这一项在包内的相对路径（保留包里的子目录结构）----
-    std::wstring innerPath = virtualPath.substr(containerRoot.size());
-
-    while (!innerPath.empty() && (innerPath.front() == L'\\' || innerPath.front() == L'/'))
-    {
-        innerPath.erase(innerPath.begin());
-    }
-
-    // ---- 3) 临时目录：%TEMP%\{本进程固定的 guid}_{压缩包文件名} ----
+    // ---- 临时目录名里那一段固定 guid ----
     //
-    // 用固定的 guid（整个进程只生成一次），好处是同一个压缩包反复双击里面的文件
+    // 整个进程只生成一次，好处是同一个压缩包反复打开/拖出里面的文件，
     // 都解到同一个目录，不会每点一次就在临时目录里堆一个新的文件夹。
     if (m_containerTempTag.empty())
     {
@@ -4155,7 +4137,6 @@ std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtual
     wchar_t tempPath[MAX_PATH] = {};
     if (::GetTempPathW(_countof(tempPath), tempPath) == 0)
     {
-        error = L"取不到系统临时目录";
         return L"";
     }
 
@@ -4167,7 +4148,49 @@ std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtual
     }
 
     // GetTempPathW 返回的路径自带末尾反斜杠，直接拼
-    std::wstring tempDirectory = std::wstring(tempPath) + m_containerTempTag + containerName;
+    return std::wstring(tempPath) + m_containerTempTag + containerName;
+}
+
+std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtualPath,
+                                                     std::wstring& error)
+{
+    error.clear();
+
+    if (virtualPath.empty())
+    {
+        error = L"路径为空";
+        return L"";
+    }
+
+    // ---- 1) 往上找容器根（压缩包本身）----
+    //
+    // 例：C:\a\t.rar\sub\inner.txt → C:\a\t.rar
+    // 判断逻辑和右键菜单用的是同一套（shell::ContainerRootForPath），
+    // 只查文件属性、不碰 COM，很快。
+    const std::wstring containerRoot = shell::ContainerRootForPath(virtualPath);
+
+    if (containerRoot.empty())
+    {
+        error = L"找不到这个文件所属的压缩包";
+        return L"";
+    }
+
+    // ---- 2) 这一项在包内的相对路径（保留包里的子目录结构）----
+    std::wstring innerPath = virtualPath.substr(containerRoot.size());
+
+    while (!innerPath.empty() && (innerPath.front() == L'\\' || innerPath.front() == L'/'))
+    {
+        innerPath.erase(innerPath.begin());
+    }
+
+    // ---- 3) 临时目录 ----
+    const std::wstring tempDirectory = ContainerTempDirectoryFor(containerRoot);
+
+    if (tempDirectory.empty())
+    {
+        error = L"取不到系统临时目录";
+        return L"";
+    }
 
     // ---- 4) 真正去解（先读流，读不出来走 Shell 复制通道；失败原因填在 error 里）----
     return shellops::ExtractContainerEntry(virtualPath, containerRoot, innerPath,
@@ -4205,50 +4228,189 @@ std::vector<std::wstring> MainWindow::PrepareDragPaths(const std::vector<std::ws
         return paths;
     }
 
-    // ---- 2) 大的才显示进度窗 ----
+    // ---- 2) 先把每一项的"落点"和"该有多大"算出来 ----
     //
-    // DoDragDrop 是阻塞的，解压发生在进入拖动循环之前：这期间用户一直按着鼠标、
-    // 屏幕上什么都不动，很容易以为"卡住了"。所以把总大小估一下，大的就弹个小窗。
-    const bool showProgress =
-        static_cast<unsigned long long>(m_fileListView.SelectedTotalSize()) >= kDragProgressThresholdBytes;
-
-    std::vector<std::wstring> realPaths;
-    realPaths.reserve(paths.size());
-
-    const size_t total = paths.size();
-    for (size_t index = 0; index < total; ++index)
+    // 这一步全是本地查询（拼路径、查列表里已经枚举好的大小），不碰 COM，很快。
+    // 有了落点文件路径，进度就能按"文件长到多大了"来算，而不是按项数糊弄。
+    struct DragItem
     {
-        // 名字取最后一段，太长的话窗口里显示不下
-        const std::wstring& path = paths[index];
-        const size_t slash = path.find_last_of(L"\\/");
-        const std::wstring name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+        std::wstring       virtualPath;      // 容器内路径
+        std::wstring       containerRoot;    // 压缩包本身
+        std::wstring       innerPath;        // 包内相对路径
+        std::wstring       tempDirectory;    // 解压落点的目录
+        std::wstring       outputPath;       // 会解到哪个文件（进度靠盯它的大小）
+        std::wstring       name;             // 进度窗里显示的名字
+        unsigned long long expectedSize = 0; // 解完应该多大（0 = 包没给出大小）
+    };
 
-        const std::wstring progressText = L"正在解出：" + name + L"（" + std::to_wstring(index + 1) +
-                                          L" / " + std::to_wstring(total) + L"）";
+    std::vector<DragItem> items;
+    items.reserve(paths.size());
 
-        if (showProgress)
+    unsigned long long totalBytes = 0;   // 这一批解完一共多少字节
+
+    for (const auto& path : paths)
+    {
+        DragItem item;
+        item.virtualPath = path;
+
+        item.containerRoot = shell::ContainerRootForPath(path);
+
+        if (item.containerRoot.empty())
         {
-            ShowDragProgress(progressText, static_cast<int>((index * 100) / total));
-        }
-
-        std::wstring error;
-        std::wstring realPath = ExtractContainerEntryToTemp(paths[index], error);
-
-        if (realPath.empty())
-        {
-            // 解不出来就跳过这一项，其余照拖（日志里留个原因）
-            Logger::Warn(L"拖出：压缩包内项解不出来，已跳过：" + paths[index] +
-                         L"，原因：" + (error.empty() ? L"未知" : error));
+            Logger::Warn(L"拖出：找不到这项所属的压缩包，已跳过：" + path);
             continue;
         }
 
-        realPaths.push_back(std::move(realPath));
+        // 包内相对路径（去掉前导的分隔符，保留里面的子目录结构）
+        item.innerPath = path.substr(item.containerRoot.size());
 
-        // 这一项解完了，把进度往前推一格（最后一项会短暂跳到 100%，看着比一直停着舒服）
-        if (showProgress)
+        while (!item.innerPath.empty() &&
+               (item.innerPath.front() == L'\\' || item.innerPath.front() == L'/'))
         {
-            ShowDragProgress(progressText, static_cast<int>(((index + 1) * 100) / total));
+            item.innerPath.erase(item.innerPath.begin());
         }
+
+        item.tempDirectory = ContainerTempDirectoryFor(item.containerRoot);
+
+        if (item.tempDirectory.empty() || item.innerPath.empty())
+        {
+            Logger::Warn(L"拖出：算不出这项的解压落点，已跳过：" + path);
+            continue;
+        }
+
+        // 落点 = 临时目录 + 包内相对路径（规则和 shellops::ExtractContainerEntry 一致）
+        item.outputPath = item.tempDirectory;
+
+        if (item.outputPath.back() != L'\\' && item.outputPath.back() != L'/')
+        {
+            item.outputPath += L'\\';
+        }
+        item.outputPath += item.innerPath;
+
+        for (wchar_t& ch : item.outputPath)
+        {
+            if (ch == L'/')
+            {
+                ch = L'\\';   // 统一成反斜杠，方便后面查文件大小
+            }
+        }
+
+        const size_t slash = path.find_last_of(L"\\/");
+        item.name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+
+        item.expectedSize = m_fileListView.SizeOfPath(path);
+        totalBytes += item.expectedSize;
+
+        items.push_back(std::move(item));
+    }
+
+    if (items.empty())
+    {
+        return std::vector<std::wstring>();
+    }
+
+    // ---- 3) 大的才弹进度窗 ----
+    //
+    // 解压发生在进入拖动循环之前：这期间用户一直按着鼠标、屏幕上什么都不动，
+    // 很容易以为"卡住了"。小的几百毫秒就完事，弹窗反而闪眼睛。
+    const bool showProgress = totalBytes >= kDragProgressThresholdBytes;
+
+    std::vector<std::wstring> realPaths;
+    realPaths.reserve(items.size());
+
+    unsigned long long finishedBytes = 0;   // 已经解完的项累计多少字节
+
+    for (size_t index = 0; index < items.size(); ++index)
+    {
+        const DragItem& item = items[index];
+
+        // ---- 解压放后台线程，主线程留着刷进度条 ----
+        //
+        // 这里必须先起线程再轮询：CopyHere 是同步阻塞的（实测 652MB 要十二三秒），
+        // 在主线程里直接调，进度窗在这十几秒里一次都刷不出来。
+        struct ExtractJob
+        {
+            std::atomic<bool> finished{ false };
+            std::wstring      realPath;
+            std::wstring      error;
+        };
+
+        auto job = std::make_shared<ExtractJob>();
+
+        std::thread worker([item, job]()
+        {
+            // Shell.Application / IStream 都是 COM 对象，这条线程得先初始化成 STA
+            const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+            job->realPath = shellops::ExtractContainerEntry(item.virtualPath, item.containerRoot,
+                                                            item.innerPath, item.tempDirectory,
+                                                            job->error);
+
+            if (SUCCEEDED(comResult))
+            {
+                ::CoUninitialize();
+            }
+
+            job->finished = true;
+        });
+        worker.detach();
+
+        // ---- 主线程：每 100 毫秒看一眼落点文件长到多大了 ----
+        while (!job->finished)
+        {
+            unsigned long long doneBytes = 0;
+
+            WIN32_FILE_ATTRIBUTE_DATA fileData = {};
+            if (::GetFileAttributesExW(item.outputPath.c_str(),
+                                       ::GetFileExInfoStandard, &fileData))
+            {
+                doneBytes = (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
+                            static_cast<unsigned long long>(fileData.nFileSizeLow);
+            }
+
+            if (showProgress)
+            {
+                // 这一项的解压进度：别超过它自己的预期大小（有的包给不出大小，就用总字节兜底）
+                const unsigned long long expected =
+                    (item.expectedSize > 0) ? item.expectedSize : totalBytes;
+                const unsigned long long cappedDone =
+                    (doneBytes < expected) ? doneBytes : expected;
+
+                const unsigned long long overallDone = finishedBytes + cappedDone;
+
+                int percent = 0;
+                if (totalBytes > 0)
+                {
+                    percent = static_cast<int>((overallDone * 100ull) / totalBytes);
+                }
+
+                std::wstring text = L"正在解出：" + item.name +
+                                    L"（第 " + std::to_wstring(index + 1) +
+                                    L" / 共 " + std::to_wstring(items.size()) + L" 项）" +
+                                    L"  " + std::to_wstring(percent) + L"%";
+
+                if (totalBytes > 0)
+                {
+                    text += L"（" + std::to_wstring(overallDone / (1024ull * 1024ull)) + L" / " +
+                            std::to_wstring(totalBytes / (1024ull * 1024ull)) + L" MB）";
+                }
+
+                ShowDragProgress(text, percent);
+            }
+
+            ::Sleep(100);
+        }
+
+        if (job->realPath.empty())
+        {
+            // 解不出来就跳过这一项，其余照拖（日志里留个原因）
+            Logger::Warn(L"拖出：压缩包内项解不出来，已跳过：" + item.virtualPath +
+                         L"，原因：" + (job->error.empty() ? L"未知" : job->error));
+            continue;
+        }
+
+        realPaths.push_back(std::move(job->realPath));
+        finishedBytes += item.expectedSize;
     }
 
     if (showProgress)
@@ -4257,7 +4419,7 @@ std::vector<std::wstring> MainWindow::PrepareDragPaths(const std::vector<std::ws
     }
 
     Logger::Info(L"拖出：从压缩包解出 " + std::to_wstring(realPaths.size()) + L" / " +
-                 std::to_wstring(total) + L" 项到临时目录");
+                 std::to_wstring(items.size()) + L" 项到临时目录");
 
     // 一项都没成功：返回空，调用方据此放弃这次拖动
     return realPaths;
@@ -4268,7 +4430,7 @@ void MainWindow::ShowDragProgress(const std::wstring& text, int percent)
     RECT client = {};
     ::GetClientRect(m_hWnd, &client);
 
-    const int panelWidth  = 360;
+    const int panelWidth  = 420;   // 要放得下"名字 + 项数 + 百分比 + 已解/总量"
     const int panelHeight = 96;
     const int left = ((client.right - client.left) - panelWidth) / 2;
     const int top  = ((client.bottom - client.top) - panelHeight) / 2;
@@ -4293,8 +4455,10 @@ void MainWindow::ShowDragProgress(const std::wstring& text, int percent)
                                                 m_hWnd, nullptr, instance, nullptr);
 
         // 坐标相对面板（也就是面板内部左上角）
+        // SS_ENDELLIPSIS：名字特别长的时候尾巴上打省略号，不至于被硬生生切掉
         m_dragProgressText = ::CreateWindowExW(0, L"STATIC", text.c_str(),
-                                               WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX,
+                                               WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX |
+                                                   SS_ENDELLIPSIS,
                                                12, 20, panelWidth - 24, 22,
                                                m_dragProgressPanel, nullptr, instance, nullptr);
 

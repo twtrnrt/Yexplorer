@@ -362,12 +362,19 @@ private:
     std::wstring ExtractContainerEntryToTemp(const std::wstring& virtualPath,
                                              std::wstring& error);
 
+    // 这个压缩包里的东西解到哪个临时目录。
+    // 返回空串表示取不到临时目录（调用方自己决定怎么报错）。
+    std::wstring ContainerTempDirectoryFor(const std::wstring& containerRoot);
+
     // ----------------------------------------------------------------
     // 拖出前的路径准备（文件列表的 LVN_BEGINDRAG 会调它）
     //
     // 普通磁盘文件 → 原样返回，零成本（不查磁盘、不碰 COM）。
     // 压缩包内部的项 → 先解到临时目录，返回真实路径；解不出来的项跳过。
     // 一项都没解出来时返回空，调用方据此放弃这次拖动。
+    //
+    // 解压放在后台线程做，这里每 100 毫秒看一眼"落点文件长到多大了"，
+    // 进度窗显示的是真实解压进度（不是按项数估的）。
     // ----------------------------------------------------------------
     std::vector<std::wstring> PrepareDragPaths(const std::vector<std::wstring>& paths);
 
