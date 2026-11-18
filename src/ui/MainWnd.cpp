@@ -2575,8 +2575,8 @@ void MainWindow::LayoutPasteBar()
     ::SelectObject(dc, old);
     ::ReleaseDC(m_hStatusBar, dc);
 
-    // 左文字格：只在其字宽上加一点点空，让进度条紧贴着"项"字后面
-    int leftWidth  = leftSize.cx + Scale(4);
+    // 左文字格：字宽 + 12px，让"…项"和进度条之间留 12px 间隔
+    int leftWidth  = leftSize.cx + Scale(12);
     int rightWidth = rightSize.cx + Scale(10);
 
     // 进度条固定 300px（不是拉满整条状态栏），右边留白无所谓
@@ -2691,8 +2691,10 @@ void MainWindow::PaintPasteBar()
         const int      barWidth = barRight - barLeft;
         const size_t   count    = m_pasteItemSizes->size();
 
-        // 底色 214 上，150 的线看得清
-        HBRUSH lineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
+        // 未到的线用灰 150（在 214 底色上看得清）；
+        // 已经被进度条"走过"的线，用跟进度条一样的颜色 —— 看着就像那根线被吃进去了
+        HBRUSH pendingLineBrush = ::CreateSolidBrush(RGB(150, 150, 150));
+        HBRUSH passedLineBrush  = ::CreateSolidBrush(RGB(15, 123, 15));
 
         LONGLONG cumulative = 0;
 
@@ -2709,11 +2711,15 @@ void MainWindow::PaintPasteBar()
                 continue;   // 头尾不画，避免和边框重合
             }
 
+            // 进度条已经越过这根线 → 用进度条的颜色；还没到 → 用灰色
+            HBRUSH brush = (x <= filledX) ? passedLineBrush : pendingLineBrush;
+
             RECT line = { x, top, x + 1, top + barHeight };
-            ::FillRect(dc, &line, lineBrush);
+            ::FillRect(dc, &line, brush);
         }
 
-        ::DeleteObject(lineBrush);
+        ::DeleteObject(pendingLineBrush);
+        ::DeleteObject(passedLineBrush);
     }
 
     ::ReleaseDC(m_hStatusBar, dc);
