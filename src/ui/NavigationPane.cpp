@@ -7,6 +7,7 @@
 
 #include "NavigationPane.h"
 #include "core/Logger.h"
+#include "shell/ShellFolder.h"   // shell::IsFileSystemPath（右键判断节点有没有真实路径）
 
 #include <ShlObj.h>    // SHGetKnownFolderPath / FOLDERID_*
 #include <uxtheme.h>   // SetWindowTheme
@@ -269,8 +270,9 @@ void NavigationPane::InsertPinned(HTREEITEM parentItem, const core::PinnedItem& 
     size_t nodeIndex = m_nodes.size();
 
     NodeData nodeData;
-    nodeData.path     = item.path;
-    nodeData.isPinned = true;
+    nodeData.path         = item.path;
+    nodeData.isPinned     = true;
+    nodeData.isFolderLike = item.isFolder;   // 程序类固定项：右键时只给「取消固定」
     m_nodes.push_back(nodeData);
 
     TVINSERTSTRUCTW insert = {};
@@ -330,7 +332,18 @@ bool NavigationPane::IsInPinnedArea(POINT ptClient) const
     return m_pinnedTop >= 0 && ptClient.y >= m_pinnedTop;
 }
 
-// 右键菜单：只有压在固定项上才弹「取消固定」
+// ----------------------------------------------------------------------------
+// 右键菜单：这里只负责"认准压在哪个节点上"，菜单内容和命令执行都交给 MainWindow
+//
+// 以前这里自己拼一个只有「取消固定」的小菜单；现在要和文件列表里"文件夹右键"
+// 保持一致（打开 / 在新窗口中打开 / 复制文件路径 / 在终端中打开 / 属性，
+// 固定项再加「取消固定」），那套逻辑在 MainWindow 里已经有一套，
+// 两处各写一遍会越走越偏，所以统一交出去。
+//
+// 不弹菜单的情况（和以前一样）：
+//   · 空白处、分组横线、固定区空着时的提示行；
+//   · "此电脑""控制面板"这类虚拟节点（没有真实路径，不具备任何可用动作）。
+// ----------------------------------------------------------------------------
 LRESULT NavigationPane::ShowContextMenu(int screenX, int screenY)
 {
     if (m_hWnd == nullptr)
@@ -359,10 +372,11 @@ LRESULT NavigationPane::ShowContextMenu(int screenX, int screenY)
         ::ScreenToClient(m_hWnd, &pt);
     }
 
+    // 已经把空白处、分隔线、提示行、展开箭头都排除掉了
     HTREEITEM hitItem = HitTestDroppableItem(pt);
     if (hitItem == nullptr)
     {
-        return 0;   // 空白处 / 分隔线 / 提示行：不弹菜单
+        return 0;
     }
 
     TVITEMW treeItem = {};
@@ -375,9 +389,18 @@ LRESULT NavigationPane::ShowContextMenu(int screenX, int screenY)
     }
 
     size_t nodeIndex = static_cast<size_t>(treeItem.lParam);
-    if (nodeIndex >= m_nodes.size() || !m_nodes[nodeIndex].isPinned)
+    if (nodeIndex >= m_nodes.size())
     {
-        return 0;   // 桌面、下载、硬盘这些不归固定区管，右键不弹菜单
+        return 0;
+    }
+
+    const NodeData& node = m_nodes[nodeIndex];
+
+    // 非固定项里只有真实文件系统路径（桌面/下载/文档/硬盘）才弹；
+    // 固定项本身可能是程序，也要弹（菜单里只剩「取消固定」）
+    if (!node.isPinned && !shell::IsFileSystemPath(node.path))
+    {
+        return 0;
     }
 
     // 先把这一项选中，让用户一眼看出操作的是哪个
@@ -386,29 +409,9 @@ LRESULT NavigationPane::ShowContextMenu(int screenX, int screenY)
     POINT screenPt = pt;
     ::ClientToScreen(m_hWnd, &screenPt);
 
-    HMENU menu = ::CreatePopupMenu();
-    ::AppendMenuW(menu, MF_STRING, 1, L"取消固定");
-    ::SetMenuDefaultItem(menu, 1, FALSE);
-
-    // 菜单的"主人"要给顶层窗口（主窗口），给树控件这种子窗口的话，
-    // 菜单会立刻收起来、键盘也点不动
-    HWND ownerWindow = ::GetAncestor(m_hWnd, GA_ROOT);
-    if (ownerWindow == nullptr)
+    if (m_onContextMenu)
     {
-        ownerWindow = m_hWnd;
-    }
-
-    int command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                                   screenPt.x, screenPt.y, 0, ownerWindow, nullptr);
-
-    ::DestroyMenu(menu);
-
-    Logger::Info(L"左栏右键菜单：command=" + std::to_wstring(command) +
-                 L"，项=" + m_nodes[nodeIndex].path);
-
-    if (command == 1 && m_onUnpin)
-    {
-        m_onUnpin(m_nodes[nodeIndex].path);
+        m_onContextMenu(node.path, node.isPinned, node.isFolderLike, screenPt);
     }
 
     return 0;

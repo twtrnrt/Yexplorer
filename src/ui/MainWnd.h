@@ -329,6 +329,19 @@ private:
 
     void ShowPropertiesForSelection();
 
+    // 按指定路径弹系统的「属性」窗口（左栏右键、列表里选中一项时都用它）
+    void ShowPropertiesForPath(const std::wstring& path);
+
+    // ---- 左栏（导航栏）右键菜单 ----
+    //
+    // 导航栏只上报"右键了哪个节点"，菜单构建和命令执行都在这里做，
+    // 保证和文件列表里"文件夹右键"是同一套动作。
+    void ShowNavigationContextMenu(const std::wstring& path, bool isPinned,
+                                   bool isFolder, POINT screenPoint);
+
+    // 把某个路径从常用区（固定区）里去掉：删配置 → 存盘 → 重建左栏
+    void UnpinPinnedPath(const std::wstring& path);
+
     // 「新建」菜单（二级菜单：文件夹 + 系统 ShellNew 里登记的各类新文件模板）
     void FillNewMenu(HMENU parentMenu);
 

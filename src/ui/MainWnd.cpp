@@ -708,20 +708,11 @@ void MainWindow::CreateChildControls()
         // 固定区：先把配置文件里记着的那些显示出来（第一次运行时是空的，显示提示行）
         m_navigationPane.SetPinnedItems(core::Settings::Instance().PinnedItems());
 
-        // 在固定项上点右键 →「取消固定」：从配置里删掉，存盘，再把左栏刷新一遍
-        m_navigationPane.SetUnpinCallback([this](const std::wstring& path)
+        // 左栏右键：导航栏只负责"右键了哪个节点"，菜单和命令都在 ShowNavigationContextMenu 里
+        m_navigationPane.SetContextMenuCallback(
+            [this](const std::wstring& path, bool isPinned, bool isFolder, POINT screenPoint)
         {
-            if (!core::Settings::Instance().RemovePinned(path))
-            {
-                return;
-            }
-
-            core::Settings::Instance().Save();
-
-            m_navigationPane.SetPinnedItems(core::Settings::Instance().PinnedItems());
-            m_navigationPane.SelectFolderPath(m_history.Current());   // 重建树后选中状态要补回来
-
-            Logger::Info(L"取消固定：" + path);
+            ShowNavigationContextMenu(path, isPinned, isFolder, screenPoint);
         });
     }
 
@@ -2961,6 +2952,134 @@ void MainWindow::BuildShellItemMenu(HMENU menu, const std::wstring& itemPath)
 }
 
 // ---------------------------------------------------------------------------
+// 左栏（导航栏）右键菜单
+//
+// 由 NavigationPane::ShowContextMenu 回调进来。动作和文件列表里"文件夹右键"
+// 保持同一套，但只保留左栏里真正说得通的项：打开 / 在新窗口中打开 /
+// 复制文件路径 / 在终端中打开 / 属性（固定项再加「取消固定」）。
+//
+// 不给"剪切 / 复制 / 删除 / 重命名"：
+//   · 左栏右键的那个文件夹不一定在文件列表里选中，删除/重命名要走列表那套状态，
+//     误操作代价也大（右键"桌面"一下就能删掉系统文件夹）；
+//   · 系统资源管理器左栏右键本来也没有这些项（用户核对过）。
+//
+// 命令号在本函数内局部定义：菜单自己 TrackPopupMenu 取返回值直接执行，
+// 不走 WM_COMMAND，所以不会和文件列表那套 3xxx 命令撞号。
+// ---------------------------------------------------------------------------
+void MainWindow::ShowNavigationContextMenu(const std::wstring& path, bool isPinned,
+                                           bool isFolder, POINT screenPoint)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    enum NavCommand : int
+    {
+        kNavOpen          = 1,
+        kNavOpenNewWindow = 2,
+        kNavCopyPath      = 3,
+        kNavTerminal      = 4,
+        kNavProperties    = 5,
+        kNavUnpin         = 6,
+    };
+
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr)
+    {
+        return;
+    }
+
+    if (isFolder)
+    {
+        ::AppendMenuW(menu, MF_STRING, kNavOpen, L"打开");
+        ::AppendMenuW(menu, MF_STRING, kNavOpenNewWindow, L"在新窗口中打开");
+
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kNavCopyPath, L"复制文件路径");
+
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kNavTerminal, L"在终端中打开");
+    }
+
+    // 属性：文件夹和程序类固定项都给
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_STRING, kNavProperties, L"属性");
+
+    if (isPinned)
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        ::AppendMenuW(menu, MF_STRING, kNavUnpin, L"取消固定");
+    }
+
+    // 回车默认落到「打开」上；程序类固定项没有「打开」，就不设默认项
+    if (isFolder)
+    {
+        ::SetMenuDefaultItem(menu, kNavOpen, FALSE);
+    }
+
+    // 菜单主人必须是顶层窗口：给树控件这种子窗口的话，菜单会立刻收起来、键盘也点不动
+    int command = ::TrackPopupMenu(menu,
+                                   TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                   screenPoint.x, screenPoint.y,
+                                   0, m_hWnd, nullptr);
+
+    ::DestroyMenu(menu);
+
+    switch (command)
+    {
+    case kNavOpen:
+        NavigateToPath(path);
+        break;
+
+    case kNavOpenNewWindow:
+        OpenFolderInNewWindow(path, true);
+        break;
+
+    case kNavCopyPath:
+        if (!shellclip::WriteText(path, m_hWnd))
+        {
+            Logger::Warn(L"复制文件路径失败（剪贴板可能被别的程序占用）");
+        }
+        break;
+
+    case kNavTerminal:
+        DoOpenTerminalIn(path);
+        break;
+
+    case kNavProperties:
+        ShowPropertiesForPath(path);
+        break;
+
+    case kNavUnpin:
+        UnpinPinnedPath(path);
+        break;
+
+    default:
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 取消固定：从配置里删掉 → 存盘 → 重建左栏（原先写在 SetUnpinCallback 的 lambda 里，
+// 现在左栏右键菜单统一在 MainWindow 里做，就搬到这儿了）
+// ---------------------------------------------------------------------------
+void MainWindow::UnpinPinnedPath(const std::wstring& path)
+{
+    if (!core::Settings::Instance().RemovePinned(path))
+    {
+        return;
+    }
+
+    core::Settings::Instance().Save();
+
+    m_navigationPane.SetPinnedItems(core::Settings::Instance().PinnedItems());
+    m_navigationPane.SelectFolderPath(m_history.Current());   // 重建树后选中状态要补回来
+
+    Logger::Info(L"取消固定：" + path);
+}
+
+// ---------------------------------------------------------------------------
 // 「查看」子菜单（和资源管理器一样，当前视图打勾）
 // ---------------------------------------------------------------------------
 void MainWindow::FillViewMenu(HMENU parentMenu)
@@ -3748,7 +3867,16 @@ void MainWindow::ShowPropertiesForSelection()
 
     // ---- 单选 / 没选中：显示一个对象的属性（没选中就是当前目录）----
     const std::wstring target = selected.empty() ? m_history.Current() : selected.front();
-    if (target.empty())
+    ShowPropertiesForPath(target);
+}
+
+// ---------------------------------------------------------------------------
+// 按指定路径弹系统的「属性」窗口
+// （列表里选中一项、左栏右键某个节点，都走这里，保证和资源管理器一样是原生属性窗）
+// ---------------------------------------------------------------------------
+void MainWindow::ShowPropertiesForPath(const std::wstring& path)
+{
+    if (path.empty())
     {
         return;
     }
@@ -3757,13 +3885,13 @@ void MainWindow::ShowPropertiesForSelection()
     info.cbSize = sizeof(info);
     info.fMask  = SEE_MASK_INVOKEIDLIST;   // 走 shell 的"属性"动词，弹系统原生属性窗口
     info.lpVerb = L"properties";
-    info.lpFile = target.c_str();
+    info.lpFile = path.c_str();
     info.nShow  = SW_SHOW;
     info.hwnd   = m_hWnd;
 
     if (!::ShellExecuteExW(&info))
     {
-        Logger::Warn(L"打开属性窗口失败：" + target);
+        Logger::Warn(L"打开属性窗口失败：" + path);
     }
 }
 

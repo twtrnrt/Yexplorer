@@ -78,10 +78,20 @@ public:
     // 数据本身存在 core::Settings（配置文件）里，这里只是显示副本。
     void SetPinnedItems(const std::vector<core::PinnedItem>& items);
 
-    // 右键固定项 →「取消固定」时回调，参数是那一项的完整路径。
-    // 真正从配置文件删、再刷新左栏，由外面（MainWnd）做。
-    using UnpinCallback = std::function<void(const std::wstring& path)>;
-    void SetUnpinCallback(UnpinCallback callback) { m_onUnpin = std::move(callback); }
+    // 右键任意一个"能用"的节点（桌面 / 下载 / 硬盘 / 常用区里的文件夹）
+    // 时，把这一项交给外面（MainWindow）去弹菜单、执行命令。
+    //
+    // 菜单不在这里拼：菜单内容要和文件列表里"文件夹右键"保持一致
+    // （打开 / 在新窗口中打开 / 复制文件路径 / 在终端中打开 / 属性），
+    // 那套逻辑和命令执行都在 MainWindow 里，放在这里会变成两份维护。
+    //
+    // isPinned —— 这一项是不是常用区里的固定项（菜单里会多一条「取消固定」）
+    // isFolder —— 这一项是不是文件夹（程序类固定项没有"目录"可用，菜单里只剩「取消固定」）
+    using ContextMenuCallback = std::function<void(const std::wstring& path,
+                                                   bool isPinned,
+                                                   bool isFolder,
+                                                   POINT screenPoint)>;
+    void SetContextMenuCallback(ContextMenuCallback callback) { m_onContextMenu = std::move(callback); }
 
     // 这个客户区坐标是不是落在固定区里（拖放时用来判断"拖进来就固定"）
     bool IsInPinnedArea(POINT ptClient) const;
@@ -108,7 +118,7 @@ private:
     // 插入"固定区空着"时那行灰色提示
     void InsertHint(HTREEITEM parentItem, const std::wstring& text);
 
-    // 右键菜单（只有压着固定项时才弹）
+    // 右键：取到压在哪个节点上，然后交给 MainWindow 弹菜单并执行
     LRESULT ShowContextMenu(int screenX, int screenY);
 
     // 枚举所有硬盘
@@ -129,17 +139,18 @@ private:
     struct NodeData
     {
         std::wstring path;
-        bool         isSeparator = false;   // 这一行是分隔线占位，不是目录
-        bool         isPinned    = false;   // 这一行是固定区里的项（右键可取消固定）
-        bool         isHint      = false;   // 这一行是"把文件夹拖到这里"的提示文字
-        HTREEITEM    item        = nullptr; // 这一行对应的树节点句柄（用来反选中）
+        bool         isSeparator  = false;  // 这一行是分隔线占位，不是目录
+        bool         isPinned     = false;  // 这一行是固定区里的项（右键可取消固定）
+        bool         isHint       = false;  // 这一行是"把文件夹拖到这里"的提示文字
+        bool         isFolderLike = true;   // 这一行能不能当目录用（程序类固定项为 false）
+        HTREEITEM    item         = nullptr; // 这一行对应的树节点句柄（用来反选中）
     };
     std::vector<NodeData> m_nodes;
 
     // 固定区现在的显示内容（数据真身在 core::Settings 里）
     std::vector<core::PinnedItem> m_pinnedItems;
 
-    UnpinCallback m_onUnpin;
+    ContextMenuCallback m_onContextMenu;
 
     // 固定区起点（客户区 y 坐标，就是固定区上面那条分隔线的行顶），-1 表示没测到
     int m_pinnedTop = -1;
