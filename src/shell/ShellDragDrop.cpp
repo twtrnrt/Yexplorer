@@ -888,13 +888,21 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         RECT client = {};
         ::GetClientRect(hwnd, &client);
 
-        // 圆角白底 + 浅灰描边
+        // 圆角白底 + 浅灰描边（圆角半径跟上面的窗口区域对齐）
         HBRUSH background = ::CreateSolidBrush(RGB(255, 255, 255));
         HPEN   border     = ::CreatePen(PS_SOLID, 1, RGB(202, 202, 202));
 
-        ::SelectObject(dc, background);
+        // 先把整块客户区刷白。为什么要铺满而不是只画一个圆角矩形：
+        // 窗口区域（SetWindowRgn）的圆角是像素近似，跟 RoundRect 的圆角不完全重合，
+        // 那几像素"没被画到"的地方会露出窗口底色（黑的），看起来就是边角发黑。
+        ::FillRect(dc, &client, background);
+
+        // 再只描边（里面已经是白的，不用再填一次）。
+        // 描边往里收 1 像素：正好压在裁剪边界上的话会被切掉半条，圆角处留残点。
+        ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
         ::SelectObject(dc, border);
-        ::RoundRect(dc, client.left, client.top, client.right - 1, client.bottom - 1, 8, 8);
+        ::RoundRect(dc, client.left + 1, client.top + 1,
+                    client.right - 1, client.bottom - 1, 14, 14);
 
         ::SetBkMode(dc, TRANSPARENT);
         ::SetTextColor(dc, RGB(32, 32, 32));
@@ -1164,6 +1172,18 @@ private:
 
         ::SetWindowPos(m_tipWindow, HWND_TOPMOST, m_tipX, m_tipY, width, height,
                        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        // 圆角裁剪：窗口形状本身就是圆角矩形。
+        // 只靠 RoundRect 画白底的话，圆角外面那几块像素是"没画过"的窗口底色（黑的），
+        // 看上去就是几个黑角；用区域裁掉之后，圆角外面什么都不存在，边缘就干净了。
+        HRGN region = ::CreateRoundRectRgn(0, 0, width, height, 16, 16);
+        if (region != nullptr)
+        {
+            if (::SetWindowRgn(m_tipWindow, region, TRUE) == 0)
+            {
+                ::DeleteObject(region);   // 设置失败要自己收；成功的话归窗口管
+            }
+        }
 
         ::InvalidateRect(m_tipWindow, nullptr, FALSE);
         ::UpdateWindow(m_tipWindow);   // 拖动中消息循环在 OLE 手里，立刻画出来最稳

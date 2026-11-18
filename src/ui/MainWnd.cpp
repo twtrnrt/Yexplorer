@@ -5270,14 +5270,22 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
         return;
     }
 
-    // 把「源就在目标目录里」的项剔掉：自己往自己里放没有意义，还会弹一堆错
+    // 把「源就在目标目录里」的项剔掉：自己往自己里放没有意义，还会弹一堆错。
+    //
+    // 但要注意「复制」这种效果是有意义的：资源管理器在同目录里 Ctrl 拖，
+    // 会当场生成一份「xxx - 副本」，我们也要一样，所以只有「移动」才剔。
+    const bool copying = (effect & DROPEFFECT_COPY) != 0;
+
     std::vector<std::wstring> usableSources;
     usableSources.reserve(sources.size());
 
     for (const auto& source : sources)
     {
-        if (::_wcsicmp(NavigationHistory::ParentPath(source).c_str(),
-                       targetDirectory.c_str()) == 0)
+        const bool sameDirectory =
+            (::_wcsicmp(NavigationHistory::ParentPath(source).c_str(),
+                        targetDirectory.c_str()) == 0);
+
+        if (sameDirectory && !copying)
         {
             continue;
         }
@@ -5286,7 +5294,7 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
 
     if (usableSources.empty())
     {
-        Logger::Warn(L"拖放的源和目标是同一个目录，忽略");
+        Logger::Warn(L"拖放的源和目标是同一个目录（移动对自己没意义），忽略");
         return;
     }
 
