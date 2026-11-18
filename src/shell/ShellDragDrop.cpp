@@ -10,6 +10,7 @@
 #include "core/Logger.h"
 
 #include <commoncontrols.h>
+#include <cstring>      // std::memcpy（往 DROPDESCRIPTION 结构里拷数据）
 #include <map>
 #include <memory>
 #include <shellapi.h>
@@ -177,6 +178,22 @@ public:
             return S_OK;
         }
 
+        // ---- 之前收下的其它格式：拖拽助手来读 DROPDESCRIPTION 走这里 ----
+        ExtraFormat* extra = FindExtra(format);
+        if (extra != nullptr)
+        {
+            HGLOBAL copy = DuplicateGlobal(extra->data);
+            if (copy == nullptr)
+            {
+                return E_OUTOFMEMORY;
+            }
+
+            medium->tymed          = TYMED_HGLOBAL;
+            medium->hGlobal        = copy;
+            medium->pUnkForRelease = nullptr;
+            return S_OK;
+        }
+
         return DV_E_FORMATETC;
     }
 
@@ -199,6 +216,12 @@ public:
 
         UINT effectFormat = PreferredDropEffectFormat();
         if (m_preferredEffect != 0 && effectFormat != 0 && format->cfFormat == effectFormat && (format->tymed & TYMED_HGLOBAL) != 0)
+        {
+            return S_OK;
+        }
+
+        // 之前收下的其它格式
+        if (FindExtra(format) != nullptr)
         {
             return S_OK;
         }
@@ -242,7 +265,43 @@ public:
             return S_OK;
         }
 
-        return E_NOTIMPL;
+        // ---- 其它格式：收下并保存 ----
+        //
+        // 光标右下角那行"复制到 xxx"就是这么来的：放置目标把 DROPDESCRIPTION 写进
+        // 拖动源的数据对象，系统拖拽助手再读出来画。源这边必须肯收、还能读回。
+        if (medium->tymed != TYMED_HGLOBAL || medium->hGlobal == nullptr)
+        {
+            return E_NOTIMPL;
+        }
+
+        HGLOBAL copy = DuplicateGlobal(medium->hGlobal);
+
+        if (release != FALSE)
+        {
+            ::ReleaseStgMedium(medium);   // 传了 fRelease，源这份由我们负责释放
+        }
+
+        if (copy == nullptr)
+        {
+            return E_OUTOFMEMORY;
+        }
+
+        // 同一格式重复设置：替换旧的
+        ExtraFormat* existing = FindExtra(format);
+        if (existing != nullptr)
+        {
+            ::GlobalFree(existing->data);
+            existing->data = copy;
+            return S_OK;
+        }
+
+        ExtraFormat extra;
+        extra.format        = *format;
+        extra.format.ptd    = nullptr;   // 格式里的目标设备指针不能留着
+        extra.format.lindex = -1;
+        extra.data          = copy;
+        m_extraFormats.push_back(extra);
+        return S_OK;
     }
 
     HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD direction, IEnumFORMATETC** enumFormat) override
@@ -252,15 +311,30 @@ public:
             return E_POINTER;
         }
 
-        // 除了"取数据"，也要支持"写回首选效果"
+        // 能写回来的格式：首选效果 + 光标右下角那行提示字（DROPDESCRIPTION）
         if (direction == DATADIR_SET)
         {
-            FORMATETC setFormat = {};
-            setFormat.cfFormat = static_cast<CLIPFORMAT>(PreferredDropEffectFormat());
-            setFormat.dwAspect = DVASPECT_CONTENT;
-            setFormat.lindex   = -1;
-            setFormat.tymed    = TYMED_HGLOBAL;
-            return ::SHCreateStdEnumFmtEtc(1, &setFormat, enumFormat);
+            FORMATETC setFormats[2] = {};
+
+            setFormats[0].cfFormat = static_cast<CLIPFORMAT>(PreferredDropEffectFormat());
+
+            if (setFormats[0].cfFormat == 0)
+            {
+                setFormats[0].cfFormat = static_cast<CLIPFORMAT>(
+                    ::RegisterClipboardFormatW(CFSTR_DROPDESCRIPTION));
+            }
+
+            for (auto& format : setFormats)
+            {
+                format.dwAspect = DVASPECT_CONTENT;
+                format.lindex   = -1;
+                format.tymed    = TYMED_HGLOBAL;
+            }
+
+            setFormats[1].cfFormat = static_cast<CLIPFORMAT>(
+                ::RegisterClipboardFormatW(CFSTR_DROPDESCRIPTION));
+
+            return ::SHCreateStdEnumFmtEtc(2, setFormats, enumFormat);
         }
 
         if (direction != DATADIR_GET)
@@ -269,24 +343,29 @@ public:
             return E_NOTIMPL;
         }
 
-        FORMATETC formats[2] = {};
-        formats[0].cfFormat = static_cast<CLIPFORMAT>(CF_HDROP);
-        formats[0].dwAspect = DVASPECT_CONTENT;
-        formats[0].lindex   = -1;
-        formats[0].tymed    = TYMED_HGLOBAL;
+        // 能取出去的格式：文件列表 + 首选效果 + 目标塞进来的其它格式
+        std::vector<FORMATETC> formats;
 
-        if (m_preferredEffect == 0)
+        FORMATETC fileDrop = {};
+        fileDrop.cfFormat = static_cast<CLIPFORMAT>(CF_HDROP);
+        fileDrop.dwAspect = DVASPECT_CONTENT;
+        fileDrop.lindex   = -1;
+        fileDrop.tymed    = TYMED_HGLOBAL;
+        formats.push_back(fileDrop);
+
+        if (m_preferredEffect != 0)
         {
-            // 没有首选效果时只声明 CF_HDROP 一种格式
-            return ::SHCreateStdEnumFmtEtc(1, formats, enumFormat);
+            FORMATETC effect = fileDrop;
+            effect.cfFormat = static_cast<CLIPFORMAT>(PreferredDropEffectFormat());
+            formats.push_back(effect);
         }
 
-        formats[1].cfFormat = static_cast<CLIPFORMAT>(PreferredDropEffectFormat());
-        formats[1].dwAspect = DVASPECT_CONTENT;
-        formats[1].lindex   = -1;
-        formats[1].tymed    = TYMED_HGLOBAL;
+        for (const auto& extra : m_extraFormats)
+        {
+            formats.push_back(extra.format);
+        }
 
-        return ::SHCreateStdEnumFmtEtc(2, formats, enumFormat);
+        return ::SHCreateStdEnumFmtEtc(static_cast<UINT>(formats.size()), formats.data(), enumFormat);
     }
 
     HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override
@@ -305,9 +384,97 @@ public:
     }
 
 private:
+    // 一份"别的程序塞进来"的格式数据
+    // 最要紧的是 DROPDESCRIPTION（光标右下角"复制到 xxx"那行字）：
+    //   放置目标把它写进拖动源的数据对象，系统拖拽助手再从数据对象读出来画。
+    //   以前这里只认「首选效果」一种格式、其它一律 E_NOTIMPL，
+    //   结果就是资源管理器拖我们程序的文件时不显示那行字，我们拖进来时也显示不了。
+    struct ExtraFormat
+    {
+        FORMATETC format = {};
+        HGLOBAL   data   = nullptr;
+    };
+
+    // 把一坨 HGLOBAL 复制一份（同一格式可能被反复读写，各管各的生命周期最省心）
+    static HGLOBAL DuplicateGlobal(HGLOBAL source)
+    {
+        if (source == nullptr)
+        {
+            return nullptr;
+        }
+
+        const SIZE_T size = ::GlobalSize(source);
+        if (size == 0)
+        {
+            return nullptr;
+        }
+
+        HGLOBAL copy = ::GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size);
+        if (copy == nullptr)
+        {
+            return nullptr;
+        }
+
+        void* sourceRaw = ::GlobalLock(source);
+        void* copyRaw   = ::GlobalLock(copy);
+
+        if (sourceRaw == nullptr || copyRaw == nullptr)
+        {
+            if (sourceRaw != nullptr)
+            {
+                ::GlobalUnlock(source);
+            }
+            if (copyRaw != nullptr)
+            {
+                ::GlobalUnlock(copy);
+            }
+            ::GlobalFree(copy);
+            return nullptr;
+        }
+
+        std::memcpy(copyRaw, sourceRaw, size);
+        ::GlobalUnlock(source);
+        ::GlobalUnlock(copy);
+        return copy;
+    }
+
+    // 找一个已经收下的格式（没有就返回 nullptr）
+    ExtraFormat* FindExtra(const FORMATETC* format)
+    {
+        if (format == nullptr)
+        {
+            return nullptr;
+        }
+
+        for (auto& extra : m_extraFormats)
+        {
+            if (extra.format.cfFormat == format->cfFormat && extra.data != nullptr)
+            {
+                return &extra;
+            }
+        }
+
+        return nullptr;
+    }
+
     LONG                      m_refCount = 1;
     std::vector<std::wstring> m_paths;
     DWORD                     m_preferredEffect;
+
+    std::vector<ExtraFormat>  m_extraFormats;
+
+public:
+    ~SimpleDataObject()
+    {
+        for (auto& extra : m_extraFormats)
+        {
+            if (extra.data != nullptr)
+            {
+                ::GlobalFree(extra.data);
+                extra.data = nullptr;
+            }
+        }
+    }
 };
 
 // ============================================================================
@@ -672,6 +839,119 @@ DWORD DoDragFiles(const std::vector<std::wstring>& paths,
 namespace
 {
 std::map<HWND, IDropTarget*> g_dropTargets;   // HWND → 放置目标（持有引用）
+
+// ----------------------------------------------------------------------------
+// 拖拽提示条（光标右下方那条「复制到 xxx」的小字）
+//
+// 为什么自己画：实测系统给的 IDropTargetHelper 根本不去读数据对象里的
+// DROPDESCRIPTION，资源管理器显示的那行字是它自己画的。
+// 所以这里也自己画一条，长相照着系统来：白底、圆角、浅灰描边、深灰小字。
+// 窗口属性：不吃鼠标（WS_EX_TRANSPARENT）、不抢焦点（WS_EX_NOACTIVATE）、置顶。
+// ----------------------------------------------------------------------------
+constexpr int kDropTipPaddingX = 10;   // 左右留白
+constexpr int kDropTipPaddingY = 6;    // 上下留白
+constexpr int kDropTipOffsetX  = 16;   // 相对光标的偏移（系统差不多也是这个位置）
+constexpr int kDropTipOffsetY  = 22;
+
+std::wstring g_dropTipText;            // 当前要显示的字（同一时刻只有一个拖动，用全局变量够用）
+HFONT        g_dropTipFont = nullptr;  // 系统界面字体（Win11 上是微软雅黑 UI）
+
+// 系统界面字体，取一次就缓存
+HFONT DropTipFont()
+{
+    if (g_dropTipFont == nullptr)
+    {
+        NONCLIENTMETRICSW metrics = {};
+        metrics.cbSize = sizeof(metrics);
+
+        if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+        {
+            g_dropTipFont = ::CreateFontIndirectW(&metrics.lfMessageFont);
+        }
+    }
+
+    return g_dropTipFont;
+}
+
+LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_ERASEBKGND:
+        return 1;   // 背景自己画，别让系统刷一遍（会闪）
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT paint = {};
+        HDC dc = ::BeginPaint(hwnd, &paint);
+
+        RECT client = {};
+        ::GetClientRect(hwnd, &client);
+
+        // 圆角白底 + 浅灰描边
+        HBRUSH background = ::CreateSolidBrush(RGB(255, 255, 255));
+        HPEN   border     = ::CreatePen(PS_SOLID, 1, RGB(202, 202, 202));
+
+        ::SelectObject(dc, background);
+        ::SelectObject(dc, border);
+        ::RoundRect(dc, client.left, client.top, client.right - 1, client.bottom - 1, 8, 8);
+
+        ::SetBkMode(dc, TRANSPARENT);
+        ::SetTextColor(dc, RGB(32, 32, 32));
+
+        HFONT font = DropTipFont();
+        if (font != nullptr)
+        {
+            ::SelectObject(dc, font);
+        }
+
+        ::DrawTextW(dc, g_dropTipText.c_str(), static_cast<int>(g_dropTipText.size()),
+                    &client, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        ::DeleteObject(border);
+        ::DeleteObject(background);
+
+        ::EndPaint(hwnd, &paint);
+        return 0;
+    }
+    }
+
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+HWND CreateDropTipWindow()
+{
+    static bool s_classReady = false;
+
+    if (!s_classReady)
+    {
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize        = sizeof(windowClass);
+        windowClass.style         = CS_SAVEBITS;   // 拖动中要反复挪位置，用它避免闪烁
+        windowClass.lpfnWndProc   = DropTipWindowProc;
+        windowClass.hInstance     = ::GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = L"YExplorerDropTip";
+
+        ::RegisterClassExW(&windowClass);
+        s_classReady = true;
+    }
+
+    HWND window = ::CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+        L"YExplorerDropTip", L"",
+        WS_POPUP,
+        0, 0, 120, 30,
+        nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+
+    if (window == nullptr)
+    {
+        return nullptr;
+    }
+
+    // 稍微透明一点，不把下面的内容挡死（资源管理器那条其实也带一点透明）
+    ::SetLayeredWindowAttributes(window, 0, 235, LWA_ALPHA);
+    return window;
+}
 }
 
 class WindowDropTarget final : public IDropTarget
@@ -681,6 +961,11 @@ public:
         : m_hwnd(hwnd)
         , m_callbacks(std::move(callbacks))
     {
+    }
+
+    ~WindowDropTarget()
+    {
+        HideDropTip();
     }
 
     // ---- IUnknown ----
@@ -725,6 +1010,10 @@ public:
         m_sourcePreferredEffect = ExtractPreferredEffect(data);
 
         UpdateEffect(keyState, pt, effect);
+
+        // 跟资源管理器一样，在光标右下方画一行「复制到 xxx」
+        UpdateDropTip(pt, (effect != nullptr) ? *effect : DROPEFFECT_NONE);
+
         NotifyFeedback(pt);
 
         Logger::Info(L"拖入进入：源 " + std::to_wstring(m_sourcePaths.size()) +
@@ -736,13 +1025,17 @@ public:
     HRESULT STDMETHODCALLTYPE DragOver(DWORD keyState, POINTL pt, DWORD* effect) override
     {
         UpdateEffect(keyState, pt, effect);
+        UpdateDropTip(pt, (effect != nullptr) ? *effect : DROPEFFECT_NONE);
+
         NotifyFeedback(pt);
         return S_OK;
     }
 
     HRESULT STDMETHODCALLTYPE DragLeave() override
     {
+        HideDropTip();
         m_sourcePaths.clear();
+
         NotifyFeedback(POINTL{ -1, -1 }, false);   // 鼠标离开了：让宿主把高亮清掉
         return S_OK;
     }
@@ -762,6 +1055,8 @@ public:
             {
                 *effect = DROPEFFECT_NONE;
             }
+
+            HideDropTip();
             return S_OK;
         }
 
@@ -775,6 +1070,9 @@ public:
             *effect = chosen;
         }
 
+        // 提示条先收掉，再真正落地（不然它会在屏幕上多留一会儿）
+        HideDropTip();
+
         if (m_callbacks.PerformDrop)
         {
             m_callbacks.PerformDrop(sources, targetDirectory, chosen, createShortcut);
@@ -786,6 +1084,118 @@ public:
     }
 
 private:
+    // ------------------------------------------------------------------
+    // 光标右下角那行小字：「复制到 桌面」「移动到 文档」「链接到 xxx」
+    // ------------------------------------------------------------------
+    void UpdateDropTip(POINTL screenPoint, DWORD effect)
+    {
+        const std::wstring targetDirectory = ResolveDirectory(screenPoint);
+        const DWORD effectMask = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
+
+        std::wstring text;
+
+        if (targetDirectory.empty() || (effect & effectMask) == 0)
+        {
+            // 这里放不了：跟系统一样提示一句
+            text = L"不能放到此处";
+        }
+        else if ((effect & DROPEFFECT_LINK) != 0)
+        {
+            text = L"链接到 " + ShellDisplayName(targetDirectory);
+        }
+        else if ((effect & DROPEFFECT_MOVE) != 0)
+        {
+            text = L"移动到 " + ShellDisplayName(targetDirectory);
+        }
+        else
+        {
+            text = L"复制到 " + ShellDisplayName(targetDirectory);
+        }
+
+        // IDropTarget 回调给的 pt 本来就是屏幕坐标，直接拿来做锚点
+        ShowDropTip(text, POINT{ screenPoint.x, screenPoint.y });
+    }
+
+    void ShowDropTip(const std::wstring& text, POINT anchorPoint)
+    {
+        if (m_tipWindow == nullptr)
+        {
+            m_tipWindow = CreateDropTipWindow();
+            if (m_tipWindow == nullptr)
+            {
+                return;
+            }
+        }
+
+        const int targetX = anchorPoint.x + kDropTipOffsetX;
+        const int targetY = anchorPoint.y + kDropTipOffsetY;
+
+        // 字没变、位置也基本没动就别折腾（DragOver 是高频回调，反复重画会闪）
+        const int dx = (targetX > m_tipX) ? (targetX - m_tipX) : (m_tipX - targetX);
+        const int dy = (targetY > m_tipY) ? (targetY - m_tipY) : (m_tipY - targetY);
+
+        if (text == m_tipText && ::IsWindowVisible(m_tipWindow) != FALSE && dx < 3 && dy < 3)
+        {
+            return;
+        }
+
+        m_tipText = text;
+        m_tipX    = targetX;
+        m_tipY    = targetY;
+
+        g_dropTipText = text;
+
+        // 量一下这行字有多宽，窗口跟着缩
+        HDC dc = ::GetDC(m_tipWindow);
+        HFONT font = DropTipFont();
+        HGDIOBJ previousFont = (font != nullptr) ? ::SelectObject(dc, font) : nullptr;
+
+        SIZE textSize = {};
+        ::GetTextExtentPoint32W(dc, m_tipText.c_str(), static_cast<int>(m_tipText.size()), &textSize);
+
+        if (previousFont != nullptr)
+        {
+            ::SelectObject(dc, previousFont);
+        }
+        ::ReleaseDC(m_tipWindow, dc);
+
+        const int width  = textSize.cx + kDropTipPaddingX * 2;
+        const int height = textSize.cy + kDropTipPaddingY * 2;
+
+        ::SetWindowPos(m_tipWindow, HWND_TOPMOST, m_tipX, m_tipY, width, height,
+                       SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+        ::InvalidateRect(m_tipWindow, nullptr, FALSE);
+        ::UpdateWindow(m_tipWindow);   // 拖动中消息循环在 OLE 手里，立刻画出来最稳
+    }
+
+    void HideDropTip()
+    {
+        if (m_tipWindow != nullptr)
+        {
+            ::DestroyWindow(m_tipWindow);
+            m_tipWindow = nullptr;
+        }
+
+        m_tipText.clear();
+        m_tipX = 0;
+        m_tipY = 0;
+    }
+
+    // 目录在系统里的显示名（"桌面"、"文档"、"下载"、"本地磁盘 (C:)"……）
+    static std::wstring ShellDisplayName(const std::wstring& path)
+    {
+        SHFILEINFOW info = {};
+        if (::SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_DISPLAYNAME) != 0 &&
+            info.szDisplayName[0] != L'\0')
+        {
+            return info.szDisplayName;
+        }
+
+        const size_t slash = path.find_last_of(L"\\/");
+        return (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+    }
+
     // 把拖动过程中的"当前落点"告诉宿主（文件列表用它高亮鼠标正压着的那个文件夹）
     //   pt              ：屏幕坐标（DragLeave 时无效，宿主只看 acceptable）
     //   acceptable      ：这个位置能不能放
@@ -931,6 +1341,11 @@ private:
     DropTargetCallbacks       m_callbacks;
     std::vector<std::wstring> m_sourcePaths;            // 正在拖过来的东西（DragEnter 时记下）
     DWORD                     m_sourcePreferredEffect = 0;
+
+    HWND         m_tipWindow = nullptr;   // 自己画的那条提示（跟着光标右下角走）
+    std::wstring m_tipText;               // 当前提示文字
+    int          m_tipX = 0;              // 当前窗口位置（用来判断要不要挪）
+    int          m_tipY = 0;
 };
 
 // ============================================================================
