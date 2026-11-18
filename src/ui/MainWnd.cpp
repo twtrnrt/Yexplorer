@@ -1729,6 +1729,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         m_pasteTotalBytes = totalBytes;
+
+        // 清单到了（项数已知）：这时候按"第 N/N 项"这种最长文字把状态栏布局算一次，
+        // 之后进度条位置就固定不动了（进度更新只改文字和填色）。
+        if (m_pasteInProgress.load() && m_pasteItemSizes != nullptr && !m_pasteItemSizes->empty())
+        {
+            LayoutPasteBar();
+        }
+
         return 0;
     }
 
@@ -2559,9 +2567,23 @@ void MainWindow::LayoutPasteBar()
     const int totalWidth  = client.right - client.left;
     const int totalHeight = client.bottom - client.top;
 
-    // 量文字宽度（用状态栏自己的字体，高 DPI 下自动跟着放大）
-    const std::wstring worstLeftText = L"正在粘贴：第 9999/9999 项";
-    const std::wstring rightText     = L"（按 ESC 取消）";
+    // 按"这一批里会出现的最长文字"算一次宽度，之后就不再动进度条的位置。
+    //   项数已知（清单到了）→ 用真项数，比如 22 项就按"第 22/22 项"量，不会像
+    //   原来按"第 9999/9999 项"那样凭空多留 4 个数字的空；
+    //   项数还不知道（刚开始）→ 先按"正在粘贴"占位，清单到了会再算一次。
+    const size_t totalItems = (m_pasteItemSizes != nullptr && !m_pasteItemSizes->empty())
+                              ? m_pasteItemSizes->size()
+                              : m_pasteTotalItems;
+
+    std::wstring longestLeftText = L"正在粘贴";
+
+    if (totalItems > 0)
+    {
+        const std::wstring count = std::to_wstring(totalItems);
+        longestLeftText = L"正在粘贴：第 " + count + L"/" + count + L" 项";
+    }
+
+    const std::wstring rightText = L"（按 ESC 取消）";
 
     HDC   dc   = ::GetDC(m_hStatusBar);
     HFONT font = reinterpret_cast<HFONT>(::SendMessageW(m_hStatusBar, WM_GETFONT, 0, 0));
@@ -2569,14 +2591,15 @@ void MainWindow::LayoutPasteBar()
 
     SIZE leftSize  = {};
     SIZE rightSize = {};
-    ::GetTextExtentPoint32W(dc, worstLeftText.c_str(), static_cast<int>(worstLeftText.size()), &leftSize);
-    ::GetTextExtentPoint32W(dc, rightText.c_str(),     static_cast<int>(rightText.size()),     &rightSize);
+    ::GetTextExtentPoint32W(dc, longestLeftText.c_str(), static_cast<int>(longestLeftText.size()), &leftSize);
+    ::GetTextExtentPoint32W(dc, rightText.c_str(),       static_cast<int>(rightText.size()),       &rightSize);
 
     ::SelectObject(dc, old);
     ::ReleaseDC(m_hStatusBar, dc);
 
-    // 左文字格：字宽 + 12px，让"…项"和进度条之间留 12px 间隔
-    int leftWidth  = leftSize.cx + Scale(12);
+    // 左文字格：字宽 + 12px。条自己在左端还内缩 3px（见 PaintPasteBar 的 barLeft），
+    // 所以这里减掉 3，保证"文字末 → 条的左边缘"实测就是 12px。
+    int leftWidth  = leftSize.cx + Scale(12) - Scale(3);
     int rightWidth = rightSize.cx + Scale(10);
 
     // 进度条固定 300px（不是拉满整条状态栏），右边留白无所谓
