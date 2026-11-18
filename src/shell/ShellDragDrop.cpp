@@ -861,10 +861,16 @@ constexpr COLORREF kDropTipTarget     = RGB(0x00, 0x00, 0x66);   // 目标文件
 constexpr COLORREF kDropTipForbidden  = RGB(0xCC, 0x00, 0x00);   // 「不能放到此处」
 
 // ---- 符号（自己画，不依赖字体里有没有这个字符）----
-// 符号不再用固定的方框尺寸：改成字体字形之后，宽度由 DropTipSymbolFont() 现量
 constexpr int kDropTipSymbolGap  = 3;    // 符号和文字之间留的缝
 constexpr int kDropTipWordGap    = 4;    // 动作词和目标名之间留的缝
 constexpr int kDropTipMaxTarget  = 320;  // 目标名最长画这么宽，再长就省略号
+
+// 提示条固定高度（用户定的：固定 30，不跟着符号大小变，三种状态一样高）。
+// 30 里上下各留 6 像素，正好放得下 18 像素的箭头。
+constexpr int kDropTipHeight          = 30;
+constexpr int kDropTipSymbolSizeDot   = 16;   // + 号、禁止圈
+constexpr int kDropTipSymbolSizeArrow = 18;   // 箭头：笔画细，给大一点
+constexpr int kDropTipSupersample     = 4;    // 超采样倍数：4 倍画、再缩回去 = 抗锯齿
 
 // 提示条上要显示的内容：符号 + 动作词 + 目标名，三种颜色分开画
 struct DropTipContent
@@ -887,9 +893,6 @@ struct DropTipContent
 DropTipContent g_dropTipContent;       // 当前要显示的内容（同一时刻只有一个拖动，全局够用）
 HFONT         g_dropTipFont = nullptr; // 系统界面字体（Win11 上是微软雅黑 UI）
 
-// 符号字体按符号各存一份：三个符号的字形比例差别很大，放大倍数不一样，不能共用一个字体
-HFONT         g_dropTipSymbolFonts[4] = { nullptr, nullptr, nullptr, nullptr };
-
 // 系统界面字体，取一次就缓存
 HFONT DropTipFont()
 {
@@ -907,69 +910,204 @@ HFONT DropTipFont()
     return g_dropTipFont;
 }
 
-// 符号字体：这几个符号都用 Segoe UI Symbol 里的现成字形
-// （Windows 自带，Win7 起就有；比手画干净——字体字形是设计好的矢量，有抗锯齿）
+// ---- 符号图标：自己画，不再用字体里的字符 ----
 //
-// 三个字形在 em 框里占的位置差别很大，所以放大倍数分开定（见 DropTipSymbolScale）：
-//   +  U+002B  普通加号：笔画最细、占位最小，放大到两倍才显眼
-//   ⬉  U+2B09  斜箭头：字形本身占位偏小，放大一点补偿
-//   ⊘  U+2298  圆圈斜杠：圆圈只占 em 框的六成多，放大到 1.7 倍才跟别的齐
-double DropTipSymbolScale(int symbol)
+// 为什么放弃字符字形：字体里每个符号的笔画位置都不一样（+ 号在数学轴上、⊘ 偏上、
+// ⬉ 偏下），字号一放大，笔画中心跟文字中线就对不上；公式只能算 em 框，算不了笔画。
+// 而且 ⬉ 在小字号下只有一两像素宽，细得像一道划痕。
+//
+// 现在的做法：几何自己定（笔画中心 = 图标框中心，跟文字中线天然对齐），
+// 画的时候先在 4 倍尺寸上画，再缩回目标尺寸——缩放这一步本身就等于抗锯齿，
+// 而 GDI 自己是不做抗锯齿的。
+
+int DropTipSymbolSize(int symbol)
 {
-    // 用户要求：先把三个符号全部恢复成 1 倍（跟正文字号一样大），用来验证对齐基准对不对。
-    // 等对齐确认没问题以后，再按下面的老计划分别放大：
-    //   1 = + 号 2.0（笔画细，放大才显眼）
-    //   2 = ⬉ 箭头 1.5（字形占位偏小）
-    //   3 = ⊘ 圆圈 1.7（圆圈只占 em 框六成多）
-    (void)symbol;
-    return 1.0;
+    // 箭头的笔画最细，给它大两像素看起来才够重
+    return (symbol == 2) ? kDropTipSymbolSizeArrow : kDropTipSymbolSizeDot;
 }
 
-HFONT DropTipSymbolFont(int symbol)
+// 在 target 的 (left, top) 起、size×size 的方框里画符号
+//
+// 实现分三步：
+//   1. 建一张"size×4"的黑底白线位图，把图形按 4 倍尺寸画上去（GDI 画的是硬边）；
+//   2. 每 4×4 个像素求平均，得到 0~255 的覆盖率（= 这个像素被图形盖住了多少）；
+//   3. 用覆盖率把前景色跟提示条底色混一遍，写进 1 倍位图，再 BitBlt 贴到 target。
+//
+// 因为提示条底色是固定的 F9F9F9，混合后像素完全不透明，所以不需要 AlphaBlend，
+// 也不会有黑边（黑边就是"透明像素跟黑底混"混出来的）。
+void DrawDropTipSymbol(HDC target, int symbol, int left, int top, int size, COLORREF color)
 {
-    if (symbol < 1 || symbol > 3)
+    if (target == nullptr || symbol < 1 || symbol > 3 || size <= 0)
     {
-        return nullptr;
+        return;
     }
 
-    if (g_dropTipSymbolFonts[symbol] == nullptr)
+    const int supersample = kDropTipSupersample;
+    const int big         = size * supersample;
+
+    // ---- 第一步：4 倍大小的画布（32 位；biHeight 取负数表示上下方向跟屏幕一致）----
+    BITMAPINFO canvasInfo = {};
+    canvasInfo.bmiHeader.biSize        = sizeof(canvasInfo.bmiHeader);
+    canvasInfo.bmiHeader.biWidth       = big;
+    canvasInfo.bmiHeader.biHeight      = -big;
+    canvasInfo.bmiHeader.biPlanes      = 1;
+    canvasInfo.bmiHeader.biBitCount    = 32;
+    canvasInfo.bmiHeader.biCompression = BI_RGB;
+
+    void*   canvasPixels = nullptr;
+    HDC     canvasDc     = ::CreateCompatibleDC(target);
+    HBITMAP canvasBitmap = ::CreateDIBSection(target, &canvasInfo, DIB_RGB_COLORS,
+                                              &canvasPixels, nullptr, 0);
+
+    if (canvasDc == nullptr || canvasBitmap == nullptr || canvasPixels == nullptr)
     {
-        NONCLIENTMETRICSW metrics = {};
-        metrics.cbSize = sizeof(metrics);
-
-        int baseHeight = 16;   // 万一取不到系统字体，就按 16 像素
-
-        if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) &&
-            metrics.lfMessageFont.lfHeight != 0)
+        if (canvasBitmap != nullptr)
         {
-            // lfHeight 是负数（表示字高），取反变成正数
-            baseHeight = -metrics.lfMessageFont.lfHeight;
+            ::DeleteObject(canvasBitmap);
         }
-
-        const double scale = DropTipSymbolScale(symbol);
-        const int height = -static_cast<int>(baseHeight * scale + 0.5);   // 负值 = 字高
-
-        g_dropTipSymbolFonts[symbol] = ::CreateFontW(
-            height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
+        if (canvasDc != nullptr)
+        {
+            ::DeleteDC(canvasDc);
+        }
+        return;
     }
 
-    return g_dropTipSymbolFonts[symbol];
-}
+    HGDIOBJ oldCanvasBitmap = ::SelectObject(canvasDc, canvasBitmap);
 
-// 状态 → 符号字符
-std::wstring DropTipSymbolText(int symbol)
-{
+    // 黑底 = 覆盖率 0，白线 = 覆盖率 255
+    RECT canvasRect = { 0, 0, big, big };
+    ::FillRect(canvasDc, &canvasRect, static_cast<HBRUSH>(::GetStockObject(BLACK_BRUSH)));
+    ::SetBkMode(canvasDc, TRANSPARENT);
+
+    // 线宽按目标尺寸的 13% 取（16 像素 → 2 像素），再乘超采样倍数
+    const int stroke = (size * 13 + 50) / 100;
+    const int penWidth = ((stroke < 1) ? 1 : stroke) * supersample;
+
+    HPEN   whitePen = ::CreatePen(PS_SOLID, penWidth, RGB(255, 255, 255));
+    HGDIOBJ oldPen  = ::SelectObject(canvasDc, whitePen);
+    ::SelectObject(canvasDc, ::GetStockObject(NULL_BRUSH));
+
+    // 坐标一律写成"占比 × 大画布尺寸"，改图标尺寸不用改任何数字
+    const int center = big / 2;
+
     switch (symbol)
     {
-    case 1:  return L"+";          // 普通加号（复制 / 添加）
-    case 2:  return L"\u2B09";     // ⬉ 斜箭头（移动到）
-    case 3:  return L"\u2298";     // ⊘ 圆圈斜杠（禁止）
-                                   //   原来用 🚫 U+1F6AB，但它在 BMP 之外（UI16 里是代理对），
-                                   //   GDI 的 DrawText 渲染代理对会出乱码，所以用 BMP 内的 ⊘
-    default: return std::wstring();
+    case 1:   // 加号：横竖等长、等粗，正中对齐（原来那个字体字形的十字四边不等长）
+    {
+        const int arm = big * 40 / 100;   // 从中心往两边各伸 40%，总共占 80%
+        ::MoveToEx(canvasDc, center - arm, center, nullptr);
+        ::LineTo(canvasDc, center + arm, center);
+        ::MoveToEx(canvasDc, center, center - arm, nullptr);
+        ::LineTo(canvasDc, center, center + arm);
+        break;
     }
+    case 2:   // 箭头：一根 45 度斜杆 + 一个实心三角尖（指向左下，跟原来 ⬉ 同方向）
+    {
+        // 斜杆从右上往左下，正好接到三角尖的斜边中点
+        ::MoveToEx(canvasDc, big * 78 / 100, big * 22 / 100, nullptr);
+        ::LineTo(canvasDc, big * 36 / 100, big * 64 / 100);
+
+        // 三角尖：尖在左下，另两点在它正上方、正右方，所以这是个等腰直角三角
+        POINT triangle[3] = {
+            { big * 18 / 100, big * 82 / 100 },   // 尖
+            { big * 18 / 100, big * 50 / 100 },   // 上角
+            { big * 50 / 100, big * 82 / 100 }    // 右角
+        };
+        ::SelectObject(canvasDc, ::GetStockObject(WHITE_BRUSH));
+        ::Polygon(canvasDc, triangle, 3);
+        break;
+    }
+    case 3:   // 禁止：圆环 + 一条 45 度斜杠，就是 ⊘ 的样子
+    {
+        ::Ellipse(canvasDc, big * 8 / 100, big * 8 / 100, big * 92 / 100, big * 92 / 100);
+        // 斜杠要顶到圆环内壁上才像"禁止"（短一截会显得两根东西各在各的）
+        ::MoveToEx(canvasDc, big * 20 / 100, big * 20 / 100, nullptr);
+        ::LineTo(canvasDc, big * 80 / 100, big * 80 / 100);
+        break;
+    }
+    default:
+        break;
+    }
+
+    ::SelectObject(canvasDc, oldPen);
+    ::DeleteObject(whitePen);
+
+    // ---- 第二步 + 第三步：缩回 1 倍，边缩边跟底色混合 ----
+    BITMAPINFO smallInfo = canvasInfo;
+    smallInfo.bmiHeader.biWidth  = size;
+    smallInfo.bmiHeader.biHeight = -size;
+
+    void*   smallPixels = nullptr;
+    HDC     smallDc     = ::CreateCompatibleDC(target);
+    HBITMAP smallBitmap = ::CreateDIBSection(target, &smallInfo, DIB_RGB_COLORS,
+                                             &smallPixels, nullptr, 0);
+
+    if (smallDc != nullptr && smallBitmap != nullptr && smallPixels != nullptr)
+    {
+        HGDIOBJ oldSmallBitmap = ::SelectObject(smallDc, smallBitmap);
+
+        // GDI 是延迟绘制的，先冲一下，保证画的东西已经落到 DIB 内存里
+        ::GdiFlush();
+
+        const BYTE* source = static_cast<const BYTE*>(canvasPixels);   // 每像素 BGRA
+        BYTE*       dest   = static_cast<BYTE*>(smallPixels);
+
+        // COLORREF 的字节顺序是 0x00BBGGRR（红在最低字节），
+        // 这里直接取字节而不是用 GetRValue/GetGValue 宏：那些宏对常量色值会触发截断警告
+        const int backgroundR = static_cast<int>(kDropTipBackground & 0xFF);
+        const int backgroundG = static_cast<int>((kDropTipBackground >> 8) & 0xFF);
+        const int backgroundB = static_cast<int>((kDropTipBackground >> 16) & 0xFF);
+        const int foregroundR = static_cast<int>(color & 0xFF);
+        const int foregroundG = static_cast<int>((color >> 8) & 0xFF);
+        const int foregroundB = static_cast<int>((color >> 16) & 0xFF);
+
+        for (int y = 0; y < size; ++y)
+        {
+            for (int x = 0; x < size; ++x)
+            {
+                // 4×4 块求平均 = 这个目标像素被图形覆盖了多少（0~255）
+                int coverage = 0;
+                for (int sy = 0; sy < supersample; ++sy)
+                {
+                    const BYTE* row = source + static_cast<size_t>(y * supersample + sy) * big * 4;
+                    for (int sx = 0; sx < supersample; ++sx)
+                    {
+                        coverage += row[(x * supersample + sx) * 4 + 2];   // R 通道：白 255 / 黑 0
+                    }
+                }
+                coverage /= (supersample * supersample);
+
+                const int inverse = 255 - coverage;
+                const int offset  = (y * size + x) * 4;
+                dest[offset + 0] = static_cast<BYTE>((backgroundB * inverse + foregroundB * coverage) / 255);
+                dest[offset + 1] = static_cast<BYTE>((backgroundG * inverse + foregroundG * coverage) / 255);
+                dest[offset + 2] = static_cast<BYTE>((backgroundR * inverse + foregroundR * coverage) / 255);
+                dest[offset + 3] = 255;   // 混合过底色的，不透明
+            }
+        }
+
+        ::BitBlt(target, left, top, size, size, smallDc, 0, 0, SRCCOPY);
+
+        ::SelectObject(smallDc, oldSmallBitmap);
+        ::DeleteObject(smallBitmap);
+        ::DeleteDC(smallDc);
+    }
+    else
+    {
+        if (smallBitmap != nullptr)
+        {
+            ::DeleteObject(smallBitmap);
+        }
+        if (smallDc != nullptr)
+        {
+            ::DeleteDC(smallDc);
+        }
+    }
+
+    // ---- 收尾：位图要先从 DC 里取回来才能删 ----
+    ::SelectObject(canvasDc, oldCanvasBitmap);
+    ::DeleteObject(canvasBitmap);
+    ::DeleteDC(canvasDc);
 }
 
 LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1034,27 +1172,11 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
         }
 
-        const bool hasSymbol = (content.symbol != 0);
+        const bool hasSymbol  = (content.symbol != 0);
         const bool hasWordGap = (!content.actionText.empty() && !content.targetText.empty());
 
-        // 符号也用字体量一下宽度（不同符号宽度略有差别，精确算才不会挤在一起）
-        SIZE symbolSize = {};
-        if (hasSymbol)
-        {
-            const std::wstring symbolText = DropTipSymbolText(content.symbol);
-            HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
-            HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
-
-            ::GetTextExtentPoint32W(dc, symbolText.c_str(),
-                                    static_cast<int>(symbolText.size()), &symbolSize);
-
-            if (oldSymbolFont != nullptr)
-            {
-                ::SelectObject(dc, oldSymbolFont);
-            }
-        }
-
-        const int symbolWidth = hasSymbol ? symbolSize.cx : 0;
+        // 符号宽度就是图标方框的宽度（符号是自己画的，跟字体无关）
+        const int symbolWidth = hasSymbol ? DropTipSymbolSize(content.symbol) : 0;
         const int symbolGap   = hasSymbol ? kDropTipSymbolGap : 0;
         const int wordGap     = hasWordGap ? kDropTipWordGap : 0;
 
@@ -1069,55 +1191,17 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         const COLORREF actionColor = content.forbidden ? kDropTipForbidden : kDropTipAction;
         const COLORREF targetColor = content.forbidden ? kDropTipForbidden : kDropTipTarget;
 
-        // 符号：直接用 Segoe UI Symbol 的字形（矢量、有抗锯齿），颜色跟着状态走。
+        // 符号：自己画的矢量图标（见 DrawDropTipSymbol）。
         //
-        // 为什么不用 DT_VCENTER：文字和符号是两种字体、字号还差一倍，
-        // 行盒（tmHeight）里 ascent 与 descent 的分配比例不一样，
-        // 两边都按行盒居中时，符号的视觉中心会偏离文字那条中线，看上去就是"字没对齐"。
-        // 这里改成自己算：先求出中文那行字形的视觉中线，再把符号的视觉中线摆到同一条线上。
+        // 这里不再算基线了：图标是几何图形，方框中心就是它的视觉中心；
+        // 方框在条子里垂直居中，文字也是按条子居中画的，两条中线天生重合。
+        // （之前用字体字符时必须手算基线，是因为字体里每个符号的笔画都不在 em 框中心。）
         if (hasSymbol)
         {
-            const std::wstring symbolText = DropTipSymbolText(content.symbol);
-            HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
-            HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
+            const int symbolSize = DropTipSymbolSize(content.symbol);
+            const int symbolTop  = client.top + ((client.bottom - client.top) - symbolSize) / 2;
 
-            TEXTMETRICW symbolMetrics = {};
-            ::GetTextMetricsW(dc, &symbolMetrics);
-
-            // 中文那侧的字度量：DC 里当前选的是符号字体，先切回正文量一次再切回来
-            ::SelectObject(dc, DropTipFont());
-            TEXTMETRICW textMetrics = {};
-            ::GetTextMetricsW(dc, &textMetrics);
-            ::SelectObject(dc, symbolFont);
-
-            // 文字的基线：DT_VCENTER 下 行盒顶 = 内容区顶 + (内容高 - tmHeight)/2，基线 = 行盒顶 + tmAscent
-            const int textLineTop  = client.top + ((client.bottom - client.top) - textMetrics.tmHeight) / 2;
-            const int textBaseline = textLineTop + textMetrics.tmAscent;
-
-            // 汉字字形上下基本填满 em 框，视觉中线 = 基线往上 (ascent - descent)/2
-            const int visualCenter = textBaseline - (textMetrics.tmAscent - textMetrics.tmDescent) / 2;
-
-            // 符号的基线：让它的 em 中心落在文字那条中线上
-            const int symbolBaseline = visualCenter + (symbolMetrics.tmAscent - symbolMetrics.tmDescent) / 2;
-
-            // 这里必须用 DT_BOTTOM 而不是 DT_TOP。
-            // DT_TOP 是把"字符黑框顶"贴到 rect.top，而黑框顶比 em 框顶低一个
-            // tmInternalLeading（两倍字号下能有 6 像素），符号就会整体往下沉，
-            // 表现就是"加号的横线跑到文字底部去了"。
-            // DT_BOTTOM 是"降部底贴 rect.bottom"，基线 = rect.bottom - tmDescent，
-            // 跟内部行距无关，位置可以算准。
-            RECT rect = { x,
-                          symbolBaseline - symbolMetrics.tmHeight,
-                          x + symbolSize.cx + 2,
-                          symbolBaseline + symbolMetrics.tmDescent };
-            ::SetTextColor(dc, actionColor);
-            ::DrawTextW(dc, symbolText.c_str(), static_cast<int>(symbolText.size()), &rect,
-                        DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
-
-            if (oldSymbolFont != nullptr)
-            {
-                ::SelectObject(dc, oldSymbolFont);
-            }
+            DrawDropTipSymbol(dc, content.symbol, x, symbolTop, symbolSize, actionColor);
 
             x += symbolWidth + symbolGap;
         }
@@ -1437,31 +1521,6 @@ private:
             }
         }
 
-        // 文字的行盒高度：提示条高度必须按"行盒"（tmHeight）算。
-        // WM_PAINT 里给符号定位用的也是行盒，两边要是各按各的（一边用字符黑框、一边用行盒），
-        // 大字号符号就会贴边甚至被截掉。
-        TEXTMETRICW textMetrics = {};
-        ::GetTextMetricsW(dc, &textMetrics);
-
-        // 符号也换成符号字体量（跟 WM_PAINT 里必须一致）
-        SIZE symbolSize = {};
-        TEXTMETRICW symbolMetrics = {};
-        if (content.symbol != 0)
-        {
-            const std::wstring symbolText = DropTipSymbolText(content.symbol);
-            HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
-            HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
-
-            ::GetTextExtentPoint32W(dc, symbolText.c_str(),
-                                    static_cast<int>(symbolText.size()), &symbolSize);
-            ::GetTextMetricsW(dc, &symbolMetrics);
-
-            if (oldSymbolFont != nullptr)
-            {
-                ::SelectObject(dc, oldSymbolFont);
-            }
-        }
-
         if (previousFont != nullptr)
         {
             ::SelectObject(dc, previousFont);
@@ -1471,24 +1530,17 @@ private:
         const bool hasSymbol  = (content.symbol != 0);
         const bool hasWordGap = (!content.actionText.empty() && !content.targetText.empty());
 
-        const int symbolWidth = hasSymbol ? symbolSize.cx : 0;
+        // 符号宽度就是图标方框宽度（自己画的，跟字体无关）
+        const int symbolWidth = hasSymbol ? DropTipSymbolSize(content.symbol) : 0;
         const int symbolGap   = hasSymbol ? kDropTipSymbolGap : 0;
         const int wordGap     = hasWordGap ? kDropTipWordGap : 0;
 
         const int width  = symbolWidth + symbolGap + actionSize.cx + wordGap + targetSize.cx +
                            kDropTipPaddingX * 2;
 
-        // 提示条高度要装得下符号：复制的加号是按两倍字号画的，比文字高不少，
-        // 只按文字高度算的话，加号上下会被窗口边界截掉。
-        int contentHeight = (textMetrics.tmHeight > 0)
-                            ? textMetrics.tmHeight
-                            : (actionSize.cy > 0 ? actionSize.cy : targetSize.cy);
-        if (symbolMetrics.tmHeight > contentHeight)
-        {
-            contentHeight = symbolMetrics.tmHeight;
-        }
-
-        const int height = contentHeight + kDropTipPaddingY * 2;
+        // 高度固定 30 像素（用户定的）：三种状态（复制 / 移动 / 禁止）条子一样高，
+        // 拖动时状态切换不会一跳一跳的；18 像素的箭头放进去上下各留 6，刚好。
+        const int height = kDropTipHeight;
 
         ::SetWindowPos(m_tipWindow, HWND_TOPMOST, m_tipX, m_tipY, width, height,
                        SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -1496,7 +1548,8 @@ private:
         // 圆角裁剪：窗口形状本身就是圆角矩形。
         // 只靠 RoundRect 画白底的话，圆角外面那几块像素是"没画过"的窗口底色（黑的），
         // 看上去就是几个黑角；用区域裁掉之后，圆角外面什么都不存在，边缘就干净了。
-        HRGN region = ::CreateRoundRectRgn(0, 0, width, height, 16, 16);
+        // 30 像素高配 12 的圆角比较协调（原来 16 在半高的条子上会变成胶囊）。
+        HRGN region = ::CreateRoundRectRgn(0, 0, width, height, 12, 12);
         if (region != nullptr)
         {
             if (::SetWindowRgn(m_tipWindow, region, TRUE) == 0)
