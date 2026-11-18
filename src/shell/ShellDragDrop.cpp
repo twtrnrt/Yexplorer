@@ -861,8 +861,8 @@ constexpr COLORREF kDropTipTarget     = RGB(0x00, 0x00, 0x66);   // 目标文件
 constexpr COLORREF kDropTipForbidden  = RGB(0xCC, 0x00, 0x00);   // 「不能放到此处」
 
 // ---- 符号（自己画，不依赖字体里有没有这个字符）----
-constexpr int kDropTipSymbolSize = 13;   // 符号占的方框大小
-constexpr int kDropTipSymbolGap  = 5;    // 符号和文字之间留的缝
+// 符号不再用固定的方框尺寸：改成字体字形之后，宽度由 DropTipSymbolFont() 现量
+constexpr int kDropTipSymbolGap  = 3;    // 符号和文字之间留的缝
 constexpr int kDropTipWordGap    = 4;    // 动作词和目标名之间留的缝
 constexpr int kDropTipMaxTarget  = 320;  // 目标名最长画这么宽，再长就省略号
 
@@ -886,6 +886,7 @@ struct DropTipContent
 
 DropTipContent g_dropTipContent;       // 当前要显示的内容（同一时刻只有一个拖动，全局够用）
 HFONT         g_dropTipFont = nullptr; // 系统界面字体（Win11 上是微软雅黑 UI）
+HFONT         g_dropTipSymbolFont = nullptr;   // 符号字体（Segoe UI Symbol）
 
 // 系统界面字体，取一次就缓存
 HFONT DropTipFont()
@@ -906,54 +907,51 @@ HFONT DropTipFont()
 
 // 自己画符号，保证一定看得见（不依赖 Segoe UI Symbol / Emoji 里有没有对应码位）
 //   1 = 加号（复制 / 添加），2 = 箭头（移动 / 链接），3 = 红圈斜杠（禁止）
-void DrawDropTipSymbol(HDC dc, int symbol, COLORREF color, int left, int top, int size)
+// 符号字体：这几个符号都用 Segoe UI Symbol 里的现成字形
+// （Windows 自带，Win7 起就有；比手画干净——字体字形是设计好的矢量，有抗锯齿）
+//
+// 实测覆盖（都用 GetGlyphIndices 一样的方式在渲染图上确认过）：
+//   ✚ U+271A 粗十字、⬉ U+2B09 斜箭头、🚫 U+1F6AB 圆圈斜杠 —— Segoe UI Symbol 全都有
+HFONT DropTipSymbolFont()
 {
-    if (symbol <= 0 || size <= 4)
+    if (g_dropTipSymbolFont == nullptr)
     {
-        return;
+        NONCLIENTMETRICSW metrics = {};
+        metrics.cbSize = sizeof(metrics);
+
+        int height = 16;   // 万一取不到系统字体，就按 16 像素
+
+        if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) &&
+            metrics.lfMessageFont.lfHeight != 0)
+        {
+            // lfHeight 是负数（表示字高）。符号比正文放大 30%：
+            // 这几个字形本身的笔画细、占位小，按正文高度画会显得像一道细杠，看不清。
+            height = metrics.lfMessageFont.lfHeight * 13 / 10;
+        }
+
+        g_dropTipSymbolFont = ::CreateFontW(
+            height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
     }
 
-    HPEN   pen      = ::CreatePen(PS_SOLID, 2, color);
-    HGDIOBJ oldPen  = ::SelectObject(dc, pen);
-    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+    return g_dropTipSymbolFont;
+}
 
-    const int centerX = left + size / 2;
-    const int centerY = top + size / 2;
-
-    if (symbol == 1)
+// 状态 → 符号字符
+std::wstring DropTipSymbolText(int symbol)
+{
+    switch (symbol)
     {
-        // 加号
-        ::MoveToEx(dc, left + 1, centerY, nullptr);
-        ::LineTo(dc, left + size - 1, centerY);
-
-        ::MoveToEx(dc, centerX, top + 1, nullptr);
-        ::LineTo(dc, centerX, top + size - 1);
+    case 1:  return L"\u271A";    // ✚ 复制 / 添加（粗十字）
+    case 2:  return L"\u2B05";    // ⬅ 移动到（粗左箭头）
+                                  //     原来用的是 ⬉ U+2B09，字形本身笔画很细、
+                                  //     箭头尖只有一小撮，画出来像一道斜杠，所以换掉
+    case 3:  return L"\u2298";    // ⊘ 禁止
+                                  //     原来用的是 🚫 U+1F6AB，但它在 BMP 之外（代理对），
+                                  //     GDI 的 DrawText 渲染代理对会出乱码，所以换成 BMP 内的 ⊘
+    default: return std::wstring();
     }
-    else if (symbol == 2)
-    {
-        // 斜向左上的箭头（跟系统「移动到」那个箭头一个意思）
-        ::MoveToEx(dc, left + size - 1, top + size - 1, nullptr);
-        ::LineTo(dc, left + 3, top + 3);
-
-        // 箭头尖上的两撇
-        ::MoveToEx(dc, left + 3, top + 3, nullptr);
-        ::LineTo(dc, left + 3 + size / 2 - 1, top + 3);
-
-        ::MoveToEx(dc, left + 3, top + 3, nullptr);
-        ::LineTo(dc, left + 3, top + 3 + size / 2 - 1);
-    }
-    else if (symbol == 3)
-    {
-        // 圆圈 + 一道斜杠
-        ::Ellipse(dc, left, top, left + size, top + size);
-
-        ::MoveToEx(dc, left + 2, top + 2, nullptr);
-        ::LineTo(dc, left + size - 2, top + size - 2);
-    }
-
-    ::SelectObject(dc, oldBrush);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(pen);
 }
 
 LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1021,7 +1019,24 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         const bool hasSymbol = (content.symbol != 0);
         const bool hasWordGap = (!content.actionText.empty() && !content.targetText.empty());
 
-        const int symbolWidth = hasSymbol ? kDropTipSymbolSize : 0;
+        // 符号也用字体量一下宽度（不同符号宽度略有差别，精确算才不会挤在一起）
+        SIZE symbolSize = {};
+        if (hasSymbol)
+        {
+            const std::wstring symbolText = DropTipSymbolText(content.symbol);
+            HFONT   symbolFont    = DropTipSymbolFont();
+            HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
+
+            ::GetTextExtentPoint32W(dc, symbolText.c_str(),
+                                    static_cast<int>(symbolText.size()), &symbolSize);
+
+            if (oldSymbolFont != nullptr)
+            {
+                ::SelectObject(dc, oldSymbolFont);
+            }
+        }
+
+        const int symbolWidth = hasSymbol ? symbolSize.cx : 0;
         const int symbolGap   = hasSymbol ? kDropTipSymbolGap : 0;
         const int wordGap     = hasWordGap ? kDropTipWordGap : 0;
 
@@ -1036,11 +1051,23 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         const COLORREF actionColor = content.forbidden ? kDropTipForbidden : kDropTipAction;
         const COLORREF targetColor = content.forbidden ? kDropTipForbidden : kDropTipTarget;
 
-        // 符号：整体垂直居中
+        // 符号：直接用 Segoe UI Symbol 的字形（矢量、有抗锯齿），颜色跟着状态走
         if (hasSymbol)
         {
-            const int symbolTop = client.top + ((client.bottom - client.top) - kDropTipSymbolSize) / 2;
-            DrawDropTipSymbol(dc, content.symbol, actionColor, x, symbolTop, kDropTipSymbolSize);
+            const std::wstring symbolText = DropTipSymbolText(content.symbol);
+            HFONT   symbolFont    = DropTipSymbolFont();
+            HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
+
+            RECT rect = { x, client.top, x + symbolSize.cx + 2, client.bottom };
+            ::SetTextColor(dc, actionColor);
+            ::DrawTextW(dc, symbolText.c_str(), static_cast<int>(symbolText.size()), &rect,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            if (oldSymbolFont != nullptr)
+            {
+                ::SelectObject(dc, oldSymbolFont);
+            }
+
             x += symbolWidth + symbolGap;
         }
 
@@ -1359,6 +1386,23 @@ private:
             }
         }
 
+        // 符号也换成符号字体量（跟 WM_PAINT 里必须一致）
+        SIZE symbolSize = {};
+        if (content.symbol != 0)
+        {
+            const std::wstring symbolText = DropTipSymbolText(content.symbol);
+            HFONT   symbolFont    = DropTipSymbolFont();
+            HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
+
+            ::GetTextExtentPoint32W(dc, symbolText.c_str(),
+                                    static_cast<int>(symbolText.size()), &symbolSize);
+
+            if (oldSymbolFont != nullptr)
+            {
+                ::SelectObject(dc, oldSymbolFont);
+            }
+        }
+
         if (previousFont != nullptr)
         {
             ::SelectObject(dc, previousFont);
@@ -1368,7 +1412,7 @@ private:
         const bool hasSymbol  = (content.symbol != 0);
         const bool hasWordGap = (!content.actionText.empty() && !content.targetText.empty());
 
-        const int symbolWidth = hasSymbol ? kDropTipSymbolSize : 0;
+        const int symbolWidth = hasSymbol ? symbolSize.cx : 0;
         const int symbolGap   = hasSymbol ? kDropTipSymbolGap : 0;
         const int wordGap     = hasWordGap ? kDropTipWordGap : 0;
 

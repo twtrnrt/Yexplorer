@@ -5013,17 +5013,19 @@ void MainWindow::RegisterDropTargets()
     listCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
         // ------------------------------------------------------------------
-        // 只读压缩包内部（rar / 7z / tar）：接受，但不落地
+        // 只读压缩包内部（rar / 7z / tar）：整个列表都不接受放置
         //
-        // 以前这里直接返回空串（= 不接受），结果是：在压缩包里按住一个文件
-        // 准备往外拖的时候，光标还在列表上就已经变成"禁止"了，看起来像拖不动。
-        // 现在改成"接受"：光标保持正常的复制/移动形状，
-        // 真的落在只读容器内部时，PerformDropFromOutside 里还有一道
-        // IsWritableTargetDirectory 的检查会把它拦住，静默不做事。
+        // 返回空串就是对拖拽那边说"这里不能放"：系统给禁止光标、提示条也显示
+        // 「不能放到 此处」，松手不落地（和资源管理器表现一致）。
+        //
+        // 注：曾经改成"接受但不落地"，好处是在压缩包里按住文件往外拖、
+        // 光标还压在列表上时不会立刻变成禁止；但那样提示条会显示成「复制到 xxx」，
+        // 和实际"放不进去"的语义打架，用户选择回到禁止这一种。
+        // zip 内部是可写的，照常接受。
         // ------------------------------------------------------------------
         if (m_currentIsContainer && !m_currentIsZipContainer)
         {
-            return m_history.Current();
+            return std::wstring();
         }
 
         RECT clientRect = {};
