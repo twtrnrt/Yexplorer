@@ -8,6 +8,7 @@
 #include "ShellDragDrop.h"
 
 #include "core/Logger.h"
+#include "shell/ShellFolder.h"   // IsDriveRootPath：拖盘符时默认效果改成"链接"
 
 #include <commoncontrols.h>
 #include <cstring>      // std::memcpy（往 DROPDESCRIPTION 结构里拷数据）
@@ -546,7 +547,8 @@ private:
 // 效果计算
 // ============================================================================
 
-DWORD ComputeDropEffect(DWORD keyState, DWORD sourcePreferredEffect, bool sameDrive)
+DWORD ComputeDropEffect(DWORD keyState, DWORD sourcePreferredEffect, bool sameDrive,
+                        bool sourceIsDrive)
 {
     // 修饰键优先，和资源管理器一致
     if ((keyState & MK_CONTROL) != 0)
@@ -560,6 +562,15 @@ DWORD ComputeDropEffect(DWORD keyState, DWORD sourcePreferredEffect, bool sameDr
     if ((keyState & MK_ALT) != 0)
     {
         return DROPEFFECT_LINK;    // 建快捷方式
+    }
+
+    // 拖动源是驱动器（C:\、D:\ 这种盘符根）：什么都不按也按"链接"处理。
+    // 盘符搬不走（"同盘移动一个驱动器"无从谈起），整盘复制也没有意义，
+    // 所以默认效果和按住 Alt 拖一样 —— 在目标位置建一个快捷方式。
+    // 系统资源管理器拖盘符默认也是这个行为。
+    if (sourceIsDrive)
+    {
+        return DROPEFFECT_LINK;
     }
 
     // 什么都没按：同盘移动、跨盘复制
@@ -1435,7 +1446,8 @@ public:
         }
 
         DWORD chosen = ComputeDropEffect(keyState, ExtractPreferredEffect(data),
-                                        IsSameDrive(sources.front(), targetDirectory));
+                                        IsSameDrive(sources.front(), targetDirectory),
+                                        IsDriveRootPath(sources.front()));
 
         // 松手前再判一次（第二道保险）：落点是源自己、或者源里面的子目录时，
         // 复制和移动都会让系统报错并弹出它自己的错误框，所以这里直接按"无效落点"处理。
@@ -1816,7 +1828,8 @@ private:
             // 我们自己的放置目标知道支持哪些效果，所以这里直接用算出来的结果，
             // 不再跟系统给的 allowed 求交（否则按 Alt 拖到自己左栏会被挡掉）
             DWORD computed = ComputeDropEffect(keyState, m_sourcePreferredEffect,
-                                              IsSameDrive(m_sourcePaths.front(), targetDirectory));
+                                              IsSameDrive(m_sourcePaths.front(), targetDirectory),
+                                              IsDriveRootPath(m_sourcePaths.front()));
 
             // 落点是「源自己」或「源里面的子目录」时，复制和移动在系统层面都做不了
             // （IFileOperation 会报错并弹它自己的错误框），所以拖动阶段就判死：

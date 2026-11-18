@@ -101,9 +101,14 @@ void UnregisterWindowDropTarget(HWND hwnd);
 //   keyState           ：拖动时的修饰键状态（MK_CONTROL / MK_SHIFT / MK_ALT）
 //   sourcePreferredEffect ：拖动源声明的"首选效果"（Preferred DropEffect 格式）
 //   sameDrive          ：源和目标是不是同一个盘
-// 与资源管理器一致：Ctrl→复制，Shift→移动，Alt→快捷方式，都不按则同盘移动、跨盘复制
+//   sourceIsDrive      ：拖动源是不是驱动器（盘符根，如 C:\、D:\）
+//
+// 与资源管理器一致：Ctrl→复制，Shift→移动，Alt→快捷方式，都不按则同盘移动、跨盘复制。
+// 唯一的例外是源为驱动器：盘符搬不走、整盘复制也没意义，所以什么都不按也按
+// 快捷方式处理（效果等同于按住 Alt 拖），和系统资源管理器拖盘符的表现一致。
 // ----------------------------------------------------------------------------
-DWORD ComputeDropEffect(DWORD keyState, DWORD sourcePreferredEffect, bool sameDrive);
+DWORD ComputeDropEffect(DWORD keyState, DWORD sourcePreferredEffect, bool sameDrive,
+                        bool sourceIsDrive);
 
 // 判断两个路径是否在同一个盘（网络位置按"根路径"比较）
 bool IsSameDrive(const std::wstring& pathA, const std::wstring& pathB);

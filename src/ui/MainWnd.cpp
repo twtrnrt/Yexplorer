@@ -5700,7 +5700,18 @@ void MainWindow::RegisterDropTargets()
         }
 
         // 压在文件行上或者压空白处：放进当前目录
-        return m_history.Current();
+        //
+        // 但当前目录本身不是真目录时（「此电脑」「控制面板」「网络」「库」「回收站」
+        // 这些虚拟文件夹，以及「主文件夹」这种容器视图）往空白处放什么都不合适：
+        // 返回空串，拖拽那边给禁止光标、提示条显示「⊘ 不能放到 此处」。
+        // 压在里面的文件夹图标上照旧可以放（那才是真目录）。
+        const std::wstring currentPath = m_history.Current();
+        if (!shell::IsFileSystemPath(currentPath))
+        {
+            return std::wstring();
+        }
+
+        return currentPath;
     };
 
     // 拖动过程中把"鼠标正压着的那个文件夹"高亮出来（系统自带的拖放高亮效果）
@@ -5824,7 +5835,16 @@ void MainWindow::RegisterDropTargets()
 
     addressCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
-        return m_addressBar.HitTestPath(ptClient);
+        const std::wstring path = m_addressBar.HitTestPath(ptClient);
+
+        // 面包屑的段必须是真目录：在「此电脑」这类虚拟视图里整条只有一个虚拟段，
+        // 拖上去没有落脚点，一律不接受
+        if (!shell::IsFileSystemPath(path))
+        {
+            return std::wstring();
+        }
+
+        return path;
     };
 
     addressCallbacks.PerformDrop = [this](const std::vector<std::wstring>& sources,
@@ -6018,6 +6038,15 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
         return;
     }
 
+    // 落点必须是真目录（zip 内部的 C:\a.zip\sub 也算 —— 那是可写容器路径）。
+    // 虚拟文件夹（此电脑、控制面板、网络、库、回收站、主文件夹视图）放不进东西，
+    // 上面三个入口都判过一遍了，这里再兜一道，防止以后新增入口绕过拖动阶段。
+    if (!shell::IsFileSystemPath(targetDirectory))
+    {
+        Logger::Warn(L"拖放目标不是真实目录，忽略：" + targetDirectory);
+        return;
+    }
+
     HWND owner = m_hWnd;
 
     Logger::Info(L"接收拖放：" + std::to_wstring(usableSources.size()) + L" 项 → " +
@@ -6042,6 +6071,26 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
                 size_t slashPos = source.find_last_of(L"\\/");
                 std::wstring fileName =
                     (slashPos == std::wstring::npos) ? source : source.substr(slashPos + 1);
+
+                // 盘符根（C:\、D:\）没有"最后一段"，按上面的算法会得到空名字，
+                // 最后生成一个叫 ".lnk" 的怪文件。这里单独起名：卷标 + 盘符，
+                // 没卷标就叫「本地磁盘 (C)」，和资源管理器里给盘符起的名字一致。
+                // （GetVolumeInformation 在后台线程里跑，网络盘慢也不卡界面）
+                if (fileName.empty() && shell::IsDriveRootPath(source))
+                {
+                    wchar_t volumeName[MAX_PATH] = {};
+
+                    if (::GetVolumeInformationW(source.c_str(), volumeName, MAX_PATH,
+                                                nullptr, nullptr, nullptr, nullptr, 0) &&
+                        volumeName[0] != L'\0')
+                    {
+                        fileName = std::wstring(volumeName) + L" (" + source[0] + L")";
+                    }
+                    else
+                    {
+                        fileName = std::wstring(L"本地磁盘 (") + source[0] + L")";
+                    }
+                }
 
                 std::wstring linkPath = targetDirectory + L"\\" + fileName + L".lnk";
 
