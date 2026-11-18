@@ -2109,6 +2109,34 @@ void MainWindow::DoPaste()
     });
 }
 
+// ----------------------------------------------------------------------------
+// 按 Windows 命令行规则把一个路径包成"能安全塞进命令行"的参数
+//
+// 关键坑：路径以反斜杠结尾时（盘符根 "C:\" 就是），如果直接写 "\"" 包起来，
+// 末尾那个反斜杠会把结束引号转义成字面的引号（命令行里 \" 表示一个真引号），
+// 对方拿到的路径就是坏的。标准做法是把末尾的反斜杠翻倍：
+//     "C:\"   → "C:\\"        （对方解析出来仍然是 C:\）
+//     "D:\abc\" → "D:\abc\\"
+// 实测：Windows Terminal 收到坏的盘符根路径会报 0x8007010b「无法访问启动目录」。
+// ----------------------------------------------------------------------------
+static std::wstring QuoteCommandLineArg(const std::wstring& value)
+{
+    std::wstring result = L"\"";
+
+    // 数一下末尾连着有几个反斜杠
+    size_t trailingBackslashes = 0;
+    while (trailingBackslashes < value.size() &&
+           value[value.size() - 1 - trailingBackslashes] == L'\\')
+    {
+        ++trailingBackslashes;
+    }
+
+    result.append(value);
+    result.append(trailingBackslashes, L'\\');   // 末尾反斜杠翻倍，避免转义掉结束引号
+    result.append(L"\"");
+    return result;
+}
+
 // ============================================================================
 // 在指定文件夹里开一个终端窗口（右键「在终端中打开」）
 //
@@ -2148,9 +2176,12 @@ void MainWindow::DoOpenTerminalIn(const std::wstring& folderPath)
     if (!wtPath.empty() && ::GetFileAttributesW(wtPath.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
         // wt -d "目录"：直接在该目录打开一个标签页
-        const std::wstring arguments = L"-d \"" + folderPath + L"\"";
+        // 盘符根 "C:\" 这种以反斜杠结尾的路径必须按命令行规则加引号（见 QuoteCommandLineArg）
+        const std::wstring arguments = L"-d " + QuoteCommandLineArg(folderPath);
+
+        // lpDirectory 也指向目标目录：万一 -d 没生效，wt 的启动目录也落在正确的位置
         const HINSTANCE result = ::ShellExecuteW(m_hWnd, L"open", wtPath.c_str(), arguments.c_str(),
-                                                 nullptr, SW_SHOWNORMAL);
+                                                 isUncPath ? nullptr : folderPath.c_str(), SW_SHOWNORMAL);
 
         // ShellExecute 返回值大于 32 才算成功（32 及以下都是错误码）
         if (reinterpret_cast<INT_PTR>(result) > 32)
@@ -2174,8 +2205,8 @@ void MainWindow::DoOpenTerminalIn(const std::wstring& folderPath)
     }
 
     const std::wstring commandLine = isUncPath
-        ? (L"\"" + comspec + L"\" /k pushd \"" + folderPath + L"\"")
-        : (L"\"" + comspec + L"\"");
+        ? (QuoteCommandLineArg(comspec) + L" /k pushd " + QuoteCommandLineArg(folderPath))
+        : QuoteCommandLineArg(comspec);
 
     // CreateProcessW 会改动命令行缓冲区，必须传一份可写的拷贝（不能直接传 const 串）
     std::vector<wchar_t> commandLineBuffer(commandLine.begin(), commandLine.end());
