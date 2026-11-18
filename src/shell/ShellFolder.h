@@ -196,6 +196,25 @@ inline bool IsTopDesktopPath(const std::wstring& path)
     return ::_wcsicmp(path.c_str(), kTopDesktopPath) == 0;
 }
 
+// ----------------------------------------------------------------------------
+// Windows 11 的「主文件夹」（Home）
+//
+// 注意这是**另一个**东西：
+//   · kTopDesktopPath（"::TopDesktop"）= 本程序对顶层"桌面容器"的叫法，界面里也显示成
+//     「主文件夹」，里面是此电脑、回收站、控制面板、库、网络，以及桌面/下载/文档…这些入口；
+//   · 下面这个 CLSID（::{F874310E-...}）= Shell 自己的 Home 视图：从上面那层的
+//     「主文件夹」项再点一次就进来了，列的还是桌面/下载/文档/图片/音乐…，
+//     但条目的路径是它们在磁盘上的真实位置（C:\Users\xxx\Desktop 这种）。
+//
+// 两层的"桌面、文档"都不该给剪切/删除，所以判断"是不是在主文件夹里"时要把两种都算上。
+// ----------------------------------------------------------------------------
+constexpr const wchar_t* kHomeFolderPath = L"::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}";
+
+inline bool IsHomeFolderPath(const std::wstring& path)
+{
+    return ::_wcsicmp(path.c_str(), kHomeFolderPath) == 0;
+}
+
 // 「此电脑」的解析名（资源管理器地址栏里也就是这个）
 constexpr const wchar_t* kThisPcPath = L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
 

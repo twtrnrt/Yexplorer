@@ -2567,12 +2567,26 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
             }
         }
 
-        // 「主文件夹」（本程序对顶层桌面容器的叫法）里的系统入口 —— 桌面、文档、
-        // 下载、图片、音乐这些 —— 不给「剪切」和「删除」：
-        // 它们是 Shell 重定向的已知文件夹（位置记在用户配置里），搬不走也删不得，
-        // 系统资源管理器里同样没有这两项。其余目录（比如 C:\Users\xxx）里的同名文件夹
-        // 不算系统项，照旧给。
-        m_menuSuppressDeleteCut = isSystemItem && shell::IsTopDesktopPath(m_history.Current());
+        // 「主文件夹」里的系统入口 —— 桌面、文档、下载、图片、音乐这些 —— 不给「剪切」
+        // 和「删除」：它们是 Shell 重定向的已知文件夹（位置记在用户配置里），搬不走也删不得，
+        // 系统资源管理器里同样没有这两项。
+        //
+        // "主文件夹"有两层，都要认：
+        //   · ::TopDesktop（本程序对顶层"桌面容器"的叫法）—— 条目带 isSystemItem 标记；
+        //   · ::{F874310E-...}（Win11 的 Home，从上面那层再点「主文件夹」进来的）——
+        //     条目的路径是真实目录（C:\Users\xxx\Desktop 这种），要按"是不是已知文件夹"认。
+        // 其它目录（比如浏览 C:\Users\xxx 时的同名文件夹）不算，照旧给剪切/删除。
+        const std::wstring currentPath = m_history.Current();
+
+        if (shell::IsTopDesktopPath(currentPath))
+        {
+            m_menuSuppressDeleteCut = isSystemItem;
+        }
+        else if (shell::IsHomeFolderPath(currentPath))
+        {
+            std::wstring knownFolderName;
+            m_menuSuppressDeleteCut = isFolder && shell::KnownFolderDisplayName(primaryPath, knownFolderName);
+        }
 
         primaryIsFolder = isFolder;
 
