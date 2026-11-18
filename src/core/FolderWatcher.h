@@ -27,6 +27,7 @@
 
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace core
 {
@@ -43,7 +44,15 @@ public:
     // 开始监视某个目录。已经在监视同一个目录时什么都不做（避免反复拆建线程）。
     //   notifyWindow ：有变化时往哪个窗口发消息
     //   message      ：发什么消息（主窗口自己定义，比如 WM_APP + 3）
-    void Start(const std::wstring& path, HWND notifyWindow, UINT message);
+    //   ignoreFilePath：这个文件的"只涉及它自己"的变化不算目录变化（传日志路径）
+    //
+    // 为什么要 ignoreFilePath：
+    //   程序把日志写在 exe 旁边。用户停在 exe 所在目录时，每写一行日志都会让
+    //   ReadDirectoryChangesW 报"目录变了"，主窗口刷新目录、刷新时又写日志，
+    //   于是变成一直自我刷新的死循环（日志几秒就刷到上百 KB，界面一直在重绘）。
+    //   把"变化记录全是这个文件"的情况过滤掉，就断掉了这个循环。
+    void Start(const std::wstring& path, HWND notifyWindow, UINT message,
+               const std::wstring& ignoreFilePath = std::wstring());
 
     // 停止监视（切换目录、窗口关闭时都要调）
     void Stop();
@@ -55,11 +64,16 @@ private:
     // 后台线程主体：循环等待变化
     void ThreadMain();
 
+    // 这批变化记录是不是"只涉及忽略的那个文件"（日志文件）
+    // 参数：buffer 是 ReadDirectoryChangesW 填好的缓冲区，bytesReturned 是有效字节数
+    bool OnlyIgnoredEntry(const std::vector<BYTE>& buffer, DWORD bytesReturned) const;
+
     HANDLE       m_dirHandle    = nullptr;   // 被监视目录的句柄
     HANDLE       m_stopEvent    = nullptr;   // 停止信号
     HWND         m_notifyWindow = nullptr;   // 往谁发消息
     UINT         m_message      = 0;         // 发哪条消息
     std::wstring m_path;                     // 当前监视的目录
+    std::wstring m_ignorePath;               // 只涉及它自己时不算变化（日志文件）
     std::thread  m_thread;
 };
 

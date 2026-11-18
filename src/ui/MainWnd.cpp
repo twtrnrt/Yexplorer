@@ -7020,7 +7020,9 @@ void MainWindow::OnEnumerationDone()
 
     // 枚举成功：开始盯着这个目录，别的程序改动它时自动刷新
     // （已经在盯同一个目录的话内部会直接返回，不会反复拆建线程）
-    m_watcher.Start(result->path, m_hWnd, WM_APP_FOLDER_CHANGED);
+    // 第 4 个参数是日志路径：日志就写在本程序旁边，用户停在 exe 目录时
+    // 每写一行日志都会让监视器以为"目录变了"，必须跳过，否则会自我刷新死循环。
+    m_watcher.Start(result->path, m_hWnd, WM_APP_FOLDER_CHANGED, Logger::FilePath());
 
     size_t logCount = (result->entries.size() < kMaxLogItems) ? result->entries.size() : kMaxLogItems;
     for (size_t i = 0; i < logCount; ++i)

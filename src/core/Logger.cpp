@@ -25,6 +25,9 @@ namespace
 std::shared_ptr<spdlog::logger> g_logger;
 std::mutex                      g_mutex;
 
+// 日志文件的绝对路径（Init 时记下来，供目录监视跳过"日志自己增长"的变化）
+std::wstring                    g_logPath;
+
 // ----------------------------------------------------------------------------
 // UTF-16 → UTF-8
 // ----------------------------------------------------------------------------
@@ -66,6 +69,11 @@ namespace Logger
 
 void Init(const std::wstring& logFilePath)
 {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_logPath = logFilePath;      // 目录监视要按这个路径跳过日志自身的变化
+    }
+
     std::lock_guard<std::mutex> lock(g_mutex);
     try
     {
@@ -93,6 +101,12 @@ void Shutdown()
         g_logger->flush();
         g_logger.reset();
     }
+}
+
+std::wstring FilePath()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_logPath;       // 返回值拷贝：调用方（别的线程）自己拿着用，不怕被改
 }
 
 void Info(const std::wstring& message)
