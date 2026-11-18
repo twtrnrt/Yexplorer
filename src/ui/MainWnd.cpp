@@ -6546,9 +6546,12 @@ void MainWindow::LayoutChildren()
 
         // 左栏铺满整条（0 ~ 竖线）：选中那一行的高亮要占满整条，
         // 图标和文字的 10 像素留白在 NavigationPane 内部处理。
-        // 右边让出 splitterHit 像素，让给分隔线的热区。
-        placeWindow(m_navigationPane.Handle(), 0, contentY,
-                    paneWidth - splitterHit, contentHeight);
+        //
+        // 左边留 2px 空白（和右侧观感对称），右边只让出分隔线热区 2px。
+        // 只动这两个布局数字，没有额外计算和绘制，不影响性能。
+        const int navLeftGap = Scale(2);
+        placeWindow(m_navigationPane.Handle(), navLeftGap, contentY,
+                    paneWidth - navLeftGap - splitterHit, contentHeight);
 
         // 左栏右边那条竖线，宽 1 像素（线仍画在原来的位置，不跟着让）
         m_paneDividerRect.left   = paneWidth;
@@ -6622,12 +6625,14 @@ bool MainWindow::IsOnPaneDivider(int clientX) const
 
     int splitX = CurrentPaneWidth();
 
-    // 热区半径：必须和 LayoutChildren() 里的 splitterHit 一致。
-    // 左栏在 splitX - 2 处收边、列表在 splitX + 3 处开始，
-    // 所以 splitX 左右各 2 像素都是主窗口自己的地盘，鼠标消息能收到。
-    int tolerance = Scale(2);
+    // 热区范围必须和 LayoutChildren() 里的实际让位一致，
+    // 否则会出现"光标变成左右箭头了但按下去拖不动"：
+    //   左侧：导航栏在 splitX - 2 处收边；
+    //   右侧：列表在 splitX + 3 处开始。
+    int toleranceLeft  = Scale(2);
+    int toleranceRight = Scale(2);
 
-    return clientX >= splitX - tolerance && clientX <= splitX + tolerance;
+    return clientX >= splitX - toleranceLeft && clientX <= splitX + toleranceRight;
 }
 
 // 拖动分隔线：把左栏宽度改成鼠标所在的位置
