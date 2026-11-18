@@ -525,11 +525,29 @@ void FileListView::AutoFitColumns()
         return;
     }
 
+    // 【踩坑】LVSCW_AUTOSIZE_USEHEADER 有个系统"潜规则"：
+    // 目标列如果是**最后一列**，系统不按"内容/表头"的最大宽度来算，
+    // 而是把它拉宽到填满剩余的客户区（微软文档里没写，但实测如此）。
+    // 我们的"大小"列恰好是最后一列，于是按 Ctrl+加号 会出现
+    // "大小列被拉得很宽、名称列反而被挤窄"的怪现象。
+    //
+    // 解决办法：临时在第 5 位插一个空列，让"大小"列在算宽度的那一刻不是最后一列，
+    // 算完立刻删掉空列（这样它的宽度就是按内容 + 表头文字算出来的）。
+    // 期间关掉重绘，用户看不到那个临时列。
+    ::SendMessage(m_hWnd, WM_SETREDRAW, FALSE, 0);
+
+    LVCOLUMN tempColumn = {};
+    tempColumn.mask = LVCF_WIDTH;
+    tempColumn.cx   = 8;                 // 随便给个宽度，马上就删
+    ListView_InsertColumn(m_hWnd, 4, &tempColumn);
+
     // 第 1~3 列：修改日期 / 类型 / 大小
     for (int column = 1; column <= 3; ++column)
     {
         ListView_SetColumnWidth(m_hWnd, column, LVSCW_AUTOSIZE_USEHEADER);
     }
+
+    ListView_DeleteColumn(m_hWnd, 4);    // 删掉临时列，"大小"列重新变回最后一列
 
     // 把系统算出来的真实宽度同步进成员变量。
     // 不同步的话，下次窗口一变 LayoutColumns 还会拿旧宽度排版，这次调整等于白调。
@@ -538,6 +556,9 @@ void FileListView::AutoFitColumns()
     m_sizeColumnWidth = static_cast<int>(ListView_GetColumnWidth(m_hWnd, 3));
 
     LayoutColumns();   // 名称列吃剩下的宽度
+
+    ::SendMessage(m_hWnd, WM_SETREDRAW, TRUE, 0);
+    ::InvalidateRect(m_hWnd, nullptr, TRUE);
 
     // 记进配置（效果和用户手动拖表头一样）
     if (m_onColumnWidthChanged)
