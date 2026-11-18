@@ -788,11 +788,21 @@ void MainWindow::CreateChildControls()
 
     // ---------------- 6. 键盘快捷键 ----------------
     // 用系统的加速键表，好处是不用去拦截每个控件的按键消息
+    //
+    // 【重要·条目顺序】
+    // TranslateAccelerator 是按表序逐个匹配、第一个命中就用的。实测发现：
+    //   带不带修饰键的两条如果键码相同，"不带修饰键"的那条会把"带 Shift 的"一起吃掉
+    //   （比如 Shift+Delete 落到了普通 Delete，Ctrl+Shift+C 落到了普通 Ctrl+C）。
+    // 因此凡是存在"修饰键子集"关系的组合，一律把**修饰键更多的排在前面**。
     ACCEL accelerators[] =
     {
+        // 复制文件路径（Ctrl+Shift+C）——必须排在 Ctrl+C 之前，否则会被 Ctrl+C 抢走
+        { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'C', kCommandCopyPath },
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'C',       kCommandCopy },
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'X',       kCommandCut },
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'V',       kCommandPaste },
+        // 永久删除（Shift+Delete）——必须排在普通 Delete 之前，否则会被普通 Delete 抢走
+        { static_cast<BYTE>(FSHIFT | FVIRTKEY),   VK_DELETE, kCommandDeletePermanent },
         { static_cast<BYTE>(FVIRTKEY),            VK_DELETE, kCommandDelete },
         { static_cast<BYTE>(FVIRTKEY),            VK_F5,     kCommandRefresh },
         { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'N', kCommandNewFolder },
@@ -803,8 +813,23 @@ void MainWindow::CreateChildControls()
         // 拆开是为了让批量重命名只能从菜单撤销，Ctrl+Z 不响应它（见 PerformUndo 里的判断）
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Z',       kCommandUndoKeyboard },
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'Y',       kCommandRedoKeyboard },
-        // 复制文件路径（和资源管理器一样是 Ctrl+Shift+C）
-        { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), 'C', kCommandCopyPath },
+
+        // ---- 2026-11-18 新增：对齐 Windows 11 资源管理器的常用快捷键 ----
+        // 说明：这几个都是"窗口级"快捷键，只在焦点不在输入框时生效
+        //       （消息循环里已经判断过，焦点在 Edit 时整张表都会跳过）。
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'N', kCommandNewWindow },    // 新窗口
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'T', kCommandHomeWindow },   // 主文件夹窗口
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'W', kCommandCloseWindow },  // 关闭当前窗口
+        { static_cast<BYTE>(FALT | FVIRTKEY), VK_LEFT,  kCommandGoBackKey },   // Alt+← 后退
+        { static_cast<BYTE>(FALT | FVIRTKEY), VK_RIGHT, kCommandGoForwardKey },// Alt+→ 前进
+        { static_cast<BYTE>(FALT | FVIRTKEY), VK_UP,    kCommandGoUp },        // Alt+↑ 上一级
+        { static_cast<BYTE>(FALT | FVIRTKEY), 'D', kCommandFocusAddressBar },  // Alt+D 焦点到地址栏
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'L', kCommandFocusAddressBar }, // Ctrl+L 同上
+        { static_cast<BYTE>(FALT | FVIRTKEY), VK_RETURN, kCommandProperties }, // Alt+Enter 属性
+        // 注意：Shift+Delete 的条目放在表头上方、普通 Delete 之前（顺序见本表开头的说明）
+        // Ctrl+加号：列宽自适应。数字键盘的 + 是 VK_ADD，主键盘的 +/= 是 VK_OEM_PLUS，两个都认
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), VK_ADD, kCommandAutoFitColumns },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), VK_OEM_PLUS, kCommandAutoFitColumns },
     };
 
     m_hAccelerator = ::CreateAcceleratorTableW(accelerators, ARRAYSIZE(accelerators));
@@ -1120,7 +1145,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             DoPaste();
             return 0;
         case kCommandDelete:
-            DoDelete();
+            // Delete：进回收站；按住 Shift 则永久删除（Shell 会弹"确实要永久删除"确认框）
+            //
+            // 为什么这里还要读一次 Shift 状态：
+            //   正常情况下 Shift+Delete 会先命中表里那条 FSHIFT 条目（走 kCommandDeletePermanent），
+            //   但保险起见再兜一层——万一哪天条目顺序被调整、或系统把带修饰键的匹配让给了
+            //   普通条目，这里读真实键盘状态仍能走对分支。GetAsyncKeyState 读的是全局键状态，
+            //   真人按键时可靠。
+            DoDelete((::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
             return 0;
         case kCommandRefresh:
             RefreshCurrentFolder();
@@ -1209,6 +1241,64 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         case kCommandViewTiles:
             ApplyViewMode(FileListView::ViewMode::Tiles, true);
+            return 0;
+
+        // ---- 2026-11-18 新增的快捷键命令 ----
+        case kCommandNewWindow:
+        {
+            // Ctrl+N：选中的是一个文件夹就用它；否则把当前目录再开一遍。
+            // 用户要求"不排除当前目录"，所以跳过"该目录已有窗口就拉前台"的去重
+            // （forceNewWindow = true），一定开出一个新窗口。
+            std::wstring target = m_history.Current();
+
+            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+            if (selected.size() == 1)
+            {
+                // 只有"单选 且 确实是文件夹"才改目标；选的是文件、或选了多个，都按当前目录
+                std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+                const int index = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+
+                if (result != nullptr && index >= 0 &&
+                    index < static_cast<int>(result->entries.size()))
+                {
+                    const shell::ShellEntry& entry = result->entries[index];
+                    if (entry.isFolder && !entry.isGroupHeader && !entry.isSpacer)
+                    {
+                        target = selected.front();
+                    }
+                }
+            }
+
+            OpenFolderInNewWindow(target, true);
+            return 0;
+        }
+        case kCommandHomeWindow:
+            // Ctrl+T：开一个停在「主文件夹」的新窗口（同样跳过"已有窗口就拉前台"）
+            OpenFolderInNewWindow(shell::kTopDesktopPath, true);
+            return 0;
+        case kCommandCloseWindow:
+            // Ctrl+W：关掉当前窗口。用 PostMessage 而不是直接销毁，
+            // 让关闭走正常流程（会把窗口大小/位置存进配置）
+            ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
+            return 0;
+        case kCommandGoBackKey:
+            GoBack();
+            return 0;
+        case kCommandGoForwardKey:
+            GoForward();
+            return 0;
+        case kCommandFocusAddressBar:
+            // Alt+D / Ctrl+L：地址栏进入输入状态
+            // （内部会放到编辑框、设置焦点并全选，效果和点地址栏空白处一样）
+            m_addressBar.BeginEditing();
+            return 0;
+        case kCommandDeletePermanent:
+            // Shift+Delete、以及 Shift+右键点「删除」：永久删除（Shell 会弹确认框）
+            DoDelete(true);
+            return 0;
+        case kCommandAutoFitColumns:
+            // Ctrl+加号：列宽按内容自适应
+            m_fileListView.AutoFitColumns();
             return 0;
         default:
             break;
@@ -1384,7 +1474,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             Logger::Info(L"文件操作完成");
 
             // 记进撤销栈（操作成功才记，失败/取消不留记录）
-            if (m_lastOperation == FileOperationKind::Delete)
+            // 永久删除例外：文件已经绕过回收站，没法还原，记了也是假的撤销
+            if (m_lastOperation == FileOperationKind::Delete && !m_lastOperationPermanent)
             {
                 UndoRecord record;
                 record.kind        = UndoKind::Delete;
@@ -1467,6 +1558,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             RefreshCurrentFolder();
         }
         m_lastOperation = FileOperationKind::None;
+        m_lastOperationPermanent = false;
         m_operationPaths.clear();
         return 0;
     }
@@ -2158,7 +2250,7 @@ bool MainWindow::SelectedEntryPidls(const std::vector<std::wstring>& paths,
     return !pidls.empty();
 }
 
-void MainWindow::DoDelete()
+void MainWindow::DoDelete(bool permanent)
 {
     // 除 zip 以外的压缩包内部是只读的：系统里删不动，我们菜单也不给这项，
     // 这里兜一层，防止 Delete 快捷键绕过菜单。
@@ -2192,11 +2284,20 @@ void MainWindow::DoDelete()
     // 记下删的是哪些，成功之后直接从列表里摘掉这几行，不用重扫目录
     m_lastOperation  = FileOperationKind::Delete;
     m_operationPaths = selected;
+    // 永久删除不进撤销栈（文件已经不在回收站里，撤销也还原不了）
+    m_lastOperationPermanent = permanent;
 
-    Logger::Info(L"开始删除 " + std::to_wstring(selected.size()) + L" 项");
+    Logger::Info(std::wstring(permanent ? L"开始永久删除 " : L"开始删除 ") +
+                 std::to_wstring(selected.size()) + L" 项");
 
-    RunFileOperationAsync([selected, owner]() -> HRESULT
+    RunFileOperationAsync([selected, owner, permanent]() -> HRESULT
     {
+        // permanent = true：不进回收站，Shell 会弹"确实要永久删除"确认框
+        if (permanent)
+        {
+            return shellops::DeleteItemsPermanently(selected, owner);
+        }
+
         return shellops::DeleteItems(selected, owner);
     });
 }
@@ -2280,6 +2381,11 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     // 每次弹菜单前把上一次的自绘项数据清掉（下面的 owner-draw 项要用到它们）
     m_menuDrawItems.clear();
     m_menuPrimaryIsContainerFile = false;
+
+    // 这次右键是"按住 Shift 点的"吗？
+    // 是的话「删除」执行永久删除（不进回收站），菜单文字保持和资源管理器一样（仍是「删除」），
+    // 只是点下去之后系统会弹"确实要永久删除"的确认框。
+    m_menuPermanentDelete = ((::GetKeyState(VK_SHIFT) & 0x8000) != 0);
 
     const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
 
@@ -2535,7 +2641,10 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     FillUndoItem(menu);
 
-    ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+    // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
+    ::AppendMenuW(menu, MF_STRING,
+                  m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
+                  L"删除(&D)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
@@ -2584,7 +2693,10 @@ void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPat
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     FillUndoItem(menu);
 
-    ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+    // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
+    ::AppendMenuW(menu, MF_STRING,
+                  m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
+                  L"删除(&D)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
@@ -2643,7 +2755,10 @@ void MainWindow::BuildMultipleMenu(HMENU menu)
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     FillUndoItem(menu);
 
-    ::AppendMenuW(menu, MF_STRING, kCommandDelete, L"删除(&D)");
+    // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
+    ::AppendMenuW(menu, MF_STRING,
+                  m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
+                  L"删除(&D)");
 
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     ::AppendMenuW(menu, MF_STRING, kCommandBatchRename, L"批量重命名(&R)");
@@ -3485,15 +3600,17 @@ void MainWindow::ShowPropertiesForSelection()
 //
 // 这个"问一圈"只发生在真的要开新窗口的那一下，日常导航不碰。
 // ---------------------------------------------------------------------------
-void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath)
+void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath, bool forceNewWindow)
 {
     if (folderPath.empty())
     {
         return;
     }
 
-    // 已经有窗口停在这个目录：拉起来就够了，别重复开
-    if (ui::RelayOpenFolderToExistingWindow(folderPath, std::wstring(), m_hWnd))
+    // 已经有窗口停在这个目录：拉起来就够了，别重复开。
+    // forceNewWindow = true（Ctrl+N / Ctrl+T）时跳过这一步：用户明确要求再开一个。
+    if (!forceNewWindow &&
+        ui::RelayOpenFolderToExistingWindow(folderPath, std::wstring(), m_hWnd))
     {
         Logger::Info(L"该目录已有窗口，已拉起到前台：" + folderPath);
         return;
@@ -3506,7 +3623,14 @@ void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath)
         return;
     }
 
-    const std::wstring parameters = L"\"" + folderPath + L"\"";
+    std::wstring parameters = L"\"" + folderPath + L"\"";
+
+    if (forceNewWindow)
+    {
+        // 开头那个 --new-window 是给新进程看的：告诉它"别因为该目录已有窗口就拉前台"，
+        // 一定真的开一个（main.cpp 里读这个开关）。
+        parameters += L" --new-window";
+    }
 
     HINSTANCE result = ::ShellExecuteW(m_hWnd, L"open", exePath, parameters.c_str(),
                                        nullptr, SW_SHOWNORMAL);

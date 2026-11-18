@@ -246,10 +246,18 @@ int WINAPI wWinMain(HINSTANCE hInstance,
                          (startupSelectFile.empty() ? L"" : L"（启动后选中：" + startupSelectFile + L"）"));
         }
 
+        // 「强制新开一个窗口」开关：Ctrl+N / Ctrl+T 启动新进程时会带上它。
+        // 有它就跳过下面"该目录已有窗口就拉前台"的去重，一定真的开一个新窗口。
+        const std::wstring startupCommandLine =
+            (lpCmdLine != nullptr) ? std::wstring(lpCmdLine) : std::wstring();
+        const bool forceNewWindow =
+            (startupCommandLine.find(L"--new-window") != std::wstring::npos);
+
         // 已经有一个窗口停在这个目录（或这个文件所在的目录）：
         // 把那个窗口拉到前台，自己不再开新窗口。
         // 只在"带路径启动"时问一次，不带参数的正常启动（比如点任务栏图标）不受影响。
         const bool relayedToExistingWindow =
+            !forceNewWindow &&
             !startupPath.empty() &&
             ui::RelayOpenFolderToExistingWindow(startupPath, startupSelectFile, nullptr);
 

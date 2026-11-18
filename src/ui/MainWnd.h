@@ -102,6 +102,19 @@ static const int kCommandRename     = 3109;  // F2
 // 批量重命名（选中多个时右键里那一条）
 static const int kCommandBatchRename = 3211;
 
+// ---- 2026-11-18 新增：对齐 Windows 11 资源管理器的快捷键 ----
+//
+// 这些都是"键盘专用"命令：菜单里没有对应项，或者菜单项另有一个 id
+// （比如菜单里的「删除」走 kCommandDelete，键盘 Shift+Delete 走永久删除）。
+static const int kCommandNewWindow       = 3213;  // Ctrl+N：新窗口（选中文件夹开它，否则当前目录）
+static const int kCommandHomeWindow      = 3214;  // Ctrl+T：开一个「主文件夹」窗口
+static const int kCommandCloseWindow     = 3215;  // Ctrl+W：关闭当前窗口
+static const int kCommandGoBackKey       = 3216;  // Alt+←：后退（工具栏后退按钮是控件 ID，不同）
+static const int kCommandGoForwardKey    = 3217;  // Alt+→：前进
+static const int kCommandFocusAddressBar = 3218;  // Alt+D / Ctrl+L：焦点跳到地址栏
+static const int kCommandDeletePermanent = 3219;  // Shift+Delete / Shift+右键删除：永久删除（带确认）
+static const int kCommandAutoFitColumns  = 3220;  // Ctrl+加号：列宽自适应内容
+
 class MainWindow
 {
 public:
@@ -176,7 +189,8 @@ private:
     void DoCopyPath();      // Ctrl+Shift+C / 右键「复制文件路径」：把路径文字放进剪贴板
     void DoCut();           // Ctrl+X：记住选中的路径，粘贴时移动
     void DoPaste();         // Ctrl+V：复制/移动到家目录
-    void DoDelete();        // Delete：删到回收站
+    // Delete：删到回收站；permanent = true 时永久删除（Shell 会弹"确实要永久删除"确认框）
+    void DoDelete(bool permanent = false);
 
     // 按路径从当前枚举结果里取绝对 PIDL（压缩包内部删除等操作用）
     bool SelectedEntryPidls(const std::vector<std::wstring>& paths,
@@ -236,6 +250,11 @@ private:
     // 要不要多给一条「在新窗口中打开」。
     bool m_menuPrimaryIsContainerFile = false;
 
+    // 这次右键是"按住 Shift 点的"吗？
+    // 是的话，「删除」执行永久删除（不进回收站），菜单文字保持和系统一样不变。
+    // 由 ShowContextMenu 在拼菜单前填好。
+    bool m_menuPermanentDelete = false;
+
     // 查看 / 新建文件夹 + 新建 这两块公共片段
     void FillViewMenu(HMENU parentMenu);
     void FillNewFolderAndNewMenu(HMENU menu);
@@ -289,7 +308,10 @@ private:
 
     // 在另一个窗口里打开这个目录（「在新窗口中打开」/ 按住 Ctrl 双击）。
     // 已经有窗口停在这个目录时会把它拉到前台，不再开新窗口。
-    void OpenFolderInNewWindow(const std::wstring& folderPath);
+    //
+    // forceNewWindow = true：跳过上面那条"已有窗口就拉前台"的去重，一定开新窗口。
+    // Ctrl+N / Ctrl+T 用这个（用户要求：当前目录也照开一份新的）。
+    void OpenFolderInNewWindow(const std::wstring& folderPath, bool forceNewWindow = false);
 
     // Ctrl+双击：文件夹 → 在新窗口打开（返回 true 表示已处理）；
     // 文件/标题行等返回 false，交给默认的导航/打开逻辑
@@ -553,6 +575,10 @@ private:
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
     enum class FileOperationKind { None, Copy, Move, Delete };
     FileOperationKind                            m_lastOperation = FileOperationKind::None;
+
+    // 这次删除是不是"永久删除"（Shift+Delete / Shift+右键）。
+    // 永久删除不记撤销记录（文件已经进不了回收站，记了也还原不了）。
+    bool                                         m_lastOperationPermanent = false;
 
     // 复制/移动完成后的那次刷新，是否要把"新出现的项"选中（和资源管理器一致）
     bool                                         m_selectNewAfterEnum = false;

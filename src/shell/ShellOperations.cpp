@@ -387,6 +387,41 @@ HRESULT DeleteItems(const std::vector<std::wstring>& paths, HWND owner)
 }
 
 // ============================================================================
+// 永久删除（不进回收站，Shift+Delete / Shift+右键删除走这里）
+//
+// 和上面的 DeleteItems 只差两个标志位：
+//   · 不带 FOF_ALLOWUNDO      → 不进回收站，直接抹掉
+//   · 不带 FOF_NOCONFIRMATION → 让 Shell 自己弹"确实要永久删除这些项吗？"
+// 这样确认框就是系统那个，和资源管理器 Shift+Delete 的体验一致。
+// 注意：这条路径不可撤销，调用方要确保用户是一次明确的操作。
+// ============================================================================
+HRESULT DeleteItemsPermanently(const std::vector<std::wstring>& paths, HWND owner)
+{
+    wil::com_ptr<IFileOperation> operation;
+
+    HRESULT hr = CreateFileOperation(operation, 0, owner);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    wil::com_ptr<IShellItemArray> items;
+    hr = CreateItemArray(paths, items.put());
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    hr = operation->DeleteItems(items.get());
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    return operation->PerformOperations();
+}
+
+// ============================================================================
 // 按「绝对 PIDL」删除（压缩包容器里的项）
 //
 // 容器里的项没有真实磁盘路径，路径字符串交给 Shell 解析不出来。

@@ -151,6 +151,10 @@ public:
     // 拖完之后回调：效果是"移动"说明文件已经被搬走，需要主窗口刷新列表
     void SetDragCompletedCallback(DragCompletedCallback callback) { m_onDragCompleted = std::move(callback); }
 
+    // Ctrl+加号：三个固定列（修改日期/类型/大小）按"表头文字和内容里较宽的那个"收窄，
+    // 名称列继续吃剩余宽度（这样不会冒出横向滚动条）。只在详细信息视图下有作用。
+    void AutoFitColumns();
+
     // 拖出去之前的"换路径"回调。
     //
     // 压缩包内部的项是虚拟路径（C:\a\t.rar\sub\inner.txt），外部程序按这个路径

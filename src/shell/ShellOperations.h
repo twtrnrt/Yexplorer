@@ -40,6 +40,13 @@ HRESULT MoveItems(const std::vector<std::wstring>& sourcePaths,
 // 删除若干项（进回收站，可撤销）
 HRESULT DeleteItems(const std::vector<std::wstring>& paths, HWND owner);
 
+// 永久删除若干项（不进回收站，没法撤销）。
+//
+// 和 DeleteItems 只差标志位：不带 FOF_ALLOWUNDO（不进回收站），
+// 也不带 FOF_NOCONFIRMATION（让 Shell 自己弹"确实要永久删除这些项吗？"）。
+// 确认框就是系统那个，和资源管理器 Shift+Delete 的体验一致。
+HRESULT DeleteItemsPermanently(const std::vector<std::wstring>& paths, HWND owner);
+
 // ----------------------------------------------------------------------------
 // 按「绝对 PIDL」删除（压缩包容器内部的项专用）
 //

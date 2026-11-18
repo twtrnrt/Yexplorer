@@ -505,9 +505,49 @@ void FileListView::SetFixedColumnWidths(int time, int type, int size)
     LayoutColumns();   // 名称列跟着重新算（它吃剩下的宽度）
 }
 
-void FileListView::LayoutColumns()
+// ============================================================================
+// Ctrl+加号：列宽自适应内容（和资源管理器一样）
+//
+// 做法：三个固定列都交给系统算宽度（LVSCW_AUTOSIZE_USEHEADER 的语义是
+// "表头文字"和"这一列最宽的内容"取较大的那个），算完把结果读回来更新成员变量；
+// 名称列仍然是"吃剩余宽度"，所以不会出现横向滚动条。
+// 只在详细信息视图有意义，其它视图直接忽略。
+// ============================================================================
+void FileListView::AutoFitColumns()
 {
     if (m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    if (m_viewMode != ViewMode::Details)
+    {
+        return;
+    }
+
+    // 第 1~3 列：修改日期 / 类型 / 大小
+    for (int column = 1; column <= 3; ++column)
+    {
+        ListView_SetColumnWidth(m_hWnd, column, LVSCW_AUTOSIZE_USEHEADER);
+    }
+
+    // 把系统算出来的真实宽度同步进成员变量。
+    // 不同步的话，下次窗口一变 LayoutColumns 还会拿旧宽度排版，这次调整等于白调。
+    m_timeColumnWidth = static_cast<int>(ListView_GetColumnWidth(m_hWnd, 1));
+    m_typeColumnWidth = static_cast<int>(ListView_GetColumnWidth(m_hWnd, 2));
+    m_sizeColumnWidth = static_cast<int>(ListView_GetColumnWidth(m_hWnd, 3));
+
+    LayoutColumns();   // 名称列吃剩下的宽度
+
+    // 记进配置（效果和用户手动拖表头一样）
+    if (m_onColumnWidthChanged)
+    {
+        m_onColumnWidthChanged();
+    }
+}
+
+void FileListView::LayoutColumns()
+{    if (m_hWnd == nullptr)
     {
         return;
     }
