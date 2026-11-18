@@ -745,8 +745,8 @@ LRESULT NavigationPane::HandleNotify(LPARAM lParam)
                     rowBack.bottom = rowRect.bottom;
                     ::FillRect(customDraw->nmcd.hdc, &rowBack, ::GetSysColorBrush(COLOR_WINDOW));
 
-                    // 左右各留 10 像素空白
-                    int inset = ::MulDiv(10, ::GetDpiForWindow(m_hWnd), 96);
+                    // 暂时不内缩：线从导航栏最左画到最右，先看对称效果
+                    int inset = 0;
                     int lineY = (rowRect.top + rowRect.bottom) / 2;
 
                     RECT lineRect = {};
