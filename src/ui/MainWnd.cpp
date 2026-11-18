@@ -5340,6 +5340,16 @@ void MainWindow::PerformDropFromOutside(const std::vector<std::wstring>& sources
         {
             continue;
         }
+
+        // 目标就是源自己、或者目标在源的里面（拖文件夹到自己身上 / 自己肚子里）：
+        // 复制和移动在系统层面都做不了（IFileOperation 会报"不能把文件夹移到自身或子文件夹"
+        // 并弹它自己的错误框），所以这里再剔一遍。
+        // 建快捷方式（Alt）例外——在文件夹自己里面建一个指向自己的 .lnk 是合法的。
+        if (!createShortcut && shell::IsSelfOrDescendantPath(targetDirectory, source))
+        {
+            continue;
+        }
+
         usableSources.push_back(source);
     }
 

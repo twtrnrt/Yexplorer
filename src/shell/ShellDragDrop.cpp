@@ -599,6 +599,46 @@ bool IsSameDrive(const std::wstring& pathA, const std::wstring& pathB)
     return ::_wcsnicmp(pathA.c_str(), pathB.c_str(), 2) == 0;
 }
 
+bool IsSelfOrDescendantPath(const std::wstring& candidate, const std::wstring& ancestor)
+{
+    if (candidate.empty() || ancestor.empty())
+    {
+        return false;
+    }
+
+    // 统一去掉末尾的分隔符：否则 "C:\A\" 和 "C:\A" 会被当成两个不同的路径
+    auto trimmed = [](const std::wstring& path) -> std::wstring
+    {
+        std::wstring result = path;
+        while (!result.empty() && (result.back() == L'\\' || result.back() == L'/'))
+        {
+            result.pop_back();
+        }
+        return result;
+    };
+
+    const std::wstring candidatePath = trimmed(candidate);
+    const std::wstring ancestorPath  = trimmed(ancestor);
+
+    if (candidatePath.empty() || ancestorPath.empty())
+    {
+        return false;
+    }
+
+    // ① 就是它自己：拖文件夹放到它自己身上
+    if (::_wcsicmp(candidatePath.c_str(), ancestorPath.c_str()) == 0)
+    {
+        return true;
+    }
+
+    // ② 在它里面：祖先路径再加一个反斜杠，必须是候选路径的开头
+    //    （加反斜杠是为了避免 "C:\ABB" 被误判成在 "C:\AB" 里面）
+    std::wstring prefix = ancestorPath;
+    prefix.push_back(L'\\');
+
+    return ::_wcsnicmp(candidatePath.c_str(), prefix.c_str(), prefix.size()) == 0;
+}
+
 // ============================================================================
 // 拖出
 // ============================================================================
@@ -1398,6 +1438,14 @@ public:
         DWORD chosen = ComputeDropEffect(keyState, ExtractPreferredEffect(data),
                                         IsSameDrive(sources.front(), targetDirectory));
 
+        // 松手前再判一次（第二道保险）：落点是源自己、或者源里面的子目录时，
+        // 复制和移动都会让系统报错并弹出它自己的错误框，所以这里直接按"无效落点"处理。
+        // 建快捷方式（Alt）例外：在自己里面建一个指向自己的 .lnk 是合法的。
+        if (chosen != DROPEFFECT_LINK && IsDropIntoSelf(targetDirectory, sources))
+        {
+            chosen = DROPEFFECT_NONE;
+        }
+
         bool createShortcut = (chosen == DROPEFFECT_LINK);
 
         if (effect != nullptr)
@@ -1407,6 +1455,16 @@ public:
 
         // 提示条先收掉，再真正落地（不然它会在屏幕上多留一会儿）
         HideDropTip();
+
+        // 无效落点：什么都不执行。拖动阶段光标已经显示禁止了，这里是兜底，
+        // 防止将来有别的入口（左栏树、地址栏）绕过拖动阶段的判定。
+        if (chosen == DROPEFFECT_NONE)
+        {
+            Logger::Info(L"落点无效（目标是源自身或源的子目录），忽略");
+            NotifyFeedback(POINTL{ -1, -1 }, false);
+            m_sourcePaths.clear();
+            return S_OK;
+        }
 
         if (m_callbacks.PerformDrop)
         {
@@ -1723,6 +1781,24 @@ private:
         return m_callbacks.ResolveTargetDirectory(clientPoint);
     }
 
+    // 落点是不是「源自己」或「源里面的子目录」
+    //
+    // 任意一项命中就算命中：拖动光标和提示条只能表达一个状态，
+    // 这种情况下整体按"不可放置"处理（复制/移动都会失败并弹系统错误框）。
+    static bool IsDropIntoSelf(const std::wstring&              targetDirectory,
+                               const std::vector<std::wstring>& sources)
+    {
+        for (const std::wstring& source : sources)
+        {
+            if (IsSelfOrDescendantPath(targetDirectory, source))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     void UpdateEffect(DWORD keyState, POINTL pt, DWORD* effect)
     {
         std::wstring targetDirectory = ResolveDirectory(pt);
@@ -1740,8 +1816,19 @@ private:
         {
             // 我们自己的放置目标知道支持哪些效果，所以这里直接用算出来的结果，
             // 不再跟系统给的 allowed 求交（否则按 Alt 拖到自己左栏会被挡掉）
-            *effect = ComputeDropEffect(keyState, m_sourcePreferredEffect,
-                                       IsSameDrive(m_sourcePaths.front(), targetDirectory));
+            DWORD computed = ComputeDropEffect(keyState, m_sourcePreferredEffect,
+                                              IsSameDrive(m_sourcePaths.front(), targetDirectory));
+
+            // 落点是「源自己」或「源里面的子目录」时，复制和移动在系统层面都做不了
+            // （IFileOperation 会报错并弹它自己的错误框），所以拖动阶段就判死：
+            // 光标变禁止，提示条显示「⊘ 不能放到 此处」。
+            // 建快捷方式（Alt）放行 —— 在自己里面建一个指向自己的 .lnk 是合法的。
+            if (computed != DROPEFFECT_LINK && IsDropIntoSelf(targetDirectory, m_sourcePaths))
+            {
+                computed = DROPEFFECT_NONE;
+            }
+
+            *effect = computed;
         }
     }
 

@@ -2401,9 +2401,14 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             }
 
             // 从压缩包里解出来的只是临时副本，源不该被"移动"——只给复制
+            // （也不能给建快捷方式：链接会指向临时路径，临时目录一清就失效了）。
+            //
+            // 普通项给 复制 + 移动 + 快捷方式：按住 Alt 拖出去时，接收方（桌面、资源管理器、
+            // 我们自己的窗口）要能返回"链接"效果；这份清单里没有 LINK，系统就一律判为不允许，
+            // 表现为按 Alt 拖到哪都是禁止光标。
             const DWORD allowedEffects = extractedFromContainer
                                              ? DROPEFFECT_COPY
-                                             : (DROPEFFECT_COPY | DROPEFFECT_MOVE);
+                                             : (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
             const DWORD preferredEffect = extractedFromContainer ? DROPEFFECT_COPY : 0;
 
             DWORD effect = shell::DoDragFiles(dragPaths, m_hWnd, dragInfo->ptAction,

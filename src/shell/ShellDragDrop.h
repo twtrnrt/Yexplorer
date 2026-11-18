@@ -108,4 +108,17 @@ DWORD ComputeDropEffect(DWORD keyState, DWORD sourcePreferredEffect, bool sameDr
 // 判断两个路径是否在同一个盘（网络位置按"根路径"比较）
 bool IsSameDrive(const std::wstring& pathA, const std::wstring& pathB);
 
+// ----------------------------------------------------------------------------
+// 判断 candidate 是不是 ancestor 本身、或者就在 ancestor 里面（子孙目录）
+//
+// 为什么需要它：把文件夹 A 放到 A 自己身上、或者放进 A 里的子文件夹，都是无效落点——
+// 走到系统文件操作（IFileOperation）那一步会报「不能把文件夹移到自身/子文件夹」，
+// 然后系统自己弹一个错误框。所以复制/移动要在拖动阶段就判死。
+//
+// 注意：建快捷方式（Alt 拖动）不受此限，在自己里面建一个指向自己的 .lnk 是合法的。
+//
+// 大小写不敏感；末尾反斜杠忽略（"C:\A" 与 "C:\A\" 视为同一个路径）。
+// ----------------------------------------------------------------------------
+bool IsSelfOrDescendantPath(const std::wstring& candidate, const std::wstring& ancestor);
+
 } // namespace shell
