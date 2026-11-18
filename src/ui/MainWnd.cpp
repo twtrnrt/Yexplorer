@@ -59,6 +59,11 @@ static const UINT WM_APP_FOLDER_CHANGED = WM_APP + 3;
 // 自定义消息：后台「新建」项枚举完成（主线程收到后去预取图标）
 static const UINT WM_APP_SHELLNEW_READY = WM_APP + 4;
 
+// 自定义消息：粘贴「虚拟文件」（远程桌面复制过来的那种）时的进度
+//   wParam = 百分比 + 1（0 表示"来源没告诉大小"，只能显示第几项）
+//   lParam = MAKELONG(第几项, 一共几项)
+static const UINT WM_APP_PASTE_PROGRESS = WM_APP + 5;
+
 // 目录变化后的延迟刷新：短时间内的连续变化合并成一次刷新
 // （批量复制一万个文件会连发几千条通知，不合并的话界面会刷成幻灯片）
 static const UINT_PTR kFolderChangeTimerId  = 1;
@@ -73,6 +78,14 @@ static const size_t kMaxLogItems = 100;
 // 拼接 / 拆路径的小工具（实现放在下面，这里先声明：上面的操作完成处理要用到）
 static std::wstring JoinDirectoryFile(const std::wstring& directory, const std::wstring& fileName);
 static std::wstring FileNameOf(const std::wstring& path);
+
+// 粘贴「虚拟文件」（远程桌面那类）要用到的两个小工具（实现也在下面）
+//   MakeUniqueTargetPath     给清单里的相对路径算一个不重名的目标全路径
+//   CreateDirectoriesRecursive 把 "子目录\文件" 这种中间目录建出来
+static std::wstring MakeUniqueTargetPath(const std::wstring& directory,
+                                         const std::wstring& relativeName,
+                                         bool isFolder);
+static bool CreateDirectoriesRecursive(const std::wstring& directory);
 
 // ============================================================================
 // 内部辅助函数
@@ -426,7 +439,8 @@ static bool CompareEntries(const shell::ShellEntry& left,
 // ============================================================================
 
 MainWindow::MainWindow()
-    : m_operationRunning(std::make_shared<std::atomic<bool>>(false))
+    : m_operationRunning(std::make_shared<std::atomic<bool>>(false)),
+      m_pasteCancelRequested(std::make_shared<std::atomic<bool>>(false))
 {
     // 把排序规则交给列表控件：新建文件夹后要按这个规则插到正确位置
     m_fileListView.SetComparator([this](const shell::ShellEntry& left, const shell::ShellEntry& right)
@@ -610,6 +624,25 @@ int MainWindow::RunMessageLoop()
     MSG msg = {};
     while (::GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
+        // 正在粘贴「虚拟文件」（远程桌面那类）时，ESC 就是取消粘贴。
+        // 这种文件内容是从剪贴板现传的，取消后后台会把写了一半的文件删掉。
+        if (m_pasteInProgress.load() && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE)
+        {
+            if (m_pasteCancelRequested != nullptr)
+            {
+                m_pasteCancelRequested->store(true);
+            }
+
+            if (m_hStatusBar != nullptr)
+            {
+                m_pasteProgressText = L"正在取消粘贴…";
+                ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0,
+                               reinterpret_cast<LPARAM>(m_pasteProgressText.c_str()));
+            }
+
+            continue;   // 这条 ESC 就吃掉，不再往下面分发
+        }
+
         // 地址栏正在手工打字时，Ctrl+C / Ctrl+V 应该作用于输入框，
         // 不能被我下面的快捷键表抢走
         bool editingInAddressBar = false;
@@ -1470,6 +1503,20 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         HRESULT hr = static_cast<HRESULT>(static_cast<LONG_PTR>(wParam));
 
+        // ------------------------------------------------------------
+        // 如果是"粘贴虚拟文件"（远程桌面那类），先把进度显示收掉：
+        // 状态栏要退回"N 个项目"，进度文案和 ESC 取消都要复位
+        // ------------------------------------------------------------
+        const bool wasVirtualPaste = m_pasteInProgress.load();
+
+        if (wasVirtualPaste)
+        {
+            m_pasteInProgress.store(false);
+            m_pasteProgressText.clear();
+            m_pasteTotalItems = 0;
+            m_lastStatusText.clear();   // 让下面的 UpdateStatusBar 真的把计数写回去
+        }
+
         if (SUCCEEDED(hr))
         {
             // 剪切成功：剪贴板清空，避免再粘一次；其他情况剪贴板保持不变
@@ -1499,15 +1546,28 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                                                                                   : UndoKind::Copy;
                 record.beforePaths = m_operationPaths;
 
-                for (const std::wstring& source : m_operationPaths)
+                if (m_pendingVirtualResults != nullptr)
                 {
-                    // 操作完成后这一项在目标目录里；用户中途改名会导致找不到，
-                    // 撤销时那种项就静默跳过，不影响其它项
-                    record.afterPaths.push_back(
-                        JoinDirectoryFile(m_operationTargetDirectory, FileNameOf(source)));
+                    // 虚拟文件粘贴：源在远程电脑上，本机只有"粘到哪了"，
+                    // 所以撤销就是按这些目标路径删掉（UndoKind::Copy 的逻辑正好是这个）
+                    record.afterPaths = *m_pendingVirtualResults;
+                }
+                else
+                {
+                    for (const std::wstring& source : m_operationPaths)
+                    {
+                        // 操作完成后这一项在目标目录里；用户中途改名会导致找不到，
+                        // 撤销时那种项就静默跳过，不影响其它项
+                        record.afterPaths.push_back(
+                            JoinDirectoryFile(m_operationTargetDirectory, FileNameOf(source)));
+                    }
                 }
 
-                PushUndoRecord(record);
+                // 一项都没记下来就不压栈，免得出现"撤销 复制"点了却什么都不做
+                if (!record.afterPaths.empty())
+                {
+                    PushUndoRecord(record);
+                }
             }
         }
         else
@@ -1515,6 +1575,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             // 失败（含用户在进度框点取消）：保留剪贴板，用户可以直接重试
             Logger::Error(L"文件操作失败：" + Logger::FormatHresult(hr));
         }
+
+        // 虚拟文件粘贴：失败/取消/部分失败时给用户一句明确提示（日志里有细节）
+        if (wasVirtualPaste && m_pendingVirtualMessage != nullptr && !m_pendingVirtualMessage->empty())
+        {
+            ::MessageBoxW(m_hWnd, m_pendingVirtualMessage->c_str(), L"粘贴", MB_OK | MB_ICONWARNING);
+        }
+
+        m_pendingVirtualResults.reset();
+        m_pendingVirtualMessage.reset();
 
         m_clearClipboardWhenDone = false;
 
@@ -1595,6 +1664,27 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         m_menuIcons.PrefetchNewItems(items);
+        return 0;
+    }
+
+    // --------------------------------------------------------------
+    // 粘贴「虚拟文件」（远程桌面那类）的进度
+    //
+    //   wParam = 百分比 + 1（0 表示来源没告诉大小，只能显示第几项）
+    //   lParam = MAKELONG(第几项, 一共几项)
+    // --------------------------------------------------------------
+    case WM_APP_PASTE_PROGRESS:
+    {
+        const int    percent = (wParam == 0) ? -1 : static_cast<int>(wParam) - 1;
+        const size_t index   = static_cast<size_t>(LOWORD(lParam));
+        const size_t total   = static_cast<size_t>(HIWORD(lParam));
+
+        if (total > 0)
+        {
+            m_pasteTotalItems = total;
+        }
+
+        UpdatePasteProgressText(index, percent);
         return 0;
     }
 
@@ -2078,6 +2168,20 @@ void MainWindow::DoPaste()
 
     if (!shellclip::ReadFiles(paths, isCut, m_hWnd))
     {
+        // 真实路径一条都没读到：可能是远程桌面（3389）里复制过来的那种"虚拟文件"
+        // —— 文件还在远程电脑上，剪贴板里只有一份清单（名字/大小/属性）
+        // 和一条内容流，本来就没有路径。
+        //
+        // 先把剪贴板里到底有什么记下来：用户测试反馈日志时，
+        // 一眼就能分清是"剪贴板里根本没有文件清单"，还是"有清单但没处理成功"
+        Logger::Info(std::wstring(L"粘贴：剪贴板里没有真实路径（CF_HDROP），虚拟文件清单") +
+                     (shellclip::HasVirtualFiles() ? L"：有" : L"：没有"));
+
+        if (DoPasteVirtualFiles(targetDirectory))
+        {
+            return;
+        }
+
         Logger::Warn(L"剪贴板里没有可粘贴的文件");
         return;
     }
@@ -2100,6 +2204,257 @@ void MainWindow::DoPaste()
                ? shellops::MoveItems(paths, targetDirectory, owner)
                : shellops::CopyItems(paths, targetDirectory, owner);
     });
+}
+
+// ============================================================================
+// 粘贴「虚拟文件」：远程桌面（3389）里复制过来的那种
+//
+// 这类文件在本机没有路径。剪贴板里给的是：
+//    FileGroupDescriptorW —— 一张清单（名字、大小、属性、修改时间）
+//    FileContents         —— 内容流，要第几个就现传第几个
+// 资源管理器认这一套，所以能粘；我们原来只读 CF_HDROP（真实路径），所以粘不了。
+//
+// 为什么不能像普通粘贴那样交给 IFileOperation：
+//     IFileOperation 只接受"路径"，这里根本没有路径，内容是边传边写的，
+//     只能自己跑线程 + 自己写盘 + 自己做进度。
+//
+// 流程：
+//    界面线程：确认是这类格式 → 占上"文件操作中"标志 → 状态栏切成"正在粘贴…"
+//    后台线程：逐项算不重名的目标名 → 建中间目录 → 从剪贴板取内容写盘 → 补属性/时间
+//    进度：每写一块发 WM_APP_PASTE_PROGRESS，界面线程刷新状态栏
+//    取消：界面线程收到 ESC 置 m_pasteCancelRequested，后台看到就删掉写了一半的文件
+//    完成：WM_APP_OPERATION_DONE（原来的通用收尾：刷新列表 + 记撤销）
+// ============================================================================
+bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
+{
+    // 不是这类格式（比如剪贴板里就是一段文字）就什么都不做，让调用方走原来的日志
+    if (!shellclip::HasVirtualFiles())
+    {
+        return false;
+    }
+
+    // 同一时间只允许一个文件操作。通用那条路（RunFileOperationAsync）也有同样的检查，
+    // 这里提前拦一下，免得把"剪贴板里没有文件"这种误导日志写进去
+    if (m_operationRunning != nullptr && m_operationRunning->load())
+    {
+        Logger::Warn(L"上一个文件操作还没结束，本次粘贴忽略");
+        return true;
+    }
+
+    // 上一次的取消标志复位
+    if (m_pasteCancelRequested != nullptr)
+    {
+        m_pasteCancelRequested->store(false);
+    }
+
+    // 撤销记录要用的"操作后在哪"，由后台线程填；先挂一个空的
+    m_pendingVirtualResults     = std::make_shared<std::vector<std::wstring>>();
+    m_pendingVirtualMessage     = std::make_shared<std::wstring>();
+
+    // 远程剪贴板不传"剪切"语义（源文件还在远程电脑上），一律按复制处理，
+    // 也不清空剪贴板（用户可能还想粘第二次）
+    m_lastOperation            = FileOperationKind::Copy;
+    m_lastOperationPermanent   = false;
+    m_clearClipboardWhenDone   = false;
+    m_operationPaths.clear();                       // 没有源路径可记
+    m_operationTargetDirectory = targetDirectory;
+
+    // 状态栏切成进度显示，并把 ESC 取消打开
+    m_pasteInProgress.store(true);
+    m_pasteTotalItems   = 0;
+    m_pasteProgressText = L"正在粘贴…";
+    m_lastStatusText.clear();   // 让收尾时能立刻把"N 个项目"写回去
+    ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(m_pasteProgressText.c_str()));
+
+    HWND                                      notifyWindow = m_hWnd;
+    const std::wstring                        target       = targetDirectory;
+    std::shared_ptr<std::atomic<bool>>        cancelFlag   = m_pasteCancelRequested;
+    std::shared_ptr<std::vector<std::wstring>> results     = m_pendingVirtualResults;
+    std::shared_ptr<std::wstring>             messageOut   = m_pendingVirtualMessage;
+
+    Logger::Info(L"开始粘贴剪贴板里的虚拟文件（远程桌面那类）到 " + target);
+
+    RunFileOperationAsync([target, notifyWindow, cancelFlag, results, messageOut]() -> HRESULT
+    {
+        // ------------------------------------------------------------
+        // 以下都在后台线程上跑。
+        // RunFileOperationAsync 已经给线程做过 CoInitializeEx(STA)，
+        // OleGetClipboard / IDataObject 正需要这个。
+        // ------------------------------------------------------------
+        shellclip::VirtualFileSession session;
+
+        if (!session.Open())
+        {
+            Logger::Error(L"粘贴虚拟文件：打开剪贴板失败：" + session.LastError());
+
+            if (messageOut != nullptr)
+            {
+                *messageOut = L"读不到剪贴板里的文件：" + session.LastError();
+            }
+
+            return E_FAIL;
+        }
+
+        const size_t total = session.Count();
+        Logger::Info(L"剪贴板虚拟文件清单：" + std::to_wstring(total) + L" 项");
+
+        size_t done      = 0;   // 成功写出来的项数
+        size_t failures  = 0;   // 失败的项数
+        bool   cancelled = false;
+
+        for (size_t i = 0; i < total; ++i)
+        {
+            if (cancelFlag != nullptr && cancelFlag->load())
+            {
+                cancelled = true;
+                break;
+            }
+
+            const shellclip::VirtualFileInfo& info = session.Item(i);
+            const bool isFolder = info.hasAttributes &&
+                                  (info.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            // 进度消息的两个字段。
+            // 单独取出来是因为 MAKELONG 是宏，参数里直接写带逗号的表达式会被当成两个参数。
+            const WORD progressIndex = static_cast<WORD>(std::min<size_t>(i + 1, 0xFFFF));
+            const WORD progressTotal = static_cast<WORD>(std::min<size_t>(total, 0xFFFF));
+
+            // 目标路径：中间目录照清单里的相对路径建，只有最后一段要防重名
+            const std::wstring destination = MakeUniqueTargetPath(target, info.name, isFolder);
+
+            // 逐项记一条：用户从日志就能看出清单里是什么、写到哪、多大
+            Logger::Info(L"粘贴清单第 " + std::to_wstring(i + 1) + L"/" + std::to_wstring(total) +
+                         L" 项：「" + info.name + L"」" +
+                         (isFolder ? L"（文件夹）"
+                                   : (info.hasSize ? L"（" + std::to_wstring(info.size) + L" 字节）"
+                                                   : L"（大小未知）")));
+
+            if (destination.empty())
+            {
+                ++failures;
+                Logger::Warn(L"粘贴「" + info.name + L"」：生成目标路径失败");
+                continue;
+            }
+
+            // "子目录\文件" 这种清单项：先把中间目录建出来
+            const std::wstring parent = NavigationHistory::ParentPath(destination);
+            if (!parent.empty() && !CreateDirectoriesRecursive(parent))
+            {
+                ++failures;
+                Logger::Warn(L"粘贴「" + info.name + L"」：建目录失败 " + parent);
+                continue;
+            }
+
+            // 这一项开始：报 0%，界面显示"第 i+1/N 项"
+            ::PostMessageW(notifyWindow, WM_APP_PASTE_PROGRESS,
+                           static_cast<WPARAM>(1),
+                           static_cast<LPARAM>(MAKELONG(progressIndex, progressTotal)));
+
+            std::wstring error;
+
+            const bool ok = session.Extract(i, destination,
+                [&](int percent) -> bool
+                {
+                    // 用户按了 ESC：让 Extract 把半截文件删掉
+                    if (cancelFlag != nullptr && cancelFlag->load())
+                    {
+                        return false;
+                    }
+
+                    ::PostMessageW(notifyWindow, WM_APP_PASTE_PROGRESS,
+                                   static_cast<WPARAM>(percent < 0 ? 0 : percent + 1),
+                                   static_cast<LPARAM>(MAKELONG(progressIndex, progressTotal)));
+                    return true;
+                },
+                error);
+
+            if (ok)
+            {
+                results->push_back(destination);
+                ++done;
+                Logger::Info(L"  已写入：" + destination);
+                continue;
+            }
+
+            if (error == L"已取消")
+            {
+                cancelled = true;
+                break;
+            }
+
+            ++failures;
+            Logger::Warn(L"粘贴「" + info.name + L"」失败：" + error);
+        }
+
+        Logger::Info(L"粘贴虚拟文件结束：成功 " + std::to_wstring(done) + L" 项，失败 " +
+                     std::to_wstring(failures) + L" 项" + (cancelled ? L"（已取消）" : L""));
+
+        // 给界面留一句提示（一项都没成功 / 有失败项 / 被取消 才需要弹窗）
+        if (messageOut != nullptr)
+        {
+            if (cancelled)
+            {
+                *messageOut = L"已取消粘贴，没有粘完的文件已经删掉了。";
+            }
+            else if (failures > 0)
+            {
+                *messageOut = L"有 " + std::to_wstring(failures) +
+                              L" 项没能粘贴成功（成功的 "
+                              + std::to_wstring(done) + L" 项已经在目标目录里）。";
+            }
+            else if (done == 0)
+            {
+                *messageOut = L"剪贴板里没有可以粘出来的文件。";
+            }
+        }
+
+        // 一项都没成功：算失败，让通用收尾别刷新、别记撤销
+        if (done == 0)
+        {
+            return E_FAIL;
+        }
+
+        // 有失败或取消：按"部分成功"处理（SUCCEEDED 为真，界面照样刷新）
+        return (failures > 0 || cancelled) ? S_FALSE : S_OK;
+    });
+
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// 状态栏刷新粘贴进度（界面线程）
+//   index   第几项（从 1 开始）
+//   percent 当前这一项的百分比；-1 表示来源没告诉大小，只知道"在传"
+// ----------------------------------------------------------------------------
+void MainWindow::UpdatePasteProgressText(size_t index, int percent)
+{
+    if (m_hStatusBar == nullptr)
+    {
+        return;
+    }
+
+    std::wstring text = L"正在粘贴";
+
+    if (m_pasteTotalItems > 0 && index > 0)
+    {
+        text += L"：第 " + std::to_wstring(index) + L"/" + std::to_wstring(m_pasteTotalItems) + L" 项";
+    }
+
+    if (percent >= 0)
+    {
+        text += L" " + std::to_wstring(percent) + L"%";
+    }
+
+    text += L"（按 ESC 取消）";
+
+    // 内容没变就不重设，避免状态栏反复重绘看着像闪
+    if (text == m_pasteProgressText)
+    {
+        return;
+    }
+
+    m_pasteProgressText = text;
+    ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(m_pasteProgressText.c_str()));
 }
 
 // ----------------------------------------------------------------------------
@@ -3226,6 +3581,110 @@ static std::wstring MakeLongPath(const std::wstring& path)
     }
 
     return path;   // 相对路径之类，原样交给系统
+}
+
+// ---------------------------------------------------------------------------
+// 逐级创建目录（"子目录\文件" 这种剪贴板清单项要用）
+//
+// 用 SHCreateDirectoryEx 一步到位：它会把中间缺的层级都建出来，
+// 已经存在也返回成功（ERROR_ALREADY_EXISTS），不用自己切段循环。
+// ---------------------------------------------------------------------------
+static bool CreateDirectoriesRecursive(const std::wstring& directory)
+{
+    if (directory.empty())
+    {
+        return false;
+    }
+
+    const DWORD result = static_cast<DWORD>(
+        ::SHCreateDirectoryExW(nullptr, MakeLongPath(directory).c_str(), nullptr));
+
+    return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS || result == ERROR_ALREADY_EXISTS;
+}
+
+// ---------------------------------------------------------------------------
+// 给"清单里的相对路径"算一个不重名的目标全路径
+//
+//   directory    目标目录
+//   relativeName 清单里的相对路径（可能带 "子目录\文件"，已清过非法字符）
+//   isFolder     是不是目录项（决定" - 副本"加在扩展名前还是末尾）
+//
+// 规则和资源管理器一致：重名就 "名字 - 副本"、"名字 - 副本 (2)"……
+// 只有最后一段参与防重名，中间目录照原样复用（同一个压缩/远程文件夹里的
+// 多个文件不该各自生成一套目录）。
+// ---------------------------------------------------------------------------
+static std::wstring MakeUniqueTargetPath(const std::wstring& directory,
+                                         const std::wstring& relativeName,
+                                         bool isFolder)
+{
+    if (directory.empty() || relativeName.empty())
+    {
+        return std::wstring();
+    }
+
+    // 拆出"中间目录"和"最后一段"
+    std::wstring folderPart;    // 以反斜杠结尾；没有中间目录就是空
+    std::wstring leafName = relativeName;
+
+    const size_t lastSlash = relativeName.find_last_of(L'\\');
+    if (lastSlash != std::wstring::npos)
+    {
+        folderPart = relativeName.substr(0, lastSlash + 1);
+        leafName   = relativeName.substr(lastSlash + 1);
+    }
+
+    if (leafName.empty())
+    {
+        return std::wstring();
+    }
+
+    // 拆扩展名（"." 在开头的不算扩展名，和系统规则一致）
+    std::wstring baseName = leafName;
+    std::wstring extension;
+
+    if (!isFolder)
+    {
+        const size_t lastDot = leafName.find_last_of(L'.');
+        if (lastDot != std::wstring::npos && lastDot > 0)
+        {
+            baseName  = leafName.substr(0, lastDot);
+            extension = leafName.substr(lastDot);
+        }
+    }
+
+    // 先试原名：不存在就直接用
+    const std::wstring firstChoice = JoinDirectoryFile(directory, relativeName);
+
+    if (::GetFileAttributesW(MakeLongPath(firstChoice).c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        return firstChoice;
+    }
+
+    // 同名存在：按 " - 副本" 往后排（最多试 1000 次，和 shellops::MakeCopyName 一致）
+    for (int index = 1; index <= 1000; ++index)
+    {
+        std::wstring candidateName;
+
+        if (index == 1)
+        {
+            candidateName = baseName + L" - 副本" + extension;
+        }
+        else
+        {
+            candidateName = baseName + L" - 副本 (" + std::to_wstring(index) + L")" + extension;
+        }
+
+        const std::wstring candidate =
+            JoinDirectoryFile(directory, folderPart + candidateName);
+
+        if (::GetFileAttributesW(MakeLongPath(candidate).c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            return candidate;
+        }
+    }
+
+    // 一千个副本都撞上了（基本不可能）：返回空，让调用方记为失败，别乱覆盖
+    return std::wstring();
 }
 
 // ---------------------------------------------------------------------------
@@ -7096,6 +7555,21 @@ void MainWindow::UpdateStatusBar()
 {
     if (m_hStatusBar == nullptr)
     {
+        return;
+    }
+
+    // 正在粘贴虚拟文件（远程桌面那类）：状态栏让位给进度（第 i/N 项 + 百分比）。
+    // 进度文本由 UpdatePasteProgressText / 消息处理直接写进去，这里只负责别把它覆盖掉。
+    if (m_pasteInProgress.load())
+    {
+        // 进度结束后要能立刻把"N 个项目"写回去，所以这里把缓存清掉
+        m_lastStatusText.clear();
+
+        if (!m_pasteProgressText.empty())
+        {
+            ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0,
+                           reinterpret_cast<LPARAM>(m_pasteProgressText.c_str()));
+        }
         return;
     }
 

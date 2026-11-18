@@ -191,7 +191,7 @@ private:
     void DoCopy();          // Ctrl+C：记住选中的路径
     void DoCopyPath();      // Ctrl+Shift+C / 右键「复制文件路径」：把路径文字放进剪贴板
     void DoCut();           // Ctrl+X：记住选中的路径，粘贴时移动
-    void DoPaste();         // Ctrl+V：复制/移动到家目录
+    void DoPaste();         // Ctrl+V：复制/移动到家目录（含远程桌面那类虚拟文件）
     // Delete：删到回收站；permanent = true 时永久删除（Shell 会弹"确实要永久删除"确认框）
     void DoDelete(bool permanent = false);
 
@@ -597,6 +597,37 @@ private:
     // ---- 后台文件操作状态（复制大文件时界面不卡住）----
     std::thread                                  m_operationThread;
     std::shared_ptr<std::atomic<bool>>           m_operationRunning;
+
+    // ---- 粘贴「虚拟文件」（远程桌面 / 邮件附件那类只能现场取内容的剪贴板）----
+    //
+    // 这种文件没有真实路径，内容是边从剪贴板取边写盘的，交给 IFileOperation 做不了，
+    // 只能自己跑后台线程 + 自己显示进度。
+    //
+    //   m_pasteInProgress        —— 正在粘这类文件（状态栏改显示进度，ESC 可取消）
+    //   m_pasteCancelRequested   —— 用户按了 ESC，后台线程看到就删掉写了一半的文件
+    //   m_pasteProgressText      —— 状态栏正在显示的进度文案（只在界面线程读写）
+    //   m_pasteTotalItems        —— 本批一共几项（显示"第 i/N 项"用）
+    //   m_virtualPasteResultPaths —— 后台线程最终写出的真实路径（撤销记录要用）
+    std::atomic<bool>                            m_pasteInProgress{ false };
+
+    // 取消标志用 shared_ptr 交给后台线程：窗口关闭/析构时线程可能还在跑，
+    // 用共享所有权就不会读到已经销毁的成员
+    std::shared_ptr<std::atomic<bool>>           m_pasteCancelRequested;
+
+    std::wstring                                 m_pasteProgressText;
+    size_t                                       m_pasteTotalItems = 0;
+
+    // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
+    std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
+
+    // 后台线程给界面留的一句话提示（取消 / 有失败项时弹窗用）
+    std::shared_ptr<std::wstring>                m_pendingVirtualMessage;
+
+    // 粘贴虚拟文件（远程桌面那类）。剪贴板里没有这类东西时返回 false。
+    bool DoPasteVirtualFiles(const std::wstring& targetDirectory);
+
+    // 状态栏按"第 i/N 项 + 百分比"更新粘贴进度（界面线程调用）
+    void UpdatePasteProgressText(size_t index, int percent);
 
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
     enum class FileOperationKind { None, Copy, Move, Delete };
