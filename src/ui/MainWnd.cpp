@@ -4275,27 +4275,32 @@ void MainWindow::ShowDragProgress(const std::wstring& text, int percent)
 
     // ---- 第一次用的时候创建三个控件 ----
     //
-    // 面板用 STATIC + SS_WHITERECT（一个白底方块），上面压一行文字和一条进度条。
-    // 都做成主窗口的子窗口，跟着主窗口走，不用额外管理生命周期。
+    // 面板用 STATIC + SS_WHITERECT（一个白底方块），文字和进度条做成它的子窗口。
+    //
+    // 【为什么文字/进度条必须是面板的子窗口，而不是主窗口的子窗口】
+    //   解压这段是同步循环，主窗口在解压期间不处理任何消息（没有消息泵），
+    //   所以主窗口的子窗口永远等不到 WM_PAINT，画不出来。
+    //   只有把它们挂在面板下面，才能靠一次 RedrawWindow(RDW_ALLCHILDREN)
+    //   把"白底 + 文字 + 进度条"三块一起强制画出来。
+    //   （之前的写法三块都挂在主窗口上，结果屏幕上只有一块空白的白底。）
     if (m_dragProgressPanel == nullptr)
     {
         HINSTANCE instance = ::GetModuleHandleW(nullptr);
 
-        // 注意每个控件都要带 WS_VISIBLE：WS_CHILD 窗口不给这个样式就是"建好即隐藏"，
-        // 只对面板 ShowWindow 的话，里面的文字和进度条永远看不见。
         m_dragProgressPanel = ::CreateWindowExW(0, L"STATIC", L"",
                                                 WS_CHILD | WS_VISIBLE | WS_BORDER | SS_WHITERECT,
                                                 left, top, panelWidth, panelHeight,
                                                 m_hWnd, nullptr, instance, nullptr);
 
+        // 坐标相对面板（也就是面板内部左上角）
         m_dragProgressText = ::CreateWindowExW(0, L"STATIC", text.c_str(),
-                                               WS_CHILD | WS_VISIBLE | SS_CENTER,
-                                               left + 12, top + 20, panelWidth - 24, 22,
-                                               m_hWnd, nullptr, instance, nullptr);
+                                               WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX,
+                                               12, 20, panelWidth - 24, 22,
+                                               m_dragProgressPanel, nullptr, instance, nullptr);
 
         m_dragProgressBar = ::CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE,
-                                              left + 12, top + 54, panelWidth - 24, 18,
-                                              m_hWnd, nullptr, instance, nullptr);
+                                              12, 54, panelWidth - 24, 18,
+                                              m_dragProgressPanel, nullptr, instance, nullptr);
 
         if (m_dragProgressBar != nullptr)
         {
@@ -4323,11 +4328,21 @@ void MainWindow::ShowDragProgress(const std::wstring& text, int percent)
         ::SendMessageW(m_dragProgressBar, PBM_SETPOS, static_cast<WPARAM>(percent), 0);
     }
 
-    // 拖动前这里是同步循环，没有消息泵：必须自己把这三块强制画出来，
-    // 否则窗口要到解压结束（销毁）才会真的出现在屏幕上。
+    // 同步循环里没有消息泵：这三块必须自己强制画出来，
+    // 否则要等到解压结束（控件销毁）才会真的出现在屏幕上。
     if (m_dragProgressPanel != nullptr)
     {
         ::ShowWindow(m_dragProgressPanel, SW_SHOW);
+
+        for (HWND control : { m_dragProgressText, m_dragProgressBar })
+        {
+            if (control != nullptr)
+            {
+                ::ShowWindow(control, SW_SHOW);
+            }
+        }
+
+        // RDW_ALLCHILDREN 会把面板下面的文字和进度条一起重画
         ::RedrawWindow(m_dragProgressPanel, nullptr, nullptr,
                        RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
