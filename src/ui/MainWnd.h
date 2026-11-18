@@ -617,6 +617,18 @@ private:
     std::wstring                                 m_pasteProgressText;
     size_t                                       m_pasteTotalItems = 0;
 
+    // ---- 状态栏那条"字符进度条"要用的数据 ----
+    //
+    // 做法：一格代表相同的字节量，所以大文件占的格多、走得慢，小文件占的格少、
+    // 走得快（视觉上就是"一个文件一格，文件越大格子越宽"）。
+    //
+    //   m_pasteItemSizes   —— 清单每一项的字节数（0 = 文件夹或来源没给大小）
+    //   m_pasteDoneBytes   —— 已经写完的总字节（后台线程累加，界面线程读）
+    //   m_pasteTotalBytes  —— 清单总字节（界面线程算好缓存；0 表示一个大小都没有）
+    std::shared_ptr<std::vector<LONGLONG>>       m_pasteItemSizes;
+    std::shared_ptr<std::atomic<LONGLONG>>       m_pasteDoneBytes;
+    LONGLONG                                     m_pasteTotalBytes = 0;
+
     // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
     std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
 
@@ -626,8 +638,11 @@ private:
     // 粘贴虚拟文件（远程桌面那类）。剪贴板里没有这类东西时返回 false。
     bool DoPasteVirtualFiles(const std::wstring& targetDirectory);
 
-    // 状态栏按"第 i/N 项 + 百分比"更新粘贴进度（界面线程调用）
+    // 状态栏按"第 i/N 项 + 字符进度条"更新粘贴进度（界面线程调用）
     void UpdatePasteProgressText(size_t index, int percent);
+
+    // 状态栏里这条字符进度条能放几格（按状态栏实际宽度和字体算，随 DPI 自适应）
+    int PasteProgressBarColumns();
 
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
     enum class FileOperationKind { None, Copy, Move, Delete };
