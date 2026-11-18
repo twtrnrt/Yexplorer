@@ -886,7 +886,9 @@ struct DropTipContent
 
 DropTipContent g_dropTipContent;       // 当前要显示的内容（同一时刻只有一个拖动，全局够用）
 HFONT         g_dropTipFont = nullptr; // 系统界面字体（Win11 上是微软雅黑 UI）
-HFONT         g_dropTipSymbolFont = nullptr;   // 符号字体（Segoe UI Symbol）
+
+// 符号字体按符号各存一份：三个符号的字形比例差别很大，放大倍数不一样，不能共用一个字体
+HFONT         g_dropTipSymbolFonts[4] = { nullptr, nullptr, nullptr, nullptr };
 
 // 系统界面字体，取一次就缓存
 HFONT DropTipFont()
@@ -905,37 +907,55 @@ HFONT DropTipFont()
     return g_dropTipFont;
 }
 
-// 自己画符号，保证一定看得见（不依赖 Segoe UI Symbol / Emoji 里有没有对应码位）
-//   1 = 加号（复制 / 添加），2 = 箭头（移动 / 链接），3 = 红圈斜杠（禁止）
 // 符号字体：这几个符号都用 Segoe UI Symbol 里的现成字形
 // （Windows 自带，Win7 起就有；比手画干净——字体字形是设计好的矢量，有抗锯齿）
 //
-// 实测覆盖（都用 GetGlyphIndices 一样的方式在渲染图上确认过）：
-//   ✚ U+271A 粗十字、⬉ U+2B09 斜箭头、🚫 U+1F6AB 圆圈斜杠 —— Segoe UI Symbol 全都有
-HFONT DropTipSymbolFont()
+// 三个字形在 em 框里占的位置差别很大，所以放大倍数分开定（见 DropTipSymbolScale）：
+//   +  U+002B  普通加号：笔画最细、占位最小，放大到两倍才显眼
+//   ⬉  U+2B09  斜箭头：字形本身占位偏小，放大一点补偿
+//   ⊘  U+2298  圆圈斜杠：圆圈只占 em 框的六成多，放大到 1.7 倍才跟别的齐
+double DropTipSymbolScale(int symbol)
 {
-    if (g_dropTipSymbolFont == nullptr)
+    switch (symbol)
+    {
+    case 1:  return 2.0;   // 复制 / 添加
+    case 2:  return 1.5;   // 移动到
+    case 3:  return 1.7;   // 禁止
+    default: return 1.3;
+    }
+}
+
+HFONT DropTipSymbolFont(int symbol)
+{
+    if (symbol < 1 || symbol > 3)
+    {
+        return nullptr;
+    }
+
+    if (g_dropTipSymbolFonts[symbol] == nullptr)
     {
         NONCLIENTMETRICSW metrics = {};
         metrics.cbSize = sizeof(metrics);
 
-        int height = 16;   // 万一取不到系统字体，就按 16 像素
+        int baseHeight = 16;   // 万一取不到系统字体，就按 16 像素
 
         if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) &&
             metrics.lfMessageFont.lfHeight != 0)
         {
-            // lfHeight 是负数（表示字高）。符号比正文放大 30%：
-            // 这几个字形本身的笔画细、占位小，按正文高度画会显得像一道细杠，看不清。
-            height = metrics.lfMessageFont.lfHeight * 13 / 10;
+            // lfHeight 是负数（表示字高），取反变成正数
+            baseHeight = -metrics.lfMessageFont.lfHeight;
         }
 
-        g_dropTipSymbolFont = ::CreateFontW(
+        const double scale = DropTipSymbolScale(symbol);
+        const int height = -static_cast<int>(baseHeight * scale + 0.5);   // 负值 = 字高
+
+        g_dropTipSymbolFonts[symbol] = ::CreateFontW(
             height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
     }
 
-    return g_dropTipSymbolFont;
+    return g_dropTipSymbolFonts[symbol];
 }
 
 // 状态 → 符号字符
@@ -943,13 +963,11 @@ std::wstring DropTipSymbolText(int symbol)
 {
     switch (symbol)
     {
-    case 1:  return L"\u271A";    // ✚ 复制 / 添加（粗十字）
-    case 2:  return L"\u2B05";    // ⬅ 移动到（粗左箭头）
-                                  //     原来用的是 ⬉ U+2B09，字形本身笔画很细、
-                                  //     箭头尖只有一小撮，画出来像一道斜杠，所以换掉
-    case 3:  return L"\u2298";    // ⊘ 禁止
-                                  //     原来用的是 🚫 U+1F6AB，但它在 BMP 之外（代理对），
-                                  //     GDI 的 DrawText 渲染代理对会出乱码，所以换成 BMP 内的 ⊘
+    case 1:  return L"+";          // 普通加号（复制 / 添加）
+    case 2:  return L"\u2B09";     // ⬉ 斜箭头（移动到）
+    case 3:  return L"\u2298";     // ⊘ 圆圈斜杠（禁止）
+                                   //   原来用 🚫 U+1F6AB，但它在 BMP 之外（UI16 里是代理对），
+                                   //   GDI 的 DrawText 渲染代理对会出乱码，所以用 BMP 内的 ⊘
     default: return std::wstring();
     }
 }
@@ -1024,7 +1042,7 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (hasSymbol)
         {
             const std::wstring symbolText = DropTipSymbolText(content.symbol);
-            HFONT   symbolFont    = DropTipSymbolFont();
+            HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
             HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
 
             ::GetTextExtentPoint32W(dc, symbolText.c_str(),
@@ -1055,7 +1073,7 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (hasSymbol)
         {
             const std::wstring symbolText = DropTipSymbolText(content.symbol);
-            HFONT   symbolFont    = DropTipSymbolFont();
+            HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
             HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
 
             RECT rect = { x, client.top, x + symbolSize.cx + 2, client.bottom };
@@ -1391,7 +1409,7 @@ private:
         if (content.symbol != 0)
         {
             const std::wstring symbolText = DropTipSymbolText(content.symbol);
-            HFONT   symbolFont    = DropTipSymbolFont();
+            HFONT   symbolFont    = DropTipSymbolFont(content.symbol);
             HGDIOBJ oldSymbolFont = (symbolFont != nullptr) ? ::SelectObject(dc, symbolFont) : nullptr;
 
             ::GetTextExtentPoint32W(dc, symbolText.c_str(),
@@ -1418,7 +1436,16 @@ private:
 
         const int width  = symbolWidth + symbolGap + actionSize.cx + wordGap + targetSize.cx +
                            kDropTipPaddingX * 2;
-        const int height = (actionSize.cy > 0 ? actionSize.cy : targetSize.cy) + kDropTipPaddingY * 2;
+
+        // 提示条高度要装得下符号：复制的加号是按两倍字号画的，比文字高不少，
+        // 只按文字高度算的话，加号上下会被窗口边界截掉。
+        int contentHeight = (actionSize.cy > 0 ? actionSize.cy : targetSize.cy);
+        if (symbolSize.cy > contentHeight)
+        {
+            contentHeight = symbolSize.cy;
+        }
+
+        const int height = contentHeight + kDropTipPaddingY * 2;
 
         ::SetWindowPos(m_tipWindow, HWND_TOPMOST, m_tipX, m_tipY, width, height,
                        SWP_NOACTIVATE | SWP_SHOWWINDOW);
