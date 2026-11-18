@@ -853,8 +853,39 @@ constexpr int kDropTipPaddingY = 6;    // 上下留白
 constexpr int kDropTipOffsetX  = 16;   // 相对光标的偏移（系统差不多也是这个位置）
 constexpr int kDropTipOffsetY  = 22;
 
-std::wstring g_dropTipText;            // 当前要显示的字（同一时刻只有一个拖动，用全局变量够用）
-HFONT        g_dropTipFont = nullptr;  // 系统界面字体（Win11 上是微软雅黑 UI）
+// ---- 配色（用户定的）----
+constexpr COLORREF kDropTipBackground = RGB(0xF9, 0xF9, 0xF9);   // 底色
+constexpr COLORREF kDropTipBorder     = RGB(0xED, 0xED, 0xED);   // 边框
+constexpr COLORREF kDropTipAction     = RGB(0x00, 0x33, 0xCC);   // 「复制到 / 移动到 / 添加到」
+constexpr COLORREF kDropTipTarget     = RGB(0x00, 0x00, 0x66);   // 目标文件夹名
+constexpr COLORREF kDropTipForbidden  = RGB(0xCC, 0x00, 0x00);   // 「不能放到此处」
+
+// ---- 符号（自己画，不依赖字体里有没有这个字符）----
+constexpr int kDropTipSymbolSize = 13;   // 符号占的方框大小
+constexpr int kDropTipSymbolGap  = 5;    // 符号和文字之间留的缝
+constexpr int kDropTipWordGap    = 4;    // 动作词和目标名之间留的缝
+constexpr int kDropTipMaxTarget  = 320;  // 目标名最长画这么宽，再长就省略号
+
+// 提示条上要显示的内容：符号 + 动作词 + 目标名，三种颜色分开画
+struct DropTipContent
+{
+    // 0 = 不画符号，1 = 加号（复制 / 添加），2 = 箭头（移动 / 链接），3 = 红圈斜杠（禁止）
+    int          symbol = 0;
+
+    std::wstring actionText;      // 「复制到」「移动到」「链接到」「添加到」
+    std::wstring targetText;      // 目标文件夹名（禁止时是「此处」）
+    bool         forbidden = false;   // 禁止样式：符号和字都用红
+
+    // 给"内容没变就别重画"用的签名
+    std::wstring Signature() const
+    {
+        return actionText + L"|" + targetText + L"|" +
+               std::to_wstring(symbol) + (forbidden ? L"|F" : L"");
+    }
+};
+
+DropTipContent g_dropTipContent;       // 当前要显示的内容（同一时刻只有一个拖动，全局够用）
+HFONT         g_dropTipFont = nullptr; // 系统界面字体（Win11 上是微软雅黑 UI）
 
 // 系统界面字体，取一次就缓存
 HFONT DropTipFont()
@@ -873,6 +904,58 @@ HFONT DropTipFont()
     return g_dropTipFont;
 }
 
+// 自己画符号，保证一定看得见（不依赖 Segoe UI Symbol / Emoji 里有没有对应码位）
+//   1 = 加号（复制 / 添加），2 = 箭头（移动 / 链接），3 = 红圈斜杠（禁止）
+void DrawDropTipSymbol(HDC dc, int symbol, COLORREF color, int left, int top, int size)
+{
+    if (symbol <= 0 || size <= 4)
+    {
+        return;
+    }
+
+    HPEN   pen      = ::CreatePen(PS_SOLID, 2, color);
+    HGDIOBJ oldPen  = ::SelectObject(dc, pen);
+    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+
+    const int centerX = left + size / 2;
+    const int centerY = top + size / 2;
+
+    if (symbol == 1)
+    {
+        // 加号
+        ::MoveToEx(dc, left + 1, centerY, nullptr);
+        ::LineTo(dc, left + size - 1, centerY);
+
+        ::MoveToEx(dc, centerX, top + 1, nullptr);
+        ::LineTo(dc, centerX, top + size - 1);
+    }
+    else if (symbol == 2)
+    {
+        // 斜向左上的箭头（跟系统「移动到」那个箭头一个意思）
+        ::MoveToEx(dc, left + size - 1, top + size - 1, nullptr);
+        ::LineTo(dc, left + 3, top + 3);
+
+        // 箭头尖上的两撇
+        ::MoveToEx(dc, left + 3, top + 3, nullptr);
+        ::LineTo(dc, left + 3 + size / 2 - 1, top + 3);
+
+        ::MoveToEx(dc, left + 3, top + 3, nullptr);
+        ::LineTo(dc, left + 3, top + 3 + size / 2 - 1);
+    }
+    else if (symbol == 3)
+    {
+        // 圆圈 + 一道斜杠
+        ::Ellipse(dc, left, top, left + size, top + size);
+
+        ::MoveToEx(dc, left + 2, top + 2, nullptr);
+        ::LineTo(dc, left + size - 2, top + size - 2);
+    }
+
+    ::SelectObject(dc, oldBrush);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(pen);
+}
+
 LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -888,16 +971,16 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         RECT client = {};
         ::GetClientRect(hwnd, &client);
 
-        // 圆角白底 + 浅灰描边（圆角半径跟上面的窗口区域对齐）
-        HBRUSH background = ::CreateSolidBrush(RGB(255, 255, 255));
-        HPEN   border     = ::CreatePen(PS_SOLID, 1, RGB(202, 202, 202));
+        // 底色 + 描边（用户定的 F9F9F9 / EDEDED）
+        HBRUSH background = ::CreateSolidBrush(kDropTipBackground);
+        HPEN   border     = ::CreatePen(PS_SOLID, 1, kDropTipBorder);
 
-        // 先把整块客户区刷白。为什么要铺满而不是只画一个圆角矩形：
+        // 先把整块客户区刷上底色。为什么要铺满而不是只画一个圆角矩形：
         // 窗口区域（SetWindowRgn）的圆角是像素近似，跟 RoundRect 的圆角不完全重合，
         // 那几像素"没被画到"的地方会露出窗口底色（黑的），看起来就是边角发黑。
         ::FillRect(dc, &client, background);
 
-        // 再只描边（里面已经是白的，不用再填一次）。
+        // 再只描边（里面已经有底色，不用再填一次）。
         // 描边往里收 1 像素：正好压在裁剪边界上的话会被切掉半条，圆角处留残点。
         ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
         ::SelectObject(dc, border);
@@ -905,7 +988,6 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     client.right - 1, client.bottom - 1, 14, 14);
 
         ::SetBkMode(dc, TRANSPARENT);
-        ::SetTextColor(dc, RGB(32, 32, 32));
 
         HFONT font = DropTipFont();
         if (font != nullptr)
@@ -913,8 +995,74 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             ::SelectObject(dc, font);
         }
 
-        ::DrawTextW(dc, g_dropTipText.c_str(), static_cast<int>(g_dropTipText.size()),
-                    &client, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        const DropTipContent& content = g_dropTipContent;
+
+        // 分段量宽度：符号 + 动作词 + 目标名
+        SIZE actionSize = {};
+        if (!content.actionText.empty())
+        {
+            ::GetTextExtentPoint32W(dc, content.actionText.c_str(),
+                                    static_cast<int>(content.actionText.size()), &actionSize);
+        }
+
+        SIZE targetSize = {};
+        if (!content.targetText.empty())
+        {
+            ::GetTextExtentPoint32W(dc, content.targetText.c_str(),
+                                    static_cast<int>(content.targetText.size()), &targetSize);
+
+            // 目标名太长就按上限算，绘制时用省略号收尾
+            if (targetSize.cx > kDropTipMaxTarget)
+            {
+                targetSize.cx = kDropTipMaxTarget;
+            }
+        }
+
+        const bool hasSymbol = (content.symbol != 0);
+        const bool hasWordGap = (!content.actionText.empty() && !content.targetText.empty());
+
+        const int symbolWidth = hasSymbol ? kDropTipSymbolSize : 0;
+        const int symbolGap   = hasSymbol ? kDropTipSymbolGap : 0;
+        const int wordGap     = hasWordGap ? kDropTipWordGap : 0;
+
+        const int totalWidth = symbolWidth + symbolGap + actionSize.cx + wordGap + targetSize.cx;
+
+        int x = client.left + ((client.right - client.left) - totalWidth) / 2;
+        if (x < client.left + kDropTipPaddingX)
+        {
+            x = client.left + kDropTipPaddingX;   // 窄窗口时靠左，别把符号顶出去
+        }
+
+        const COLORREF actionColor = content.forbidden ? kDropTipForbidden : kDropTipAction;
+        const COLORREF targetColor = content.forbidden ? kDropTipForbidden : kDropTipTarget;
+
+        // 符号：整体垂直居中
+        if (hasSymbol)
+        {
+            const int symbolTop = client.top + ((client.bottom - client.top) - kDropTipSymbolSize) / 2;
+            DrawDropTipSymbol(dc, content.symbol, actionColor, x, symbolTop, kDropTipSymbolSize);
+            x += symbolWidth + symbolGap;
+        }
+
+        // 动作词
+        if (!content.actionText.empty())
+        {
+            RECT rect = { x, client.top, x + actionSize.cx + 2, client.bottom };
+            ::SetTextColor(dc, actionColor);
+            ::DrawTextW(dc, content.actionText.c_str(), static_cast<int>(content.actionText.size()),
+                        &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            x += actionSize.cx + wordGap;
+        }
+
+        // 目标名
+        if (!content.targetText.empty())
+        {
+            RECT rect = { x, client.top, x + targetSize.cx + 2, client.bottom };
+            ::SetTextColor(dc, targetColor);
+            ::DrawTextW(dc, content.targetText.c_str(), static_cast<int>(content.targetText.size()),
+                        &rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
 
         ::DeleteObject(border);
         ::DeleteObject(background);
@@ -1100,31 +1248,63 @@ private:
         const std::wstring targetDirectory = ResolveDirectory(screenPoint);
         const DWORD effectMask = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
 
-        std::wstring text;
+        DropTipContent content;
 
         if (targetDirectory.empty() || (effect & effectMask) == 0)
         {
-            // 这里放不了：跟系统一样提示一句
-            text = L"不能放到此处";
-        }
-        else if ((effect & DROPEFFECT_LINK) != 0)
-        {
-            text = L"链接到 " + ShellDisplayName(targetDirectory);
-        }
-        else if ((effect & DROPEFFECT_MOVE) != 0)
-        {
-            text = L"移动到 " + ShellDisplayName(targetDirectory);
+            // 这里放不了：跟系统一样提示一句（红字，也套在框里）
+            content.forbidden   = true;
+            content.symbol      = 3;
+            content.actionText  = L"不能放到";
+            content.targetText  = L"此处";
         }
         else
         {
-            text = L"复制到 " + ShellDisplayName(targetDirectory);
+            // 宿主有没有自己的一套说法？比如拖进左栏空白是「添加到 常用」，不是「复制到 某目录」
+            bool custom = false;
+
+            if (m_callbacks.ResolveDropHint)
+            {
+                std::wstring action;
+                std::wstring name;
+
+                if (m_callbacks.ResolveDropHint(POINT{ screenPoint.x, screenPoint.y }, action, name) &&
+                    !action.empty())
+                {
+                    content.actionText = action;
+                    content.targetText = name;
+                    content.symbol     = 1;   // 自定义的通常是"添加"这类，用加号
+                    custom             = true;
+                }
+            }
+
+            if (!custom)
+            {
+                if ((effect & DROPEFFECT_LINK) != 0)
+                {
+                    content.actionText = L"链接到";
+                    content.symbol     = 2;
+                }
+                else if ((effect & DROPEFFECT_MOVE) != 0)
+                {
+                    content.actionText = L"移动到";
+                    content.symbol     = 2;
+                }
+                else
+                {
+                    content.actionText = L"复制到";
+                    content.symbol     = 1;
+                }
+
+                content.targetText = ShellDisplayName(targetDirectory);
+            }
         }
 
         // IDropTarget 回调给的 pt 本来就是屏幕坐标，直接拿来做锚点
-        ShowDropTip(text, POINT{ screenPoint.x, screenPoint.y });
+        ShowDropTip(content, POINT{ screenPoint.x, screenPoint.y });
     }
 
-    void ShowDropTip(const std::wstring& text, POINT anchorPoint)
+    void ShowDropTip(const DropTipContent& content, POINT anchorPoint)
     {
         if (m_tipWindow == nullptr)
         {
@@ -1138,28 +1318,46 @@ private:
         const int targetX = anchorPoint.x + kDropTipOffsetX;
         const int targetY = anchorPoint.y + kDropTipOffsetY;
 
-        // 字没变、位置也基本没动就别折腾（DragOver 是高频回调，反复重画会闪）
+        // 内容没变、位置也基本没动就别折腾（DragOver 是高频回调，反复重画会闪）
         const int dx = (targetX > m_tipX) ? (targetX - m_tipX) : (m_tipX - targetX);
         const int dy = (targetY > m_tipY) ? (targetY - m_tipY) : (m_tipY - targetY);
 
-        if (text == m_tipText && ::IsWindowVisible(m_tipWindow) != FALSE && dx < 3 && dy < 3)
+        const std::wstring signature = content.Signature();
+
+        if (signature == m_tipText && ::IsWindowVisible(m_tipWindow) != FALSE && dx < 3 && dy < 3)
         {
             return;
         }
 
-        m_tipText = text;
+        m_tipText = signature;
         m_tipX    = targetX;
         m_tipY    = targetY;
 
-        g_dropTipText = text;
+        g_dropTipContent = content;
 
-        // 量一下这行字有多宽，窗口跟着缩
+        // 分段量宽度（跟 WM_PAINT 里的算法必须一致，否则字会被裁）
         HDC dc = ::GetDC(m_tipWindow);
         HFONT font = DropTipFont();
         HGDIOBJ previousFont = (font != nullptr) ? ::SelectObject(dc, font) : nullptr;
 
-        SIZE textSize = {};
-        ::GetTextExtentPoint32W(dc, m_tipText.c_str(), static_cast<int>(m_tipText.size()), &textSize);
+        SIZE actionSize = {};
+        if (!content.actionText.empty())
+        {
+            ::GetTextExtentPoint32W(dc, content.actionText.c_str(),
+                                    static_cast<int>(content.actionText.size()), &actionSize);
+        }
+
+        SIZE targetSize = {};
+        if (!content.targetText.empty())
+        {
+            ::GetTextExtentPoint32W(dc, content.targetText.c_str(),
+                                    static_cast<int>(content.targetText.size()), &targetSize);
+
+            if (targetSize.cx > kDropTipMaxTarget)
+            {
+                targetSize.cx = kDropTipMaxTarget;
+            }
+        }
 
         if (previousFont != nullptr)
         {
@@ -1167,8 +1365,16 @@ private:
         }
         ::ReleaseDC(m_tipWindow, dc);
 
-        const int width  = textSize.cx + kDropTipPaddingX * 2;
-        const int height = textSize.cy + kDropTipPaddingY * 2;
+        const bool hasSymbol  = (content.symbol != 0);
+        const bool hasWordGap = (!content.actionText.empty() && !content.targetText.empty());
+
+        const int symbolWidth = hasSymbol ? kDropTipSymbolSize : 0;
+        const int symbolGap   = hasSymbol ? kDropTipSymbolGap : 0;
+        const int wordGap     = hasWordGap ? kDropTipWordGap : 0;
+
+        const int width  = symbolWidth + symbolGap + actionSize.cx + wordGap + targetSize.cx +
+                           kDropTipPaddingX * 2;
+        const int height = (actionSize.cy > 0 ? actionSize.cy : targetSize.cy) + kDropTipPaddingY * 2;
 
         ::SetWindowPos(m_tipWindow, HWND_TOPMOST, m_tipX, m_tipY, width, height,
                        SWP_NOACTIVATE | SWP_SHOWWINDOW);

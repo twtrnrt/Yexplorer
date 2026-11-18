@@ -5013,15 +5013,17 @@ void MainWindow::RegisterDropTargets()
     listCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
         // ------------------------------------------------------------------
-        // 只读压缩包内部（rar / 7z / tar）：整个列表都不接受放置
+        // 只读压缩包内部（rar / 7z / tar）：接受，但不落地
         //
-        // 返回空串就是对拖拽那边说"这里不能放"，系统会给禁止光标、
-        // 也不会高亮任何文件夹，松手不落地（和资源管理器表现一致）。
-        // zip 内部是可写的，照常接受。
+        // 以前这里直接返回空串（= 不接受），结果是：在压缩包里按住一个文件
+        // 准备往外拖的时候，光标还在列表上就已经变成"禁止"了，看起来像拖不动。
+        // 现在改成"接受"：光标保持正常的复制/移动形状，
+        // 真的落在只读容器内部时，PerformDropFromOutside 里还有一道
+        // IsWritableTargetDirectory 的检查会把它拦住，静默不做事。
         // ------------------------------------------------------------------
         if (m_currentIsContainer && !m_currentIsZipContainer)
         {
-            return std::wstring();
+            return m_history.Current();
         }
 
         RECT clientRect = {};
@@ -5078,14 +5080,57 @@ void MainWindow::RegisterDropTargets()
 
     treeCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
-        // 落在固定区（硬盘区下面那一段）：接受，但含义是"固定"，不是搬文件
+        // 先看是否压在具体节点上（固定区里的每一项也是一个节点）
+        //
+        // 这里的顺序很关键：固定区不是"整块都算添加到常用"。
+        // 压在固定区里的文件夹上，应该跟普通文件夹一样把东西放进去；
+        // 只有压在固定区的空白处，才是"添加一个常用项"。
+        std::wstring path = m_navigationPane.HitTestPath(ptClient);
+
+        if (!path.empty())
+        {
+            DWORD attributes = ::GetFileAttributesW(path.c_str());
+
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                return path;   // 目录：落点就是这个目录
+            }
+
+            // 压在了一个「文件」节点上（比如固定进来的程序、文档）：往里放没有意义
+            return std::wstring();
+        }
+
+        // 没压在任何节点上：落在固定区空白处 → 添加一个常用项
         if (m_navigationPane.IsInPinnedArea(ptClient))
         {
             return kPinnedMarker;
         }
 
-        // 落在某个文件夹节点上：那个节点的目录（和以前一样）
-        return m_navigationPane.HitTestPath(ptClient);
+        return std::wstring();
+    };
+
+    // 固定区空白处的提示语不是"复制到 xxx"，而是"添加到常用"
+    treeCallbacks.ResolveDropHint = [this](POINT ptScreen, std::wstring& actionText,
+                                           std::wstring& targetName) -> bool
+    {
+        POINT clientPoint = ptScreen;
+        ::ScreenToClient(m_navigationPane.Handle(), &clientPoint);
+
+        // 压在某个节点上：交给默认的「复制到/移动到 目录名」
+        if (!m_navigationPane.HitTestPath(clientPoint).empty())
+        {
+            return false;
+        }
+
+        if (!m_navigationPane.IsInPinnedArea(clientPoint))
+        {
+            return false;
+        }
+
+        actionText = L"添加到";
+        targetName = L"常用";
+        return true;
     };
 
     treeCallbacks.PerformDrop = [this](const std::vector<std::wstring>& sources,
@@ -5117,6 +5162,33 @@ void MainWindow::RegisterDropTargets()
     };
 
     shell::RegisterWindowDropTarget(m_navigationPane.Handle(), treeCallbacks);
+
+    // ---- 地址栏（面包屑）----
+    //
+    // 地址栏的每一段都是一个真目录（C: > Users > xxx），所以拖文件压在某一段上，
+    // 语义就是"放进那一段对应的目录"，跟资源管理器把文件拖到面包屑上一样。
+    // 段与段之间的箭头、末尾空白不接受。
+    shell::DropTargetCallbacks addressCallbacks;
+
+    addressCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
+    {
+        return m_addressBar.HitTestPath(ptClient);
+    };
+
+    addressCallbacks.PerformDrop = [this](const std::vector<std::wstring>& sources,
+                                          const std::wstring& targetDirectory,
+                                          DWORD effect, bool createShortcut)
+    {
+        PerformDropFromOutside(sources, targetDirectory, effect, createShortcut);
+    };
+
+    addressCallbacks.DragOverFeedback = [this](POINT ptClient, bool acceptable)
+    {
+        // 拖动时把落点那一段用浅蓝点亮，松手前就能看清会落到哪
+        m_addressBar.UpdateDropHighlight(ptClient, acceptable);
+    };
+
+    shell::RegisterWindowDropTarget(m_addressBar.Handle(), addressCallbacks);
 }
 
 // ============================================================================
@@ -5164,26 +5236,6 @@ void MainWindow::OpenPinnedOrFolder(const std::wstring& path)
     }
 }
 
-// 固定区认的"应用"：可执行程序和快捷方式。
-// 其它文件（txt、图片、压缩包…）拖进来一律忽略，免得固定区变成第二个桌面。
-static bool LooksLikeApplication(const std::wstring& path)
-{
-    const wchar_t* extensions[] = { L".exe", L".lnk", L".bat", L".cmd", L".appref-ms" };
-
-    for (const wchar_t* extension : extensions)
-    {
-        size_t extLength = static_cast<size_t>(::lstrlenW(extension));
-
-        if (path.size() > extLength &&
-            ::_wcsicmp(path.c_str() + (path.size() - extLength), extension) == 0)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 void MainWindow::AddPinnedItems(const std::vector<std::wstring>& sources)
 {
     bool changed = false;
@@ -5202,11 +5254,7 @@ void MainWindow::AddPinnedItems(const std::vector<std::wstring>& sources)
         item.path     = path;
         item.isFolder = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-        if (!item.isFolder && !LooksLikeApplication(path))
-        {
-            ++ignored;
-            continue;
-        }
+        // 不再限制类型：文件夹、程序、普通文档都能固定到常用（用户要求放开）
 
         // 显示名取路径末段；"C:\" 这种把尾部反斜杠去掉
         size_t lastSlash = path.find_last_of(L'\\');
@@ -5248,6 +5296,7 @@ void MainWindow::UnregisterDropTargets()
 {
     shell::UnregisterWindowDropTarget(m_fileListView.Handle());
     shell::UnregisterWindowDropTarget(m_navigationPane.Handle());
+    shell::UnregisterWindowDropTarget(m_addressBar.Handle());
 }
 
 // ============================================================================

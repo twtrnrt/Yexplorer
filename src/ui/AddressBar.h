@@ -75,6 +75,12 @@ public:
     // 进入手动输入模式（供快捷键调用）
     void BeginEditing();
 
+    // 拖放用：这个点落在哪一段上 → 返回该段的完整路径（落在段与段的空白返回空串）
+    std::wstring HitTestPath(POINT ptClient) const;
+
+    // 拖放用：拖动过程中把"落点那一段"高亮起来（acceptable = false 表示清掉高亮）
+    void UpdateDropHighlight(POINT ptClient, bool acceptable);
+
 private:
     // 一段路径：显示文字 + 点击后跳转的完整路径
     struct Segment
@@ -121,6 +127,7 @@ private:
     RECT                 m_ellipsisRect = { 0, 0, 0, 0 };   // 中间省略号"…"的位置
 
     int  m_hotIndex = -1;                         // 鼠标悬停在第几段
+    int  m_dropIndex = -1;                        // 拖动落点在第几段（跟悬停分开存）
     bool m_trackingLeave = false;                 // 是否已注册"鼠标离开"通知
 
     bool m_editing  = false;                      // 是否处于输入模式

@@ -79,6 +79,15 @@ struct DropTargetCallbacks
     // 文件列表用它把"鼠标正压在哪个文件夹上"高亮出来（和资源管理器一样），
     // 鼠标离开列表时也会回调一次（acceptable = false），用来清掉高亮。
     std::function<void(POINT ptClient, bool acceptable)> DragOverFeedback;
+
+    // 落点提示的自定义说法（可选）
+    //   ptScreen   ：鼠标的屏幕坐标
+    //   actionText ：例如「添加到」
+    //   targetName ：例如「常用」
+    //
+    // 不是所有落点都等于"复制到某个目录"：比如拖进左栏空白处，语义是"添加一个常用项"。
+    // 返回 true 时提示条就按这里给的说法显示，不再自己拼「复制到 xxx」。
+    std::function<bool(POINT ptScreen, std::wstring& actionText, std::wstring& targetName)> ResolveDropHint;
 };
 
 // 注册成放置目标；成功返回 true

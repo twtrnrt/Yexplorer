@@ -29,7 +29,8 @@ const int kSeparatorWidth = 16;   // 段与段之间留给箭头的宽度
 const int kCornerRadius   = 6;
 
 const COLORREF kHotColor      = RGB(240, 240, 240);
-const COLORREF kSeparatorColor = RGB(120, 120, 120);
+// 拖动落点的高亮：用浅蓝，跟悬停的浅灰区分开，一眼能看出"松手会落到这一段"
+const COLORREF kDropHighlightColor = RGB(204, 232, 255);const COLORREF kSeparatorColor = RGB(120, 120, 120);
 
 // 点到线段的距离（画抗锯齿箭头时，用它算出每个像素被线覆盖了多少）
 double DistanceToSegment(double px, double py,
@@ -297,6 +298,62 @@ int AddressBar::Scale(int value) const
         dpi = 96;
     }
     return ::MulDiv(value, dpi, 96);
+}
+
+// ============================================================================
+// 拖放：命中哪一段
+//
+// 地址栏每一段都是「点它就能跳进去」的目录，所以拖动时压在某一整段上，
+// 语义就是"放进这个目录"（跟资源管理器把文件拖到面包屑上一致）。
+// 段与段之间的箭头、末尾空白都不算。
+// ============================================================================
+
+std::wstring AddressBar::HitTestPath(POINT ptClient) const
+{
+    if (m_editing)
+    {
+        return std::wstring();   // 正在手动输入路径时，整条都是输入框，不接拖放
+    }
+
+    for (size_t i = 0; i < m_segmentRects.size() && i < m_segments.size(); ++i)
+    {
+        const RECT& rect = m_segmentRects[i];
+
+        // 被省略掉的段矩形是空的（right <= left）
+        if (rect.right > rect.left && ::PtInRect(&rect, ptClient))
+        {
+            return m_segments[i].fullPath;
+        }
+    }
+
+    return std::wstring();
+}
+
+void AddressBar::UpdateDropHighlight(POINT ptClient, bool acceptable)
+{
+    int index = -1;
+
+    if (acceptable)
+    {
+        for (size_t i = 0; i < m_segmentRects.size(); ++i)
+        {
+            const RECT& rect = m_segmentRects[i];
+
+            if (rect.right > rect.left && ::PtInRect(&rect, ptClient))
+            {
+                index = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    if (index == m_dropIndex)
+    {
+        return;   // 没变就别重画（拖动时这个回调很频繁）
+    }
+
+    m_dropIndex = index;
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
 }
 
 // ============================================================================
@@ -696,10 +753,10 @@ void AddressBar::Draw(HDC hdc)
             continue;   // 该段被省略
         }
 
-        // 悬停背景
-        if (i == m_hotIndex)
+        // 悬停 / 拖动落点背景
+        if (i == m_hotIndex || i == m_dropIndex)
         {
-            HBRUSH hotBrush = ::CreateSolidBrush(kHotColor);
+            HBRUSH hotBrush = ::CreateSolidBrush((i == m_dropIndex) ? kDropHighlightColor : kHotColor);
             HPEN   noPen    = ::CreatePen(PS_NULL, 0, 0);
             HGDIOBJ oldBrush = ::SelectObject(hdc, hotBrush);
             HGDIOBJ oldPen   = ::SelectObject(hdc, noPen);
