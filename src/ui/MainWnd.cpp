@@ -2428,17 +2428,15 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
         size_t failures  = 0;   // 失败的项数
         bool   cancelled = false;
 
-        // ---- 中途断开的两道保险 ----
-        // 实测：从远程桌面粘上千个小文件，会在某一项之后整个剪贴板代理失效，
-        // 后面每一项都报"读剪贴板数据失败"，硬跑完就是一堆失败项。
-        //   1) 每 200 项主动换一个新的剪贴板对象（不给代理机会进入失败态）
-        //   2) 连续 5 项失败就判定源已断开，提前停下并明确告知，别白跑几百项
-        const size_t kRefetchEvery          = 200;
+        // ---- 中途被打断的保险 ----
+        // 实测：从远程桌面粘上千个小文件时，任务可能在某一项之后整体断掉
+        // （最常见的原因是传输期间有人在接收端复制/剪切，剪贴板被换掉），
+        // 之后每一项都会报"读剪贴板数据失败"。
+        // 连续失败到这个数就提前停下并说清还剩多少，别白跑几百项。
         const size_t kMaxConsecutiveFailures = 5;
 
         size_t consecutiveFailures = 0;
         bool   sourceLost          = false;
-        bool   clipboardReplaced   = false;   // 粘贴途中剪贴板被本机换掉
         size_t stoppedAt           = total;   // 在哪一项停下的（提示"还剩多少"用）
 
         for (size_t i = 0; i < total; ++i)
@@ -2447,13 +2445,6 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
             {
                 cancelled = true;
                 break;
-            }
-
-            // 定期换一个新数据对象（i 从 0 开始，所以在 200、400… 的边界上做）
-            if (i > 0 && (i % kRefetchEvery) == 0)
-            {
-                Logger::Info(L"粘贴进行到第 " + std::to_wstring(i + 1) + L" 项，主动刷新剪贴板对象");
-                session.Refetch();   // 失败也无所谓，后面的取数会自己失败并走重试
             }
 
             const shellclip::VirtualFileInfo& info = session.Item(i);
@@ -2539,19 +2530,7 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
             ++failures;
             Logger::Warn(L"粘贴「" + info.name + L"」失败：" + error);
 
-            // 剪贴板被本机换掉了（用户在这台电脑上按了复制/剪切）：
-            // 旧对象大概率已经读不到数据了，立刻停 —— 不必等连续 5 项都失败，
-            // 后面的提示也要说实话（是"剪贴板被替换"，不是"远程断开"）
-            if (session.ClipboardReplaced())
-            {
-                clipboardReplaced = true;
-                stoppedAt         = i;
-
-                Logger::Warn(L"粘贴途中剪贴板被替换（本机做了复制/剪切），提前停止");
-                break;
-            }
-
-            // 连续失败太多了：不再一项一项硬跑，直接判定源已断开
+            // 连续失败太多了：不再一项一项硬跑，提前停
             ++consecutiveFailures;
 
             if (consecutiveFailures >= kMaxConsecutiveFailures)
@@ -2560,7 +2539,7 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
                 stoppedAt  = i;
 
                 Logger::Error(L"连续 " + std::to_wstring(consecutiveFailures) +
-                              L" 项都读不出剪贴板数据，判定远程剪贴板已断开，提前停止");
+                              L" 项都读不出剪贴板数据，判定传输已中断，提前停止");
                 break;
             }
         }
@@ -2575,24 +2554,15 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
             {
                 *messageOut = L"已取消粘贴，没有粘完的文件已经删掉了。";
             }
-            else if (clipboardReplaced)
-            {
-                const size_t remaining = (total > stoppedAt) ? (total - stoppedAt) : 0;
-
-                *messageOut = L"粘贴途中剪贴板被替换了（你在这台电脑上做了复制或剪切）：剩余 " +
-                              std::to_wstring(remaining) + L" 项没有粘（已成功 " +
-                              std::to_wstring(done) + L" 项）。\n"
-                              L"远程拷过来的文件还在传输时，请先别在本机复制/剪切别的东西。";
-            }
             else if (sourceLost)
             {
                 const size_t remaining = (total > stoppedAt) ? (total - stoppedAt) : 0;
 
-                *messageOut = L"粘贴过程中远程剪贴板断开了：" +
+                *messageOut = L"粘贴过程中被打断了：" +
                               std::to_wstring(remaining) + L" 项没能粘（已成功 " +
                               std::to_wstring(done) + L" 项）。\n"
-                              L"这通常是远程会话侧的问题（剪贴板被重置或断开），"
-                              L"请在远程电脑上重新复制一次再粘，或者分批粘。";
+                              L"传输期间请不要在接收端复制或剪切别的文件，"
+                              L"那样会把传送中的剪贴板内容换掉；等粘完再操作，或者分批粘。";
             }
             else if (failures > 0)
             {
