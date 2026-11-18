@@ -916,13 +916,13 @@ HFONT DropTipFont()
 //   ⊘  U+2298  圆圈斜杠：圆圈只占 em 框的六成多，放大到 1.7 倍才跟别的齐
 double DropTipSymbolScale(int symbol)
 {
-    switch (symbol)
-    {
-    case 1:  return 2.0;   // 复制 / 添加
-    case 2:  return 1.5;   // 移动到
-    case 3:  return 1.7;   // 禁止
-    default: return 1.3;
-    }
+    // 用户要求：先把三个符号全部恢复成 1 倍（跟正文字号一样大），用来验证对齐基准对不对。
+    // 等对齐确认没问题以后，再按下面的老计划分别放大：
+    //   1 = + 号 2.0（笔画细，放大才显眼）
+    //   2 = ⬉ 箭头 1.5（字形占位偏小）
+    //   3 = ⊘ 圆圈 1.7（圆圈只占 em 框六成多）
+    (void)symbol;
+    return 1.0;
 }
 
 HFONT DropTipSymbolFont(int symbol)
