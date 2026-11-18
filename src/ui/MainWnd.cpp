@@ -1327,18 +1327,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 GoUp();
                 return 0;
             case kControlIdHome:
-            {
-                // 主页：去「我的文档」
-                PWSTR documentsPath = nullptr;
-                if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documentsPath)) &&
-                    documentsPath != nullptr)
-                {
-                    std::wstring target(documentsPath);
-                    ::CoTaskMemFree(documentsPath);
-                    NavigateToPath(target);
-                }
+                // 主页：去「主文件夹」（和 Ctrl+T 开的主文件夹窗口、导航栏里那一项一致）
+                NavigateToPath(shell::kTopDesktopPath);
                 return 0;
-            }
             case kControlIdRefresh:
                 RefreshCurrentFolder();
                 return 0;

@@ -52,7 +52,7 @@ static const int kControlIdBack    = 1001;
 static const int kControlIdForward = 1002;
 static const int kControlIdUp      = 1003;
 static const int kControlIdAddress = 1004;
-static const int kControlIdHome    = 1010;   // 主页（去「我的文档」）
+static const int kControlIdHome    = 1010;   // 主页（去「主文件夹」）
 static const int kControlIdRefresh = 1011;   // 刷新
 static const int kControlIdThisPc  = 1012;   // 计算机图标（去「此电脑」）
 static const int kControlIdSettings = 1013;  // 设置（地址栏右端的齿轮）
@@ -534,7 +534,7 @@ private:
     FlatButton   m_backButton;         // 后退（自绘扁平按钮）
     FlatButton   m_forwardButton;      // 前进
     FlatButton   m_upButton;           // 向上
-    FlatButton   m_homeButton;         // 主页（点一下去「我的文档」）
+    FlatButton   m_homeButton;         // 主页（点一下去「主文件夹」）
     FlatButton   m_refreshButton;      // 刷新
     FlatButton   m_thisPcButton;       // 计算机图标（地址栏左端，点了去「此电脑」）
     FlatButton   m_settingsButton;     // 设置（齿轮，地址栏右端）
