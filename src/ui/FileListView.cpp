@@ -2760,6 +2760,11 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
     //
     // 只记「修改日期 / 类型 / 大小」这三列；名称列永远自适应吃剩余宽度，
     // 拖它没有意义，所以不记（和资源管理器的行为一致）。
+    //
+    // 【重要】这里故意不再调 LayoutColumns() 重算名称列：
+    //   以前拖完一列会立刻把名称列按"剩余宽度"重算一次，表现就是"你拖完，
+    //   表格自己又跳一下、其它列跟着动"，看着像在做自适应。
+    //   现在拖谁就只改谁，松手后表格保持原样（名称列等下次窗口尺寸变化再重算）。
     // --------------------------------------------------------------
     case HDN_ENDTRACK:
     {
@@ -2778,8 +2783,6 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         case 3: m_sizeColumnWidth = newWidth; break;
         default: return 0;
         }
-
-        LayoutColumns();   // 名称列跟着重算
 
         if (m_onColumnWidthChanged)
         {
