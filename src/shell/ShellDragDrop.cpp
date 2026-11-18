@@ -888,8 +888,7 @@ std::map<HWND, IDropTarget*> g_dropTargets;   // HWND → 放置目标（持有�
 // 所以这里也自己画一条，长相照着系统来：白底、圆角、浅灰描边、深灰小字。
 // 窗口属性：不吃鼠标（WS_EX_TRANSPARENT）、不抢焦点（WS_EX_NOACTIVATE）、置顶。
 // ----------------------------------------------------------------------------
-constexpr int kDropTipPaddingX = 10;   // 左右留白
-constexpr int kDropTipPaddingY = 6;    // 上下留白
+constexpr int kDropTipPaddingX = 10;   // 左右留白（提示条高度固定 30，宽度按内容算，不需要上下留白）
 constexpr int kDropTipOffsetX  = 16;   // 相对光标的偏移（系统差不多也是这个位置）
 constexpr int kDropTipOffsetY  = 22;
 
