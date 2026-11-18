@@ -1071,19 +1071,25 @@ void DrawDropTipSymbol(HDC target, int symbol, int left, int top, int size, COLO
             for (int x = 0; x < size; ++x)
             {
                 // 4×4 块求平均 = 这个目标像素被图形覆盖了多少（0~255）
-                int coverage = 0;
+                int rawCoverage = 0;
                 for (int sy = 0; sy < supersample; ++sy)
                 {
                     const BYTE* row = source + static_cast<size_t>(y * supersample + sy) * big * 4;
                     for (int sx = 0; sx < supersample; ++sx)
                     {
-                        coverage += row[(x * supersample + sx) * 4 + 2];   // R 通道：白 255 / 黑 0
+                        rawCoverage += row[(x * supersample + sx) * 4 + 2];   // R 通道：白 255 / 黑 0
                     }
                 }
-                coverage /= (supersample * supersample);
+                rawCoverage /= (supersample * supersample);
 
-                const int inverse = 255 - coverage;
-                const int offset  = (y * size + x) * 4;
+                // 二值化：够一半覆盖率就算实色，不够就完全透明。
+                //
+                // 为什么不做"半透明过渡"（真抗锯齿）：小图标上一条线只有 2 像素宽，
+                // 线的边界只要没正好落在像素边界上，抗锯齿就会把它摊成"1 像素实 + 2 像素灰"，
+                // 看起来整根线发虚、糊在一起。系统自带的小图标是不抗锯齿的，所以显得实。
+                const int coverage = (rawCoverage >= 128) ? 255 : 0;
+                const int inverse  = 255 - coverage;
+                const int offset   = (y * size + x) * 4;
                 dest[offset + 0] = static_cast<BYTE>((backgroundB * inverse + foregroundB * coverage) / 255);
                 dest[offset + 1] = static_cast<BYTE>((backgroundG * inverse + foregroundG * coverage) / 255);
                 dest[offset + 2] = static_cast<BYTE>((backgroundR * inverse + foregroundR * coverage) / 255);
