@@ -864,3 +864,101 @@ void MainWindow::FillNewMenu(HMENU parentMenu)
     ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
                   reinterpret_cast<UINT_PTR>(subMenu), L"新建(&W)");
 }
+
+// ----------------------------------------------------------------------------
+// 撤销/恢复菜单项 + 自绘菜单项绘制
+//
+// FillUndoItem 只读内存里的撤销栈；DrawMenuItem 是 WM_DRAWITEM 的实现，
+// 用主窗口字体和预取好的小图标画一行。两块都只跟菜单有关。
+// ----------------------------------------------------------------------------
+
+void MainWindow::FillUndoItem(HMENU menu)
+{
+    bool anyItem = false;
+
+    // 「撤销 删除」：撤销栈顶那一步
+    if (const UndoRecord* top = m_undo.TopUndo())
+    {
+        const UndoRecord& record = *top;
+
+        // 批量重命名单独说一句「撤销 批量重命名」，让用户一眼看出这一条
+        // 和单文件改名不是同一档（也就不会奇怪 Ctrl+Z 为什么不动它）
+        const wchar_t* verb = record.batchRename ? L"批量重命名"
+                                                 : core::UndoStack::VerbText(record.kind);
+
+        if (verb != nullptr)
+        {
+            const std::wstring text = std::wstring(L"撤销 ") + verb + L"(&U)";
+            ::AppendMenuW(menu, MF_STRING, kCommandUndo, text.c_str());
+            anyItem = true;
+        }
+    }
+
+    // 「恢复 删除」：重做栈顶那一步（撤销过、还没被新操作冲掉的那些）
+    if (const UndoRecord* top = m_undo.TopRedo())
+    {
+        const UndoRecord& record = *top;
+
+        const wchar_t* verb = record.batchRename ? L"批量重命名"
+                                                 : core::UndoStack::VerbText(record.kind);
+
+        if (verb != nullptr)
+        {
+            const std::wstring text = std::wstring(L"恢复 ") + verb + L"(&E)";
+            ::AppendMenuW(menu, MF_STRING, kCommandRedo, text.c_str());
+            anyItem = true;
+        }
+    }
+
+    if (anyItem)
+    {
+        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+}
+
+void MainWindow::DrawMenuItem(const DRAWITEMSTRUCT* drawItem)
+{
+    if (drawItem == nullptr || drawItem->itemData == 0)
+    {
+        return;
+    }
+
+    const MenuDrawItem* data = reinterpret_cast<const MenuDrawItem*>(drawItem->itemData);
+    const RECT& rc = drawItem->rcItem;
+
+    const bool selected = ((drawItem->itemState & ODS_SELECTED) != 0);
+    const bool disabled = ((drawItem->itemState & ODS_DISABLED) != 0);
+
+    // ---- 底色 ----
+    HBRUSH background = ::CreateSolidBrush(
+        selected ? ::GetSysColor(COLOR_HIGHLIGHT) : ::GetSysColor(COLOR_MENU));
+    ::FillRect(drawItem->hDC, &rc, background);
+    ::DeleteObject(background);
+
+    // ---- 图标（左端）----
+    const int iconSize = Scale(16);
+    const int iconLeft = rc.left + Scale(8);
+    const int iconTop  = rc.top + ((rc.bottom - rc.top) - iconSize) / 2;
+
+    if (data->icon != nullptr)
+    {
+        ::DrawIconEx(drawItem->hDC, iconLeft, iconTop, data->icon, iconSize, iconSize,
+                     0, nullptr, DI_NORMAL);
+    }
+
+    // ---- 文字 ----
+    RECT textRect = rc;
+    textRect.left = iconLeft + iconSize + Scale(8);
+    textRect.right -= Scale(12);
+
+    ::SetBkMode(drawItem->hDC, TRANSPARENT);
+    ::SetTextColor(drawItem->hDC,
+                   disabled ? ::GetSysColor(COLOR_GRAYTEXT)
+                            : (selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT)
+                                        : ::GetSysColor(COLOR_MENUTEXT)));
+
+    HGDIOBJ oldFont = ::SelectObject(drawItem->hDC, m_hUiFont);
+    ::DrawTextW(drawItem->hDC, data->text.c_str(), -1, &textRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    ::SelectObject(drawItem->hDC, oldFont);
+}
