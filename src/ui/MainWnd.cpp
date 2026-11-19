@@ -2437,7 +2437,6 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
 
         size_t consecutiveFailures = 0;
         bool   sourceLost          = false;
-        size_t stoppedAt           = total;   // 在哪一项停下的（提示"还剩多少"用）
 
         for (size_t i = 0; i < total; ++i)
         {
@@ -2536,7 +2535,6 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
             if (consecutiveFailures >= kMaxConsecutiveFailures)
             {
                 sourceLost = true;
-                stoppedAt  = i;
 
                 Logger::Error(L"连续 " + std::to_wstring(consecutiveFailures) +
                               L" 项都读不出剪贴板数据，判定传输已中断，提前停止");
@@ -2550,16 +2548,18 @@ bool MainWindow::DoPasteVirtualFiles(const std::wstring& targetDirectory)
         // 给界面留一句提示（一项都没成功 / 有失败项 / 被取消 才需要弹窗）
         if (messageOut != nullptr)
         {
+            // "没粘出来"的项数：失败项 + 取消后没处理的项，统一按"总数 - 成功数"算
+            const size_t notDone = (total > done) ? (total - done) : 0;
+
             if (cancelled)
             {
-                *messageOut = L"已取消粘贴，没有粘完的文件已经删掉了。";
+                *messageOut = L"已粘贴成功 " + std::to_wstring(done) + L" 项（" +
+                              std::to_wstring(notDone) + L" 项被取消）";
             }
             else if (sourceLost)
             {
-                const size_t remaining = (total > stoppedAt) ? (total - stoppedAt) : 0;
-
-                *messageOut = L"粘贴过程中被打断了：" +
-                              std::to_wstring(remaining) + L" 项没能粘（已成功 " +
+                *messageOut = L"粘贴过程中断：" +
+                              std::to_wstring(notDone) + L" 项没能粘贴（已成功 " +
                               std::to_wstring(done) + L" 项）。\n"
                               L"注意：传输过程使用复制/剪切会中断传输。";
             }
