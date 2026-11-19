@@ -44,9 +44,9 @@ $cl = @(
     '/DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_WIN32_WINNT=0x0A00',
     ('/I "{0}\src" /I "{0}\tests"' -f $repoRoot),
     ('/Fo"{0}\\"' -f $BuildDir),
-    ('"{0}\tests\BatchRenameRulesTest.cpp" "{0}\src\ui\BatchRenameDialog.cpp"' -f $repoRoot),
+    ('"{0}\tests\BatchRenameRulesTest.cpp" "{0}\src\ui\BatchRenameRules.cpp"' -f $repoRoot),
     ('/Fe"{0}"' -f $testExe),
-    '/link user32.lib gdi32.lib comctl32.lib uxtheme.lib'
+    '/link user32.lib'
 ) -join ' '
 
 Push-Location $repoRoot

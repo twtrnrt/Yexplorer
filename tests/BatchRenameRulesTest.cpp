@@ -16,15 +16,11 @@
 //   tools\run-tests.ps1
 // 或者手工：
 //   cl /std:c++17 /utf-8 /EHsc /I src /I tests tests\BatchRenameRulesTest.cpp
-//      src\ui\BatchRenameDialog.cpp /link user32.lib gdi32.lib comctl32.lib uxtheme.lib
+//      src\ui\BatchRenameRules.cpp /link user32.lib
 //   BatchRenameRulesTest.exe tests\data\batch-rename-baseline.csv
 // ============================================================================
 
 #include <windows.h>
-
-// BatchRenameDialog.cpp 用了 SetWindowSubclass（comctl32 v6），测试程序也得挂同一个 manifest
-#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' \
- version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #include <cstdio>
 #include <fstream>
@@ -33,14 +29,6 @@
 
 #include "ui/BatchRenameDialog.h"
 #include "RenameCases.h"
-
-// 链接进来的 BatchRenameDialog.cpp 只用到这三个日志函数；测试不初始化日志
-namespace Logger
-{
-void Info(const std::wstring&) {}
-void Warn(const std::wstring&) {}
-void Error(const std::wstring&) {}
-} // namespace Logger
 
 namespace
 {

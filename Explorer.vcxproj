@@ -170,6 +170,7 @@
     <ClCompile Include="src\ui\PasteProgressBar.cpp" />
     <ClCompile Include="src\ui\SettingsDialog.cpp" />
     <ClCompile Include="src\ui\BatchRenameDialog.cpp" />
+    <ClCompile Include="src\ui\BatchRenameRules.cpp" />
     <ClCompile Include="src\ui\MenuIcons.cpp" />
     <ClCompile Include="src\ui\WindowPlacement.cpp" />
     <ClCompile Include="src\ui\WindowRelay.cpp" />
