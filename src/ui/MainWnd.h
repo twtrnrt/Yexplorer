@@ -23,10 +23,6 @@
 #include <windows.h>
 #include <commctrl.h>
 
-// 任务栏按钮进度（ITaskbarList3）只在这一处用到，头文件里不需要整套 shobjidl.h，
-// 前向声明一下就行（真正的定义在 MainWnd.cpp 的 <shobjidl.h> 里）。
-struct ITaskbarList3;
-
 #include <memory>
 #include <mutex>
 #include <string>
@@ -49,6 +45,7 @@ struct ITaskbarList3;
 #include "ui/OpenWithDialog.h"
 #include "ui/SettingsDialog.h"
 #include "ui/MenuIcons.h"
+#include "ui/PasteProgressBar.h"
 #include "shell/ShellNew.h"
 
 // 子控件 ID
@@ -611,9 +608,12 @@ private:
     //
     //   m_pasteInProgress        —— 正在粘这类文件（状态栏改显示进度，ESC 可取消）
     //   m_pasteCancelRequested   —— 用户按了 ESC，后台线程看到就删掉写了一半的文件
-    //   m_pasteProgressText      —— 状态栏正在显示的进度文案（只在界面线程读写）
-    //   m_pasteTotalItems        —— 本批一共几项（显示"第 i/N 项"用）
     //   m_virtualPasteResultPaths —— 后台线程最终写出的真实路径（撤销记录要用）
+    //
+    // 进度条的显示细节（状态栏子类化、自绘、任务栏进度）都在 PasteProgressBar 里，
+    // 这里只留"这一批的数据"：
+    //   m_pasteItemSizes —— 清单每一项的字节数（0 = 文件夹或来源没给大小）
+    //   m_pasteDoneBytes —— 已经写完的总字节（后台线程累加，界面线程读）
     std::atomic<bool>                            m_pasteInProgress{ false };
 
     // ---- 正在解压压缩包内部的项（双击 / 拖拽都走同一套）----
@@ -630,9 +630,6 @@ private:
     // 用共享所有权就不会读到已经销毁的成员
     std::shared_ptr<std::atomic<bool>>           m_pasteCancelRequested;
 
-    std::wstring                                 m_pasteProgressText;
-    size_t                                       m_pasteTotalItems = 0;
-
     // ---- 状态栏那条"字符进度条"要用的数据 ----
     //
     // 做法：一格代表相同的字节量，所以大文件占的格多、走得慢，小文件占的格少、
@@ -640,28 +637,11 @@ private:
     //
     //   m_pasteItemSizes   —— 清单每一项的字节数（0 = 文件夹或来源没给大小）
     //   m_pasteDoneBytes   —— 已经写完的总字节（后台线程累加，界面线程读）
-    //   m_pasteTotalBytes  —— 清单总字节（界面线程算好缓存；0 表示一个大小都没有）
     std::shared_ptr<std::vector<LONGLONG>>       m_pasteItemSizes;
     std::shared_ptr<std::atomic<LONGLONG>>       m_pasteDoneBytes;
-    LONGLONG                                     m_pasteTotalBytes = 0;
 
-    // 状态栏里那条字符进度条：
-    //   m_pasteBarPosition 当前进度（0..1000）
-    //   m_pasteBarRect     这条条在状态栏客户区里占的矩形（布局时算好）
-    // 状态栏被我们子类化了，它自己画完背景/文字后，PaintPasteBar 在这块矩形里
-    // 补画一串"满块字符"，已完成那段一种颜色、剩下那段另一种颜色。
-    int                                          m_pasteBarPosition = 0;
-    RECT                                         m_pasteBarRect = {};
-
-    // 分隔线位置（相对条左端的像素偏移，已经去重：同一像素只留一根）。
-    // 清单到达、或窗口尺寸变化时重算一次；之后每帧只遍历这个列表画线，
-    // 开销跟"文件数"彻底脱钩（最多就是条宽那么多个像素）。
-    std::vector<int>                             m_pasteBarLineOffsets;
-    bool                                         m_pasteBarLinesDirty = true;
-
-    // 任务栏按钮上的进度条（ITaskbarList3）。拿不到就是 nullptr，
-    // 所有调用点都先判空 —— 精简系统/某些会话里这个接口可能不给。
-    ITaskbarList3*                               m_taskbarList = nullptr;
+    // 进度条显示（状态栏子类化 + 自绘 + 任务栏按钮进度）
+    PasteProgressBar                             m_pasteBar;
 
     // 后台线程写完的目标路径清单（只在 PostMessage 之前写一次，界面线程取用）
     std::shared_ptr<std::vector<std::wstring>>   m_pendingVirtualResults;
@@ -671,32 +651,6 @@ private:
 
     // 粘贴虚拟文件（远程桌面那类）。剪贴板里没有这类东西时返回 false。
     bool DoPasteVirtualFiles(const std::wstring& targetDirectory);
-
-    // 状态栏按"第 i/N 项 + 进度条"更新粘贴进度（界面线程调用）
-    void UpdatePasteProgressText(size_t index, int percent);
-
-    // 拿任务栏按钮进度接口（成功就缓存在 m_taskbarList，失败就保持 nullptr 静默跳过）
-    void InitTaskbarProgress();
-
-    // 把状态栏切成"左文字 / 字符进度条 / 右文字"三段
-    // （粘贴开始时调用一次；窗口尺寸变化时再调）
-    void LayoutPasteBar();
-
-    // 画那条进度条（状态栏子类化后，在它画完背景时被调用）
-    // 一条固定 300px 的细横条：已完成蓝、未完成浅灰；
-    // 并按每个文件的大小提前画好 1px 分隔线，蓝越过线 = 那个文件传完了。
-    void PaintPasteBar();
-
-    // 算一次分隔线位置并存成"像素偏移列表"（同一像素只留一根）
-    void BuildPasteBarLines(int barWidth);
-
-    // 状态栏的窗口过程（子类化）：先让系统照常画，再补画进度条那一段
-    static LRESULT CALLBACK StatusBarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
-                                                  LPARAM lParam, UINT_PTR idSubclass,
-                                                  DWORD_PTR refData);
-
-    // 粘贴结束：状态栏恢复成一整格
-    void RemovePasteBar();
 
     // 这次后台操作是干什么的（决定完成后是整表刷新还是局部增删）
     enum class FileOperationKind { None, Copy, Move, Delete };
