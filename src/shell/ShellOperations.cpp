@@ -1066,12 +1066,26 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     {
         ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
 
-        // 目录要先清空才能删，这里只做文件那一套；
-        // 目录撞名时直接让 MoveFileEx 失败，由调用方报错（临时目录下一般不会撞）
-        if (!isDirectory)
+        if (isDirectory)
+        {
+            // 目录撞名：上一次拖同一个文件夹留下来的缓存就在这个位置。
+            // MoveFileEx 的 MOVEFILE_REPLACE_EXISTING 只能替换文件，替换不了已存在的目录，
+            // 不先清掉就会一直报"挪不到目标位置" → 这一项算失败 → 整次拖动直接放弃。
+            // 这个目录在临时目录里、内容都是我们自己解出来的，整个删掉重写最干净。
+            RemoveTreeBestEffort(outputPath);
+        }
+        else
         {
             ::DeleteFileW(outputPath.c_str());
         }
+    }
+
+    // 清完还在 → 多半是里面的文件正被别的程序打开（用户双击过缓存的 pdf）
+    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        error = L"缓存目录被占用，删不掉旧的同名文件夹：" + outputPath;
+        RemoveTreeBestEffort(stagingDirectory);
+        return false;
     }
 
     if (!::MoveFileExW(landingPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))

@@ -194,6 +194,10 @@ public:
     // 拖出/打开压缩包里的项时用它当"缓存对不对得上"的基准。
     FILETIME ModifiedOfPath(const std::wstring& path) const;
 
+    // 这个路径在列表里是不是文件夹（找不到就当不是）。
+    // 拖出压缩包内的项时，文件夹要单独展开成文件清单算进度，靠它区分。
+    bool IsFolderPath(const std::wstring& path) const;
+
     // 排序规则（用于新建项时判断插到哪个位置）
     void SetComparator(Comparator comparator) { m_comparator = std::move(comparator); }
 

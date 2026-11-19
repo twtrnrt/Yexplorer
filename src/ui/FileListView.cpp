@@ -1595,6 +1595,24 @@ FILETIME FileListView::ModifiedOfPath(const std::wstring& path) const
     return FILETIME{};
 }
 
+bool FileListView::IsFolderPath(const std::wstring& path) const
+{
+    if (m_result == nullptr || path.empty())
+    {
+        return false;
+    }
+
+    for (const auto& entry : m_result->entries)
+    {
+        if (entry.fullPath == path)
+        {
+            return entry.isFolder;
+        }
+    }
+
+    return false;
+}
+
 void FileListView::SelectAll()
 {
     if (m_hWnd == nullptr)

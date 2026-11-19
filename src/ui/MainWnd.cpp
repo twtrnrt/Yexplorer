@@ -6165,7 +6165,9 @@ FILETIME ExpectedContainerTime(const FILETIME& containerTime)
 
 bool MainWindow::ContainerCacheIsUsable(const std::wstring& outputPath,
                                         unsigned long long declaredSize,
-                                        const FILETIME&   expectedTime)
+                                        const FILETIME&   expectedTime,
+                                        const std::vector<std::wstring>& childRelativePaths,
+                                        const std::vector<unsigned long long>& childSizes)
 {
     if (outputPath.empty())
     {
@@ -6180,7 +6182,46 @@ bool MainWindow::ContainerCacheIsUsable(const std::wstring& outputPath,
 
     if ((fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
     {
-        return false;   // 是目录（拖出的是包内文件夹）→ 不做缓存复用
+        // ---- 文件夹项：目录在、目录时间对、清单里每个文件都在且大小对 ----
+        //
+        // 整目录解压收尾时给这个目录盖过"包内目录时间"，所以时间对得上就等于
+        // "这是我们上次解出来的那一份"。里面每个文件再逐个核对大小，
+        // 少一个、少半截（解压被打断）都会判成不可用。
+        if (::CompareFileTime(&fileData.ftLastWriteTime, &expectedTime) != 0)
+        {
+            return false;
+        }
+
+        for (size_t child = 0; child < childRelativePaths.size(); ++child)
+        {
+            const std::wstring candidate = outputPath + L"\\" + childRelativePaths[child];
+
+            WIN32_FILE_ATTRIBUTE_DATA childData = {};
+            if (!::GetFileAttributesExW(candidate.c_str(), ::GetFileExInfoStandard, &childData))
+            {
+                return false;   // 少了其中一个文件
+            }
+
+            if ((childData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                return false;   // 该是文件的位置成了目录
+            }
+
+            // 清单里那份大小（包内声明）和实际对不上 → 没写完整
+            if (child < childSizes.size() && childSizes[child] > 0)
+            {
+                const unsigned long long actualSize =
+                    (static_cast<unsigned long long>(childData.nFileSizeHigh) << 32) |
+                    static_cast<unsigned long long>(childData.nFileSizeLow);
+
+                if (actualSize != childSizes[child])
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     const unsigned long long actualSize =
@@ -6221,8 +6262,17 @@ void MainWindow::StampExtractedFileTime(const std::wstring& path, const FILETIME
         ::SetFileAttributesW(path.c_str(), attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
     }
 
+    // 目录和文件的打开方式不一样：打开目录必须带 FILE_FLAG_BACKUP_SEMANTICS，
+    // 否则 CreateFileW 一律失败（文件夹项的缓存判据就靠这里盖上的时间，盖不上等于永远不命中）
+    DWORD openFlags = FILE_ATTRIBUTE_NORMAL;
+
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        openFlags |= FILE_FLAG_BACKUP_SEMANTICS;
+    }
+
     HANDLE file = ::CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                OPEN_EXISTING, openFlags, nullptr);
 
     bool stamped = false;
     if (file != INVALID_HANDLE_VALUE)
@@ -6241,6 +6291,67 @@ void MainWindow::StampExtractedFileTime(const std::wstring& path, const FILETIME
     {
         // 盖不上不影响本次使用：下次这条会被判成"对不上"，重解一次而已
         Logger::Warn(L"解压：给缓存文件盖修改时间失败，下次会重新解压：" + path);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 递归数出"容器内某个文件夹"里的所有文件（相对路径 + 大小）
+//
+// 只给文件夹项用。整目录复制（CopyHere）中途拿不到"此刻复制到哪个文件"，
+// 所以解压之前先把清单录一遍；复制过程中每秒对着清单问一次"这个文件出现了没有、
+// 长了多少"，就能算出真实进度，还能看出当前正在写的是哪个文件。
+//
+// 只录一次、之后不再遍历目录树 —— 每秒只对清单里那些已知路径做一次 stat，
+// 1000 个文件也只要 1~3ms，基本无感。
+// ----------------------------------------------------------------------------
+static void CollectContainerFiles(const std::wstring& folderVirtualPath,
+                                  const std::wstring& relativeRoot,
+                                  std::vector<std::wstring>& outPaths,
+                                  std::vector<unsigned long long>& outSizes,
+                                  std::vector<FILETIME>& outTimes,
+                                  int depth)
+{
+    if (depth > 32)
+    {
+        return;   // 防御：容器里万一是环形结构，别把栈跑爆
+    }
+
+    shell::EnumerateResult children = shell::EnumerateFolder(folderVirtualPath, nullptr);
+
+    if (FAILED(children.hr))
+    {
+        return;
+    }
+
+    for (const auto& entry : children.entries)
+    {
+        if (entry.isGroupHeader || entry.isSpacer)
+        {
+            continue;
+        }
+
+        std::wstring relative = relativeRoot;
+
+        if (!relative.empty() && relative.back() != L'\\')
+        {
+            relative += L'\\';
+        }
+
+        relative += entry.name;
+
+        if (entry.isFolder)
+        {
+            CollectContainerFiles(entry.fullPath, relative, outPaths, outSizes, outTimes, depth + 1);
+        }
+        else
+        {
+            outPaths.push_back(relative);
+            outSizes.push_back(entry.size);
+
+            // 包没给时间时统一走 1980 兜底，和单文件项用的是同一套规范化，
+            // 这样"整目录解压"和"单独打开里面某个文件"盖出来的是同一个值
+            outTimes.push_back(ExpectedContainerTime(entry.modified));
+        }
     }
 }
 
@@ -6334,6 +6445,22 @@ bool MainWindow::BuildContainerExtractItems(const std::vector<std::wstring>& pat
         item.expectedSize = m_fileListView.SizeOfPath(path);
         item.expectedTime = ExpectedContainerTime(m_fileListView.ModifiedOfPath(path));
 
+        // 文件夹没有"大小"，SizeOfPath 给的是 0；这里把里面的文件清单录一遍，
+        // 用清单的总字节当进度分母，复制过程中对着清单算已写入多少。
+        // （空文件夹清单为空、总字节 0，进度退回按项数走，和以前一样）
+        if (m_fileListView.IsFolderPath(path))
+        {
+            CollectContainerFiles(path, L"", item.childRelativePaths, item.childSizes,
+                                  item.childTimes, 0);
+
+            item.expectedSize = 0;
+
+            for (unsigned long long childSize : item.childSizes)
+            {
+                item.expectedSize += childSize;
+            }
+        }
+
         totalBytes += item.expectedSize;
         items.push_back(std::move(item));
     }
@@ -6371,7 +6498,8 @@ bool MainWindow::RunContainerExtraction(const std::vector<ContainerExtractItem>&
 
     for (const auto& item : items)
     {
-        if (ContainerCacheIsUsable(item.outputPath, item.expectedSize, item.expectedTime))
+        if (ContainerCacheIsUsable(item.outputPath, item.expectedSize, item.expectedTime,
+                                   item.childRelativePaths, item.childSizes))
         {
             Logger::Info(L"解压：命中缓存，直接复用：" + item.virtualPath);
 
@@ -6457,6 +6585,17 @@ bool MainWindow::RunContainerExtraction(const std::vector<ContainerExtractItem>&
             if (!job->realPath.empty())
             {
                 StampExtractedFileTime(job->realPath, item.expectedTime);
+
+                // 文件夹项：把里面每个文件也盖上"包内那一项的时间"。
+                // 这样以后单独打开/拖出目录里的某个文件时，它的缓存判据（时间对得上）
+                // 也能命中 —— 文件和文件夹共用同一份缓存，不用为了一个文件再整目录解一遍。
+                // 只在第一次解压时做一次，之后命中缓存就不会走到这里。
+                for (size_t child = 0; child < item.childRelativePaths.size() &&
+                                       child < item.childTimes.size(); ++child)
+                {
+                    StampExtractedFileTime(job->realPath + L"\\" + item.childRelativePaths[child],
+                                           item.childTimes[child]);
+                }
             }
 
             if (SUCCEEDED(comResult))
@@ -6468,33 +6607,93 @@ bool MainWindow::RunContainerExtraction(const std::vector<ContainerExtractItem>&
         });
         worker.detach();
 
-        // ---- 主线程：每 50ms 读一次大小，刷状态栏 ----
+        // ---- 主线程：每 50ms 一次，刷状态栏 ----
+        //
+        // 单文件项：每 50ms 读一次候选文件的大小，成本极低。
+        // 文件夹项：清单可能很长（几千个文件），限成每秒扫一次，其余时间沿用上次结果。
+        unsigned long long lastListScanTick = 0;
+        unsigned long long listWrittenBytes = 0;
+
         while (!job->finished)
         {
-            // 已写字节 = 三个候选里最大的那个：
-            //   partialPath（zip 的中间文件）
-            //   landingPath（rar 落地后的那个文件）
-            //   outputPath （已经改名完成的正式文件）
-            unsigned long long writtenBytes = 0;
+            const unsigned long long nowTick      = ::GetTickCount64();
+            unsigned long long       writtenBytes = 0;
 
-            const std::wstring* candidates[3] = { &item.partialPath, &item.landingPath,
-                                                  &item.outputPath };
-
-            for (const std::wstring* candidate : candidates)
+            if (item.childRelativePaths.empty())
             {
-                WIN32_FILE_ATTRIBUTE_DATA fileData = {};
+                // ---- 单文件项：已写字节 = 三个候选里最大的那个 ----
+                //   partialPath（zip 的中间文件）
+                //   landingPath（rar 落地后的那个文件）
+                //   outputPath （已经改名完成的正式文件）
+                const std::wstring* candidates[3] = { &item.partialPath, &item.landingPath,
+                                                      &item.outputPath };
 
-                if (::GetFileAttributesExW(candidate->c_str(), ::GetFileExInfoStandard, &fileData))
+                for (const std::wstring* candidate : candidates)
                 {
-                    const unsigned long long bytes =
-                        (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
-                        static_cast<unsigned long long>(fileData.nFileSizeLow);
+                    WIN32_FILE_ATTRIBUTE_DATA fileData = {};
 
-                    if (bytes > writtenBytes)
+                    if (::GetFileAttributesExW(candidate->c_str(), ::GetFileExInfoStandard, &fileData))
                     {
-                        writtenBytes = bytes;
+                        const unsigned long long bytes =
+                            (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
+                            static_cast<unsigned long long>(fileData.nFileSizeLow);
+
+                        if (bytes > writtenBytes)
+                        {
+                            writtenBytes = bytes;
+                        }
                     }
                 }
+            }
+            else if (nowTick - lastListScanTick >= 1000)
+            {
+                // ---- 文件夹项：每秒对着清单问一次"每个文件出现了没有、长了多少" ----
+                //
+                // 只看清单里已经知道的那些路径，不去遍历目录树。
+                lastListScanTick = nowTick;
+                listWrittenBytes = 0;
+
+                for (size_t child = 0; child < item.childRelativePaths.size(); ++child)
+                {
+                    const std::wstring& relative = item.childRelativePaths[child];
+
+                    // 两个位置都要看：
+                    //   rar 通道：先落在专属临时目录里（landingPath 就是那个目录）
+                    //   发布之后：在正式位置（outputPath 就是那个目录）
+                    const std::wstring landingCandidate = item.landingPath + L"\\" + relative;
+                    const std::wstring finalCandidate   = item.outputPath + L"\\" + relative;
+
+                    unsigned long long bytes = 0;
+
+                    WIN32_FILE_ATTRIBUTE_DATA fileData = {};
+
+                    if (::GetFileAttributesExW(landingCandidate.c_str(), ::GetFileExInfoStandard, &fileData))
+                    {
+                        bytes = (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
+                                static_cast<unsigned long long>(fileData.nFileSizeLow);
+                    }
+
+                    if (::GetFileAttributesExW(finalCandidate.c_str(), ::GetFileExInfoStandard, &fileData))
+                    {
+                        const unsigned long long finalBytes =
+                            (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
+                            static_cast<unsigned long long>(fileData.nFileSizeLow);
+
+                        if (finalBytes > bytes)
+                        {
+                            bytes = finalBytes;
+                        }
+                    }
+
+                    const unsigned long long declared = item.childSizes[child];
+
+                    listWrittenBytes += (declared > 0 && bytes > declared) ? declared : bytes;
+                }
+            }
+
+            if (!item.childRelativePaths.empty())
+            {
+                writtenBytes = listWrittenBytes;
             }
 
             const unsigned long long expected  = (item.expectedSize > 0) ? item.expectedSize
@@ -6522,6 +6721,7 @@ bool MainWindow::RunContainerExtraction(const std::vector<ContainerExtractItem>&
             }
 
             // 文案统一按拖拽那一套：带项数，取消提示跟在百分比后面（不再分左右两格）
+            // 提示条只有这一句，单文件项和文件夹项都不额外拼文件名
             const std::wstring text = L"正在解压… 第 " + std::to_wstring(index + 1) + L"/" +
                                       std::to_wstring(totalItems) + L" 项 " +
                                       std::to_wstring(percent) + L"%";

@@ -428,6 +428,15 @@ private:
         std::wstring       landingPath;         // rar 落地后的那个文件（进度也盯它）
         unsigned long long expectedSize = 0;    // 包内声明的大小（0 = 包没给）
         FILETIME           expectedTime = {};   // 包内那一项的修改时间（缓存判据）
+
+        // ---- 下面两项只对"文件夹项"有值 ----
+        //
+        // 整目录复制（CopyHere）中途拿不到"当前复制到哪个文件"，所以解压前先把这个
+        // 目录在包里的文件清单数出来（文件名和大小），复制过程中每秒对着清单问一次
+        // "这个文件出现了没有、长了多少"，就能算出真实进度和当前正在写的文件名。
+        std::vector<std::wstring>       childRelativePaths;  // 相对该目录的子路径
+        std::vector<unsigned long long> childSizes;          // 每个子文件在包内声明的大小
+        std::vector<FILETIME>           childTimes;          // 每个子文件在包内的修改时间
     };
 
     // 把一批路径算成"要解的项"。一项都算不出来时返回 false（原因已记日志）。
@@ -467,10 +476,20 @@ private:
     //     "写入那一刻"，永远对不上）。
     // 目录名本身带"包大小 + 包修改时间"，所以包被换掉时根本不会落到这个目录，
     // 不需要再单独记一份包指纹。
+    //
+    // 文件夹项（拖/打开压缩包里的整个文件夹）判据不同：目录里有一堆文件，
+    // 没法比"一个文件的大小"，改成三条同时满足：
+    //   ① 目录存在、且确实是目录；
+    //   ② 目录的修改时间 == 包内这个目录的时间（整目录解压收尾时会盖上）；
+    //   ③ 清单里每个文件都存在、都是文件、大小对得上（声明为 0 时跳过）。
+    // 这样"文件"和"文件夹"共用同一份缓存：整目录先解过，之后再单独打开里面的
+    // 某个文件，靠收尾时逐个盖上的时间戳就能判命中，不用重解。
     // ----------------------------------------------------------------
     bool ContainerCacheIsUsable(const std::wstring& outputPath,
                                 unsigned long long declaredSize,
-                                const FILETIME&   expectedTime);
+                                const FILETIME&   expectedTime,
+                                const std::vector<std::wstring>& childRelativePaths,
+                                const std::vector<unsigned long long>& childSizes);
 
     // 解压成功后把解出来的文件盖上"包内修改时间"这个时间戳（顺便维持只读属性）
     //

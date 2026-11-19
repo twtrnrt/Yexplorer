@@ -65,11 +65,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Personal Project"
             VALUE "FileDescription",  "File Explorer (custom implementation)"
-            VALUE "FileVersion",      "1.5.0.0"
+            VALUE "FileVersion",      "1.6.0.0"
             VALUE "InternalName",     "FileExplorer"
             VALUE "OriginalFilename", "FileExplorer.exe"
             VALUE "ProductName",      "File Explorer"
-            VALUE "ProductVersion",   "1.5.0.0"
+            VALUE "ProductVersion",   "1.6.0.0"
         END
     END
     BLOCK "VarFileInfo"
