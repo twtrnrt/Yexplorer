@@ -781,105 +781,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // 创建
     // --------------------------------------------------------------
     case WM_CREATE:
-    {
-        // 父窗口绘制时跳过子控件占的区域，避免拖动分隔线时整片重画闪烁
-        LONG_PTR windowStyle = ::GetWindowLongPtrW(m_hWnd, GWL_STYLE);
-        ::SetWindowLongPtrW(m_hWnd, GWL_STYLE, windowStyle | WS_CLIPCHILDREN);
-
-        // 图标缓存必须先初始化：左侧导航栏建树时就要用它取图标
-        if (m_iconCache.Initialize())
-        {
-            Logger::Info(L"系统图标列表初始化成功");
-        }
-        else
-        {
-            Logger::Warn(L"系统图标列表初始化失败，界面将不显示图标");
-        }
-
-        CreateChildControls();
-        m_fileListView.SetIconCache(&m_iconCache);
-
-        // 拖完表头列宽，把三列宽度记进配置（下次打开还是这个宽度）
-        m_fileListView.SetColumnWidthChangedCallback([this]()
-        {
-            SaveWindowState();
-        });
-
-        // 阶段 10：把上次记下来的样子恢复出来（左栏宽度、三列宽度、查看模式）
-        RestoreSavedLayout();
-
-        // 从本程序把文件拖到别处并且是"移动"时，源目录内容已经变了，要刷新列表
-        m_fileListView.SetDragCompletedCallback([this](DWORD)
-        {
-            RefreshCurrentFolder();
-        });
-
-        // 拖出前把路径准备好：普通文件原样返回；压缩包内部的项先解到临时目录
-        m_fileListView.SetPrepareDragPathsCallback([this](const std::vector<std::wstring>& paths)
-        {
-            return PrepareDragPaths(paths);
-        });
-
-        // 选中项变了：状态栏里的"选中 N 项 / 总大小"要跟着变
-        //
-        // 不能在这里立刻算：虚拟列表在 Shift 多选时是先发通知、后提交选中状态，
-        // 立刻查会读到旧值（0 项）。丢一条消息到队尾，合并成一次刷新。
-        m_fileListView.SetSelectionChangedCallback([this]()
-        {
-            if (!m_selectionRefreshPending)
-            {
-                m_selectionRefreshPending = true;
-                ::PostMessageW(m_hWnd, WM_APP_SELECTION_CHANGED, 0, 0);
-            }
-        });
-
-        // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
-        RegisterDropTargets();
-
-        // 右键菜单要用的数据：「新建」项清单 + 菜单小图标，全部在后台准备，
-        // 不占启动时间；菜单弹出时只读内存
-        StartBackgroundMenuData();
-
-        // 临时缓存清理也丢后台线程：枚举、判时间、删除都不挡启动界面；
-        // 一次性任务，detach 即可，退出时没删完的留到下次启动再清
-        std::thread([]{ shell::CleanupTempCache(); }).detach();
-
-        LayoutChildren();
-
-        // 上次停在哪个目录就直接打开哪个（目录已经不在了就回 C:\）
-        std::wstring startPath;
-
-        // 「在新窗口中打开」等带命令行参数启动时，优先用参数里的目录
-        if (!m_startupPath.empty() && IsStartPathUsable(m_startupPath))
-        {
-            startPath = m_startupPath;
-            Logger::Info(L"按命令行参数启动：" + startPath);
-        }
-        else
-        {
-            if (!m_startupPath.empty())
-            {
-                Logger::Warn(L"命令行给的目录不可用：" + m_startupPath);
-            }
-
-            startPath = core::Settings::Instance().LastFolder();
-
-            if (startPath.empty() || !IsStartPathUsable(startPath))
-            {
-                if (!startPath.empty())
-                {
-                    Logger::Warn(L"上次的目录已经不在了，改回默认目录：" + startPath);
-                }
-                startPath = kInitialPath;
-            }
-        }
-
-        Logger::Info(L"启动目录：" + startPath);
-
-        m_history.Reset(startPath);
-        StartEnumeration(startPath);
+        OnCreate();
         return 0;
-    }
 
     // --------------------------------------------------------------
     // 尺寸变化
@@ -1660,6 +1563,111 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
         }
     }
     return false;
+}
+
+// ----------------------------------------------------------------------------
+// 窗口创建：初始化图标缓存、建子控件、恢复上次的样子、打开启动目录
+//
+// 原来整段在 HandleMessage 的 WM_CREATE 分支里，抽出来以后消息分发更薄。
+// ----------------------------------------------------------------------------
+void MainWindow::OnCreate()
+{
+    // 父窗口绘制时跳过子控件占的区域，避免拖动分隔线时整片重画闪烁
+    LONG_PTR windowStyle = ::GetWindowLongPtrW(m_hWnd, GWL_STYLE);
+    ::SetWindowLongPtrW(m_hWnd, GWL_STYLE, windowStyle | WS_CLIPCHILDREN);
+
+    // 图标缓存必须先初始化：左侧导航栏建树时就要用它取图标
+    if (m_iconCache.Initialize())
+    {
+        Logger::Info(L"系统图标列表初始化成功");
+    }
+    else
+    {
+        Logger::Warn(L"系统图标列表初始化失败，界面将不显示图标");
+    }
+
+    CreateChildControls();
+    m_fileListView.SetIconCache(&m_iconCache);
+
+    // 拖完表头列宽，把三列宽度记进配置（下次打开还是这个宽度）
+    m_fileListView.SetColumnWidthChangedCallback([this]()
+    {
+        SaveWindowState();
+    });
+
+    // 阶段 10：把上次记下来的样子恢复出来（左栏宽度、三列宽度、查看模式）
+    RestoreSavedLayout();
+
+    // 从本程序把文件拖到别处并且是"移动"时，源目录内容已经变了，要刷新列表
+    m_fileListView.SetDragCompletedCallback([this](DWORD)
+    {
+        RefreshCurrentFolder();
+    });
+
+    // 拖出前把路径准备好：普通文件原样返回；压缩包内部的项先解到临时目录
+    m_fileListView.SetPrepareDragPathsCallback([this](const std::vector<std::wstring>& paths)
+    {
+        return PrepareDragPaths(paths);
+    });
+
+    // 选中项变了：状态栏里的"选中 N 项 / 总大小"要跟着变
+    //
+    // 不能在这里立刻算：虚拟列表在 Shift 多选时是先发通知、后提交选中状态，
+    // 立刻查会读到旧值（0 项）。丢一条消息到队尾，合并成一次刷新。
+    m_fileListView.SetSelectionChangedCallback([this]()
+    {
+        if (!m_selectionRefreshPending)
+        {
+            m_selectionRefreshPending = true;
+            ::PostMessageW(m_hWnd, WM_APP_SELECTION_CHANGED, 0, 0);
+        }
+    });
+
+    // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
+    RegisterDropTargets();
+
+    // 右键菜单要用的数据：「新建」项清单 + 菜单小图标，全部在后台准备，
+    // 不占启动时间；菜单弹出时只读内存
+    StartBackgroundMenuData();
+
+    // 临时缓存清理也丢后台线程：枚举、判时间、删除都不挡启动界面；
+    // 一次性任务，detach 即可，退出时没删完的留到下次启动再清
+    std::thread([]{ shell::CleanupTempCache(); }).detach();
+
+    LayoutChildren();
+
+    // 上次停在哪个目录就直接打开哪个（目录已经不在了就回 C:\）
+    std::wstring startPath;
+
+    // 「在新窗口中打开」等带命令行参数启动时，优先用参数里的目录
+    if (!m_startupPath.empty() && IsStartPathUsable(m_startupPath))
+    {
+        startPath = m_startupPath;
+        Logger::Info(L"按命令行参数启动：" + startPath);
+    }
+    else
+    {
+        if (!m_startupPath.empty())
+        {
+            Logger::Warn(L"命令行给的目录不可用：" + m_startupPath);
+        }
+
+        startPath = core::Settings::Instance().LastFolder();
+
+        if (startPath.empty() || !IsStartPathUsable(startPath))
+        {
+            if (!startPath.empty())
+            {
+                Logger::Warn(L"上次的目录已经不在了，改回默认目录：" + startPath);
+            }
+            startPath = kInitialPath;
+        }
+    }
+
+    Logger::Info(L"启动目录：" + startPath);
+
+    m_history.Reset(startPath);
+    StartEnumeration(startPath);
 }
 
 // ============================================================================

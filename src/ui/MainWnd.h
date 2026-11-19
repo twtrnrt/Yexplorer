@@ -147,6 +147,9 @@ private:
     // 菜单 / 快捷键命令分发（WM_COMMAND 的处理体）。true = 已处理
     bool HandleCommandMessage(WPARAM wParam);
 
+    // 窗口创建（WM_CREATE 的处理体）
+    void OnCreate();
+
     // 创建工具栏按钮、地址栏、状态栏、字体
     void CreateChildControls();
 
