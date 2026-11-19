@@ -97,6 +97,22 @@ bool RegisterWindowDropTarget(HWND hwnd, const DropTargetCallbacks& callbacks);
 void UnregisterWindowDropTarget(HWND hwnd);
 
 // ----------------------------------------------------------------------------
+// 拖动开始前显示的一条状态提示（光标右下方，和「复制到 xxx」同款样式）
+//
+// 用在哪：从压缩包里往外拖时，数据要先解压出来，这段发生在 DoDragDrop 之前，
+// 没有拖拽会话也就没有任何提示。用它显示「正在解压… 第 2/5 项 45%」，
+// 把"按着鼠标等了半天什么都没发生"变成"看得见在干活"。
+//
+// 调用方通常在没有消息泵的同步循环里，所以每次调用都会自己重定位 + 强制重绘，
+// 可以高频调用（建议 100ms 一次）。
+//
+// 注意：和拖拽中的「复制到 xxx」提示条用的是同一窗口类，但各自一个窗口实例，
+// 解压结束（HideDragStatusTip）后随即进入拖拽，两者不会同时出现。
+// ----------------------------------------------------------------------------
+void ShowDragStatusTip(const std::wstring& text);
+void HideDragStatusTip();
+
+// ----------------------------------------------------------------------------
 // 拖入效果计算（对外暴露，方便单元验证）：
 //   keyState           ：拖动时的修饰键状态（MK_CONTROL / MK_SHIFT / MK_ALT）
 //   sourcePreferredEffect ：拖动源声明的"首选效果"（Preferred DropEffect 格式）

@@ -19,6 +19,7 @@
 #pragma once
 
 #include <windows.h>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,12 @@ HRESULT CreateNewFolder(const std::wstring& directory, std::wstring& newFolderPa
 // containerRoot  ：它所属的压缩包完整路径（C:\a.rar）——走 Shell 自动化通道要用
 // relativePath   ：这一项在包内的相对路径（sub\inner.txt），决定落到目标目录的哪个子目录
 // targetDirectory：解到哪个普通目录（不存在会自动建）
+// partialFilePath：内容中途写到哪个文件（写完才改名成正式文件），
+//                  由调用方给：调用方要盯着它的大小算进度，两边必须是同一个名字
+// stagingDirectory：Shell 自动化通道（rar/7z）先把内容复制到哪个临时子目录，
+//                  确认复制收尾后再挪到正式位置；同样由调用方给（进度也盯它）
+// cancel         ：取消标志（可为 nullptr）。为 true 时立刻收手，
+//                  半成品（中间文件 / 临时子目录）都删掉，正式文件不会出现
 // error          ：失败时的原因（中文，可直接给用户看）
 // 返回：解出来的真实文件完整路径；失败返回空串
 // ----------------------------------------------------------------------------
@@ -86,6 +93,9 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
                                    const std::wstring& containerRoot,
                                    const std::wstring& relativePath,
                                    const std::wstring& targetDirectory,
+                                   const std::wstring& partialFilePath,
+                                   const std::wstring& stagingDirectory,
+                                   const std::atomic<bool>* cancel,
                                    std::wstring& error);
 
 // 重命名一项（F2）
@@ -96,5 +106,9 @@ HRESULT RenameItem(const std::wstring& oldPath, const std::wstring& newName, HWN
 // 给某个文件/文件夹建一个快捷方式（拖动时按住 Alt 用这个）
 // targetPath：快捷方式指向的目标；linkPath：快捷方式文件本身的完整路径（以 .lnk 结尾）
 HRESULT CreateShortcut(const std::wstring& targetPath, const std::wstring& linkPath);
+
+// 递归删掉一个文件/目录，尽力而为：删不掉（被占用、无权限）就跳过，不报错弹窗。
+// 只读文件会先放开属性再删。供解压取消清理和启动时的临时缓存清理复用。
+void RemoveTreeBestEffort(const std::wstring& path);
 
 } // namespace shellops

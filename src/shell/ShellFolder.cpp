@@ -459,24 +459,11 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
     //
     // 判定只看真实磁盘属性：路径存在、且不是目录 —— 那就是压缩包/容器文件
     // （C:\a.zip）。Shell 能把它当文件夹枚举，但里面的项都是虚拟项，
-    // 菜单能力也和普通目录不同（zip 能删能剪，rar/7z 只读），所以先记下来。
+    // 菜单能力也和普通目录不同（压缩包内部一律只读），所以先记下来。
     // 虚拟命名空间（"::{GUID}"）没有磁盘属性，按普通目录处理。
     // ------------------------------------------------------------------
     if (IsFileSystemPath(path))
     {
-        // 取扩展名并转小写（判断是不是 zip 用）
-        const auto extensionOf = [](const std::wstring& onePath)
-        {
-            const wchar_t* dot = ::PathFindExtensionW(onePath.c_str());
-            std::wstring  text = (dot == nullptr) ? L"" : dot;
-
-            for (auto& ch : text)
-            {
-                ch = static_cast<wchar_t>(::towlower(ch));
-            }
-            return text;
-        };
-
         const DWORD ownAttributes = ::GetFileAttributesW(path.c_str());
 
         if (ownAttributes != INVALID_FILE_ATTRIBUTES &&
@@ -484,7 +471,6 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
         {
             // 路径自己就是磁盘上的文件 → 压缩包本身
             result.isContainer = true;
-            result.isZipContainer = (extensionOf(path) == L".zip");
         }
         else if (ownAttributes == INVALID_FILE_ATTRIBUTES)
         {
@@ -498,7 +484,6 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             if (!containerRoot.empty())
             {
                 result.isContainer = true;
-                result.isZipContainer = (extensionOf(containerRoot) == L".zip");
             }
         }
     }
@@ -1185,25 +1170,10 @@ bool IsPathInsideContainer(const std::wstring& path)
 // ----------------------------------------------------------------------------
 // 这个路径是不是 .zip（只有 zip 有系统自带的可写处理器）
 // ----------------------------------------------------------------------------
-static bool IsZipArchivePath(const std::wstring& path)
-{
-    const wchar_t* dot = ::PathFindExtensionW(path.c_str());
-    std::wstring  extension = (dot == nullptr) ? L"" : dot;
-
-    for (wchar_t& ch : extension)
-    {
-        ch = static_cast<wchar_t>(::towlower(ch));
-    }
-
-    return extension == L".zip";
-}
-
-// ----------------------------------------------------------------------------
 // 这个目录能不能接收"写入"（粘贴、拖动放入）
 //
 //   · 磁盘上的普通目录          → 能
-//   · zip 内部（含子目录）      → 能（系统自带 Compressed Folder 处理器可写）
-//   · rar / 7z / tar 内部       → 不能（WinRAR 的处理器只读，实测写不进去）
+//   · 压缩包内部（不分格式）    → 不能（一律只读，zip 也一样）
 //   · 虚拟命名空间（::{GUID}）  → 按"能"处理，维持原来的行为
 //
 // 只查文件属性，不碰 COM。粘贴 / 拖放前调一次，成本可忽略；
@@ -1226,19 +1196,12 @@ bool IsWritableTargetDirectory(const std::wstring& directory)
 
     if (attributes != INVALID_FILE_ATTRIBUTES)
     {
-        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
-        {
-            return true;   // 磁盘上的普通目录
-        }
-
-        // 磁盘上的文件 = 压缩包本身：只有 zip 能写入内部
-        return IsZipArchivePath(directory);
+        // 磁盘上的目录能写；磁盘上的文件 = 压缩包本身，它内部只读
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     }
 
-    // 磁盘上没有这个路径 → 压缩包内部（可能是包里的子目录），看归属的压缩包
-    const std::wstring containerRoot = ContainerRootForPath(directory);
-
-    return !containerRoot.empty() && IsZipArchivePath(containerRoot);
+    // 磁盘上没有这个路径：压缩包内部（含包内子目录）一律只读；真不存在的路径也不能写
+    return false;
 }
 
 std::wstring GetParentPath(const std::wstring& path)

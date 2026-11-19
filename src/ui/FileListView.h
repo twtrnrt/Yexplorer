@@ -190,6 +190,10 @@ public:
     // 拖出压缩包里的项时用它算"这一项解完该有多大"，进度条靠这个算百分比。
     unsigned long long SizeOfPath(const std::wstring& path) const;
 
+    // 某一个路径的修改时间（按完整路径查；找不到或容器没给时间时返回全 0）。
+    // 拖出/打开压缩包里的项时用它当"缓存对不对得上"的基准。
+    FILETIME ModifiedOfPath(const std::wstring& path) const;
+
     // 排序规则（用于新建项时判断插到哪个位置）
     void SetComparator(Comparator comparator) { m_comparator = std::move(comparator); }
 

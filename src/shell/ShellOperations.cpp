@@ -808,10 +808,63 @@ HRESULT GetAutomationFolder(IDispatch* shellApp, const std::wstring& path,
 
 } // namespace
 
+// 递归删掉一个文件/目录，删不掉就算了（尽力而为）
+//
+// 用途：解压中途取消时清掉写了一半的东西；启动时清理超期临时缓存也复用它。
+// 半截文件不可能被判成缓存（大小/时间都对不上），留着只是垃圾：
+// 名字里带进程号的，进程一重启就再也没人认得出它。
+void RemoveTreeBestEffort(const std::wstring& path)
+{
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        return;
+    }
+
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+    {
+        ::SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);   // 只读文件要先放开
+        ::DeleteFileW(path.c_str());
+        return;
+    }
+
+    ::SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+
+    WIN32_FIND_DATAW findData = {};
+    HANDLE find = ::FindFirstFileW((path + L"\\*").c_str(), &findData);
+
+    if (find != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            // 跳过 "." 和 ".."
+            if (findData.cFileName[0] == L'.' &&
+                (findData.cFileName[1] == 0 ||
+                 (findData.cFileName[1] == L'.' && findData.cFileName[2] == 0)))
+            {
+                continue;
+            }
+
+            RemoveTreeBestEffort(path + L"\\" + findData.cFileName);
+        }
+        while (::FindNextFileW(find, &findData));
+
+        ::FindClose(find);
+    }
+
+    ::RemoveDirectoryW(path.c_str());
+}
+
+
 // 走 Shell 自动化把一项解出来（成功时文件已经落在 outputPath）
+// stagingDirectory：专属临时子目录（CopyHere 先落这里，确认收尾后再挪到 outputPath）
+// cancel          ：取消标志（可为 nullptr）；为 true 时不再发布正式文件
 bool ExtractViaShellAutomation(const std::wstring& containerRoot,
                                const std::wstring& innerPath,
                                const std::wstring& outputPath,
+                               const std::wstring& stagingDirectory,
+                               const std::atomic<bool>* cancel,
                                std::wstring& error)
 {
     wil::com_ptr<IDispatch> shellApp;
@@ -866,15 +919,31 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
 
     // ---- 2) 准备落地目录 ----
     //
-    // CopyHere 只认"文件夹"，而且落地时用的是项自己的名字，
-    // 所以这里定到 outputPath 的父目录（对应包内那一层子目录），
-    // 落地后再挪到 outputPath 这个准确位置，避免包内不同目录的同名文件互相覆盖。
-    const std::wstring landingDirectory = ParentDirectoryOf(outputPath);
+    // CopyHere 只认"文件夹"，而且落地时用的是项自己的名字；为了不跟别人踩同一个
+    // 正式文件（另一个窗口可能同时在解同一项，它们共用同一个临时目录），
+    // 先落到调用方给的专属子目录，确认复制真的收尾之后再挪到正式位置。
+    // 这样正式名上永远只出现"某一次完整复制的结果"。
+    //
+    // 目录名由调用方决定（调用方要盯着里面那个文件的大小算进度，两边必须是同一个路径）。
+    // ---- 2b) 复制还没开始，先看一眼取消 ----
+    //
+    // CopyHere 一旦调进去就打断不了（复制循环在系统的代码里跑）。所以取消分两种情况：
+    //   * 复制还没开始 → 真停，什么都不做；
+    //   * 复制已经开始 → 只能等它跑完。跑完的结果留在专属子目录里，我们照常发布到
+    //     正式名，当成本次解压的缓存（下次直接命中），而不是白删掉十几秒的活。
+    if (cancel != nullptr && cancel->load())
+    {
+        error = L"已取消";
+        return false;
+    }
+
+    ::CreateDirectoryW(stagingDirectory.c_str(), nullptr);   // 已存在时返回失败，忽略即可
 
     wil::com_ptr<IDispatch> destinationFolder;
-    if (FAILED(GetAutomationFolder(shellApp.get(), landingDirectory, destinationFolder)))
+    if (FAILED(GetAutomationFolder(shellApp.get(), stagingDirectory, destinationFolder)))
     {
-        error = L"打不开临时目录：" + landingDirectory;
+        error = L"打不开临时目录：" + stagingDirectory;
+        ::RemoveDirectoryW(stagingDirectory.c_str());
         return false;
     }
 
@@ -904,7 +973,7 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
                        : outputPath.substr(lastSeparator + 1);
     }
 
-    std::wstring landingPath = landingDirectory;
+    std::wstring landingPath = stagingDirectory;
 
     if (landingPath.back() != L'\\' && landingPath.back() != L'/')
     {
@@ -937,6 +1006,9 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     }
 
     // ---- 4) 等东西真的落盘（CopyHere 是异步的，最多等 5 秒）----
+    //
+    // 注意：复制从这里开始就已经打断不了了，所以循环里不再响应取消 ——
+    // 让它跑完，结果当缓存留着（见上面 2b 的说明）。
     bool landed = false;
     bool isDirectory = false;
 
@@ -960,29 +1032,53 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     if (!landed)
     {
         error = L"复制超时，文件没有出现：" + landingPath;
+        RemoveTreeBestEffort(stagingDirectory);
         return false;
     }
 
-    // ---- 5) 挪到准确位置（名字不一样时改名），再设成只读 ----
-    if (_wcsicmp(landingPath.c_str(), outputPath.c_str()) != 0)
+    // ---- 4b) 等复制真的收尾 ----
+    //
+    // CopyHere 有可能还在后台写，这时把文件挪走会挪走一个半截结果。
+    // 探测办法：用"独占"方式（不共享）打开刚落地的文件，能打开说明复制线程已经放开句柄。
+    // 等不到就继续往下走，退回改动前"文件出现就算完成"的老行为，不会比原来更差。
+    if (!isDirectory)
     {
-        if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        for (int attempt = 0; attempt < 100; ++attempt)
         {
-            ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+            HANDLE probe = ::CreateFileW(landingPath.c_str(), GENERIC_READ, 0, nullptr,
+                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
-            // 目录要先清空才能删，这里只做文件那一套；
-            // 目录撞名时直接让 MoveFileEx 失败，由调用方报错（临时目录下一般不会撞）
-            if (!isDirectory)
+            if (probe != INVALID_HANDLE_VALUE)
             {
-                ::DeleteFileW(outputPath.c_str());
+                ::CloseHandle(probe);
+                break;
             }
-        }
 
-        if (!::MoveFileExW(landingPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
-        {
-            error = L"解出来的内容挪不到目标位置：" + outputPath;
-            return false;
+            ::Sleep(50);
         }
+    }
+
+    // ---- 5) 挪到准确位置，再设成只读 ----
+    //
+    // 走到这里复制已经完成，不再受取消影响：产物发布到正式名当缓存（见 2b）。
+    // landingPath 一定在专属子目录里，和 outputPath 不会是同一个路径，所以总是移动。
+    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+
+        // 目录要先清空才能删，这里只做文件那一套；
+        // 目录撞名时直接让 MoveFileEx 失败，由调用方报错（临时目录下一般不会撞）
+        if (!isDirectory)
+        {
+            ::DeleteFileW(outputPath.c_str());
+        }
+    }
+
+    if (!::MoveFileExW(landingPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+    {
+        error = L"解出来的内容挪不到目标位置：" + outputPath;
+        RemoveTreeBestEffort(stagingDirectory);
+        return false;
     }
 
     // 只读：和系统解出来的临时文件一样，防止把包里的原件改坏。
@@ -997,6 +1093,9 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
         }
     }
 
+    // 专属子目录这时候应该是空的，删掉；里面还有别的东西就留着（不误删）
+    ::RemoveDirectoryW(stagingDirectory.c_str());
+
     return true;
 }
 
@@ -1004,11 +1103,15 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
                                    const std::wstring& containerRoot,
                                    const std::wstring& relativePath,
                                    const std::wstring& targetDirectory,
+                                   const std::wstring& partialFilePath,
+                                   const std::wstring& stagingDirectory,
+                                   const std::atomic<bool>* cancel,
                                    std::wstring& error)
 {
     error.clear();
 
-    if (virtualPath.empty() || targetDirectory.empty())
+    if (virtualPath.empty() || targetDirectory.empty() ||
+        partialFilePath.empty() || stagingDirectory.empty())
     {
         error = L"路径参数为空";
         return L"";
@@ -1054,12 +1157,11 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
         return L"";
     }
 
-    // ---- 上一次留下的临时文件先清掉（它是只读的，得先去掉只读属性）----
-    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::DeleteFileW(outputPath.c_str());
-    }
+    // ---- 上一次留下的旧文件：这里不清 ----
+    //
+    // 以前是"先删掉旧的再解"，但如果另一个窗口正在解同一项（它们共用同一个临时目录，
+    // 目录名由包指纹决定），删掉正式名会把对方刚发布好的结果删掉。
+    // 现在改成"写完临时名再改名覆盖"，旧文件的作用就是被覆盖，不需要提前删除。
 
     // ---- 解析内部项的 PIDL（容器里的路径只有 PIDL 认得出来）----
     PIDLIST_ABSOLUTE absolutePidl = nullptr;
@@ -1095,25 +1197,39 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
         // WinRAR 给 rar / 7z / tar 的只读处理器要 IStream 会直接拒绝
         // （实测 0x80004002 E_NOINTERFACE），这时改走 Shell 自动化那条复制通道
         // （见上面 ExtractViaShellAutomation 的注释）。zip 一般走不到这里。
-        if (ExtractViaShellAutomation(containerRoot, innerPath, outputPath, error))
+        if (ExtractViaShellAutomation(containerRoot, innerPath, outputPath, stagingDirectory,
+                                      cancel, error))
         {
             return outputPath;
         }
         return L"";
     }
 
-    // ---- 写到目标文件：设成只读，跟系统解出来的临时文件一致（防止改坏原件）----
-    HANDLE file = ::CreateFileW(outputPath.c_str(),
+    // ---- 写到目标文件：先写临时名，写完再改名（原子发布）----
+    //
+    // 为什么不直接写正式名：两个窗口同时解同一个包里的同一项时，都往正式名写会互相踩，
+    // 可能留下半截文件。写成"正式名.yexp-partial.<进程号>"各写各的，谁先写完谁改名成功，
+    // 正式名上永远是"某一次完整的结果"。
+    //
+    // 附带的好处：正式名一出现就代表内容完整，调用方那套"文件在就算有缓存"的判断可以直接信。
+    const std::wstring partialPath = partialFilePath;
+
+    // 上次中断留下的同名临时文件先清掉（这类文件不值钱，直接删）
+    ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+    ::DeleteFileW(partialPath.c_str());
+
+    // 临时名不设只读：写坏了要能直接删掉
+    HANDLE file = ::CreateFileW(partialPath.c_str(),
                                 GENERIC_WRITE,
                                 0,
                                 nullptr,
                                 CREATE_ALWAYS,
-                                FILE_ATTRIBUTE_READONLY,
+                                FILE_ATTRIBUTE_NORMAL,
                                 nullptr);
 
     if (file == INVALID_HANDLE_VALUE)
     {
-        error = L"建不出临时文件：" + outputPath;
+        error = L"建不出临时文件：" + partialPath;
         return L"";
     }
 
@@ -1123,6 +1239,14 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
 
     while (true)
     {
+        // 用户按了 ESC / 松了手：直接收工，半成品在下面统一删掉
+        if (cancel != nullptr && cancel->load())
+        {
+            succeeded = false;
+            error = L"已取消";
+            break;
+        }
+
         ULONG readBytes = 0;
         hr = stream->Read(buffer.data(), static_cast<ULONG>(buffer.size()), &readBytes);
 
@@ -1143,7 +1267,7 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
             writtenBytes != readBytes)
         {
             succeeded = false;
-            error = L"写临时文件失败：" + outputPath;
+            error = L"写临时文件失败：" + partialPath;
             break;
         }
     }
@@ -1152,10 +1276,43 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
 
     if (!succeeded)
     {
-        // 写了一半的文件不要留下
-        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::DeleteFileW(outputPath.c_str());
+        // 写坏了：临时名直接删掉，正式名从头到尾都没出现过
+        ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(partialPath.c_str());
         return L"";
+    }
+
+    // ---- 发布：临时名 → 正式名 ----
+    //
+    // 发布之前最后确认一次取消：这一步过了，正式文件就出现了
+    if (cancel != nullptr && cancel->load())
+    {
+        ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(partialPath.c_str());
+        error = L"已取消";
+        return L"";
+    }
+
+    // 目标位置可能已经有旧文件（只读的），MoveFileEx 要替换只读文件会失败，先放开属性。
+    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+    }
+
+    if (!::MoveFileExW(partialPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+    {
+        error = L"解出来的内容挪不到目标位置：" + outputPath;
+        ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(partialPath.c_str());
+        return L"";
+    }
+
+    // ---- 设只读：跟系统解出来的临时文件一致，防止把包里的原件改坏 ----
+    const DWORD publishedAttributes = ::GetFileAttributesW(outputPath.c_str());
+
+    if (publishedAttributes != INVALID_FILE_ATTRIBUTES)
+    {
+        ::SetFileAttributesW(outputPath.c_str(), publishedAttributes | FILE_ATTRIBUTE_READONLY);
     }
 
     return outputPath;

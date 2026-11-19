@@ -75,11 +75,26 @@ static const UINT WM_APP_PASTE_PLAN = WM_APP + 6;
 static const UINT_PTR kFolderChangeTimerId  = 1;
 static const UINT     kFolderChangeDelayMs  = 250;
 
+// 自定义消息：选中项变了，延迟刷状态栏
+//
+// 为什么要延迟：虚拟列表（LVS_OWNERDATA）在 Shift 多选这种"一次性改一大段"的情况下，
+// 先发 LVN_ITEMCHANGED、后更新它自己的选中状态。在回调里立刻去查控件状态会读到旧值
+// —— 实测 Shift 多选查出来是 0 项（状态栏于是只显示"N 个项目"，没有"已选择 N 项 + 大小"）。
+// 丢一条消息到队尾，等控件把状态提交完再算一次就准了。
+static const UINT WM_APP_SELECTION_CHANGED = WM_APP + 7;
+
 // 起始路径
 static const wchar_t* kInitialPath = L"C:\\";
 
 // 日志里最多记多少条
 static const size_t kMaxLogItems = 100;
+
+// 本程序在 %TEMP% 下的统一根目录：解压缓存、代理临时 exe、兜底日志都收在这里，
+// 不再散落在 TEMP 根目录下
+static const wchar_t* kTempRootName = L"Yexp";
+
+// 解压缓存保留天数：超过这个天数的缓存目录，启动时由后台线程清掉（写死常量，不做设置项）
+static const int kCacheRetentionDays = 7;
 
 // 拼接 / 拆路径的小工具（实现放在下面，这里先声明：上面的操作完成处理要用到）
 static std::wstring JoinDirectoryFile(const std::wstring& directory, const std::wstring& fileName);
@@ -105,6 +120,148 @@ static bool CreateDirectoriesRecursive(const std::wstring& directory);
 static bool IsWindowRectVisible(const RECT& rect)
 {
     return ::MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) != nullptr;
+}
+
+// ----------------------------------------------------------------------------
+// %TEMP%\Yexp 临时目录清理
+//
+// 收进这个根目录的有三类东西：
+//   · 解压缓存目录（指纹命名，长期保留、跨启动复用）
+//   · 代理临时 exe（放在 proxy\ 子目录，部署完即删，不参与清理）
+//   · Launcher 兜底日志 launcher.log（仅 LOCALAPPDATA 取不到时才写，不参与清理）
+// 清理口径：缓存目录按写入时间保留最近 7 天；崩溃留下的半成品（partial 文件、
+// landing 落地目录）不看时间直接清。整个清理在后台线程跑，不挡启动界面。
+// ----------------------------------------------------------------------------
+
+// 取临时根目录全路径（末尾带反斜杠）；取不到 TEMP 环境返回空串
+static std::wstring YexpTempRoot()
+{
+    wchar_t tempPath[MAX_PATH] = {};
+    if (::GetTempPathW(_countof(tempPath), tempPath) == 0)
+    {
+        return L"";
+    }
+    return std::wstring(tempPath) + kTempRootName + L"\\";
+}
+
+// zip 通道半成品文件名：正式名.yexp-partial.<进程号>.<序号>
+static bool IsPartialFileName(const std::wstring& name)
+{
+    const std::wstring prefix = L".yexp-partial.";
+    return name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0;
+}
+
+// rar/7z 通道临时落地目录名：_yexp_landing_<进程号>.<序号>
+static bool IsLandingDirName(const std::wstring& name)
+{
+    const std::wstring prefix = L"_yexp_landing_";
+    return name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0;
+}
+
+// 递归遍历临时目录，清掉超期缓存和半成品残留
+//   root   ：当前遍历到的目录全路径
+//   depth  ：相对临时根的层级（0 = 直接挂在根下的缓存目录）
+//   cutoff ：超期时间点（当前时间 − 保留天数），早于它的缓存目录删掉
+static void CleanupYexpTempTree(const std::wstring& root, int depth, const FILETIME& cutoff)
+{
+    WIN32_FIND_DATAW findData = {};
+    HANDLE find = ::FindFirstFileW((root + L"\\*").c_str(), &findData);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    do
+    {
+        const std::wstring name = findData.cFileName;
+        if (name == L"." || name == L"..")
+        {
+            continue;
+        }
+
+        const std::wstring fullPath = root + L"\\" + name;
+        const bool         isDir    = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+        if (isDir)
+        {
+            // proxy 子目录放代理临时 exe，即用即删，不参与缓存清理
+            if (depth == 0 && name == L"proxy")
+            {
+                continue;
+            }
+
+            // rar/7z 通道的落地目录：半成品，不看时间直接整棵删掉
+            if (IsLandingDirName(name))
+            {
+                shellops::RemoveTreeBestEffort(fullPath);
+                continue;
+            }
+
+            if (depth == 0)
+            {
+                // 根下的目录 = 解压缓存目录：按最后修改时间判是否超期
+                if (::CompareFileTime(&findData.ftLastWriteTime, &cutoff) < 0)
+                {
+                    shellops::RemoveTreeBestEffort(fullPath);
+                    continue;
+                }
+            }
+
+            // 未超期的缓存目录 / 包内子目录：往下钻，清里面嵌套的半成品
+            CleanupYexpTempTree(fullPath, depth + 1, cutoff);
+        }
+        else
+        {
+            // 兜底日志保留；其余文件只认半成品 partial，来历不明的文件不动
+            if (name == L"launcher.log")
+            {
+                continue;
+            }
+            if (IsPartialFileName(name))
+            {
+                ::SetFileAttributesW(fullPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+                ::DeleteFileW(fullPath.c_str());
+            }
+        }
+    }
+    while (::FindNextFileW(find, &findData));
+
+    ::FindClose(find);
+}
+
+// 后台清理入口：扫描临时根，删超期缓存目录和半成品残留；删不掉（占用/无权限）就跳过
+static void CleanupYexpTempCache()
+{
+    const std::wstring root = YexpTempRoot();
+    if (root.empty())
+    {
+        return;
+    }
+
+    // 根目录还没建过（从没解过压、也没走过兜底）就直接返回
+    if (::GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        return;
+    }
+
+    // 保留天数换算成 FILETIME 的 100 纳秒单位，算出超期时间点
+    const ULONGLONG retention = static_cast<ULONGLONG>(kCacheRetentionDays) *
+                                24ull * 60ull * 60ull * 10000000ull;
+
+    FILETIME nowFt{};
+    ::GetSystemTimeAsFileTime(&nowFt);
+
+    ULARGE_INTEGER now{};
+    now.LowPart  = nowFt.dwLowDateTime;
+    now.HighPart = nowFt.dwHighDateTime;
+    now.QuadPart -= retention;
+
+    FILETIME cutoff{};
+    cutoff.dwLowDateTime  = now.LowPart;
+    cutoff.dwHighDateTime = now.HighPart;
+
+    Logger::Info(L"临时缓存清理：扫描 " + root);
+    CleanupYexpTempTree(root, 0, cutoff);
 }
 
 // ----------------------------------------------------------------------------
@@ -1002,9 +1159,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         });
 
         // 选中项变了：状态栏里的"选中 N 项 / 总大小"要跟着变
+        //
+        // 不能在这里立刻算：虚拟列表在 Shift 多选时是先发通知、后提交选中状态，
+        // 立刻查会读到旧值（0 项）。丢一条消息到队尾，合并成一次刷新。
         m_fileListView.SetSelectionChangedCallback([this]()
         {
-            UpdateStatusBar();
+            if (!m_selectionRefreshPending)
+            {
+                m_selectionRefreshPending = true;
+                ::PostMessageW(m_hWnd, WM_APP_SELECTION_CHANGED, 0, 0);
+            }
         });
 
         // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
@@ -1013,6 +1177,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         // 右键菜单要用的数据：「新建」项清单 + 菜单小图标，全部在后台准备，
         // 不占启动时间；菜单弹出时只读内存
         StartBackgroundMenuData();
+
+        // 临时缓存清理也丢后台线程：枚举、判时间、删除都不挡启动界面；
+        // 一次性任务，detach 即可，退出时没删完的留到下次启动再清
+        std::thread([]{ CleanupYexpTempCache(); }).detach();
 
         LayoutChildren();
 
@@ -1686,6 +1854,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         m_operationPaths.clear();
         return 0;
     }
+
+    // --------------------------------------------------------------
+    // 选中项变了（延迟到消息队尾再算）
+    //
+    // 虚拟列表在 Shift 多选时先发通知、后提交选中状态，在通知里立刻查会读到旧值。
+    // 到这里时控件状态已经提交完，再查就是准的。
+    // --------------------------------------------------------------
+    case WM_APP_SELECTION_CHANGED:
+        m_selectionRefreshPending = false;
+        UpdateStatusBar();
+        return 0;
 
     // --------------------------------------------------------------
     // 当前目录的内容变了（资源管理器里删了/搬走了文件，或者别的程序写了新文件）
@@ -3381,14 +3560,6 @@ bool MainWindow::SelectedEntryPidls(const std::vector<std::wstring>& paths,
 
 void MainWindow::DoDelete(bool permanent)
 {
-    // 除 zip 以外的压缩包内部是只读的：系统里删不动，我们菜单也不给这项，
-    // 这里兜一层，防止 Delete 快捷键绕过菜单。
-    if (m_currentIsContainer && !m_currentIsZipContainer)
-    {
-        Logger::Info(L"删除：当前是只读压缩包内部，忽略");
-        return;
-    }
-
     std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
     if (selected.empty())
     {
@@ -3680,9 +3851,9 @@ void MainWindow::BuildBackgroundMenu(HMENU menu)
     FillViewMenu(menu);
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
 
-    // 只读压缩包内部（rar / 7z / tar）不显示「粘贴」：
+    // 压缩包内部（不分格式）不显示「粘贴」：
     // 那里根本写不进去，出现了只会让用户点一次、白等一次。
-    const bool pasteAllowed = !(m_currentIsContainer && !m_currentIsZipContainer);
+    const bool pasteAllowed = !m_currentIsContainer;
 
     if (pasteAllowed && shellclip::HasFiles())
     {
@@ -5155,14 +5326,48 @@ void MainWindow::ActivateFromRelay(const std::wstring& selectFile)
 
 void MainWindow::OpenSelection()
 {
-    int selectedIndex = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+    HWND listView = m_fileListView.Handle();
 
-    if (selectedIndex < 0)
+    // 只选了一项：保持原来的行为（文件夹是"进入"，文件是"打开"）
+    if (ListView_GetSelectedCount(listView) <= 1)
     {
+        const int singleIndex = ListView_GetNextItem(listView, -1, LVNI_SELECTED);
+
+        if (singleIndex >= 0)
+        {
+            OnItemActivated(static_cast<size_t>(singleIndex));
+        }
         return;
     }
 
-    OnItemActivated(static_cast<size_t>(selectedIndex));
+    // 多选：和资源管理器一致，把所有选中的文件都打开
+    //
+    // 压缩包内部的项也一项一项来 —— 每一项都会先解到临时目录再打开，
+    // 状态栏会依次显示各自的解压进度（以前这里只处理了第一个，所以"多选只开一个"）。
+    //
+    // 文件夹跳过：多选打开多个文件夹只会让当前窗口来回跳，没有意义。
+    int index = ListView_GetNextItem(listView, -1, LVNI_SELECTED);
+
+    while (index >= 0)
+    {
+        bool isFolder = false;
+
+        {
+            std::lock_guard<std::mutex> lock(m_resultMutex);
+
+            if (m_result != nullptr && static_cast<size_t>(index) < m_result->entries.size())
+            {
+                isFolder = m_result->entries[index].isFolder;
+            }
+        }
+
+        if (!isFolder)
+        {
+            OnItemActivated(static_cast<size_t>(index));
+        }
+
+        index = ListView_GetNextItem(listView, index, LVNI_SELECTED);
+    }
 }
 
 // ============================================================================
@@ -5841,10 +6046,20 @@ void MainWindow::NavigateContainerEntry(const shell::ShellEntry& entry)
 // 打开容器内部的文件（先解成临时文件再打开）
 // ============================================================================
 
-// 某个压缩包里解出来的东西落在哪个临时目录（%TEMP%\{本进程固定 guid}_{压缩包文件名}）
+// 某个压缩包里解出来的东西落在哪个临时目录
 //
-// 单独抽出来是因为"打开压缩包里的文件"和"拖出压缩包里的项"两处都要用，
-// 而且拖出那边还要靠它算出"这一项会解到哪个文件"来显示真实进度。
+// 目录名 = 包路径hash8_包字节数_包修改时间(YYYYMMDDHHMMSS)_包名尾部24字符
+// 例：%TEMP%\Yexp\A1B2C3D4_52428800_20260101120000_文档转换测试.zip
+//
+// 为什么这么起名：
+//   1) 同一个包（路径、大小、修改时间都没变）永远落同一个目录 → 上次解出来的文件能复用；
+//      包被替换/更新后目录名就变 → 旧缓存自动失效，不需要再记"这是不是同一个包"。
+//   2) 进程重启后还是同一个目录 → 缓存跨启动也能用；%TEMP% 里一个包只留一个目录，
+//      不会像以前那样每启动一次就多堆一个。
+//   3) 前缀放"路径 hash"是为了区分不同路径下的同名包（release.zip 这种太常见）；
+//      存 hash 不存路径明文，名字短，也不暴露路径。
+//   4) 包名只留尾部 24 字符（保住扩展名）：%TEMP% 前缀 + 目录名 + 包内相对路径
+//      要一起塞进 260 以内，名字长的包会把包内路径顶爆。
 std::wstring MainWindow::ContainerTempDirectoryFor(const std::wstring& containerRoot)
 {
     if (containerRoot.empty())
@@ -5852,111 +6067,616 @@ std::wstring MainWindow::ContainerTempDirectoryFor(const std::wstring& container
         return L"";
     }
 
-    // ---- 临时目录名里那一段固定 guid ----
+    // ---- 1) 包的身份：字节数 + 修改时间 ----
     //
-    // 整个进程只生成一次，好处是同一个压缩包反复打开/拖出里面的文件，
-    // 都解到同一个目录，不会每点一次就在临时目录里堆一个新的文件夹。
-    if (m_containerTempTag.empty())
+    // 拿不到（包刚被删、没权限）就当 0：目录名退化成一个占位目录，
+    // 之后真去解压时该报错还是会报错。
+    unsigned long long containerBytes    = 0;
+    FILETIME           containerModified = {};
+
+    WIN32_FILE_ATTRIBUTE_DATA containerAttributes = {};
+    if (::GetFileAttributesExW(containerRoot.c_str(), ::GetFileExInfoStandard, &containerAttributes))
     {
-        GUID guid = {};
-        if (SUCCEEDED(::CoCreateGuid(&guid)))
-        {
-            wchar_t guidText[64] = {};
-            if (::StringFromGUID2(guid, guidText, _countof(guidText)) > 0)
-            {
-                std::wstring text(guidText);
-
-                // StringFromGUID2 给的是 {769C474B-...} 这种带花括号的形式，去掉两边
-                if (text.size() >= 2 && text.front() == L'{' && text.back() == L'}')
-                {
-                    text = text.substr(1, text.size() - 2);
-                }
-
-                m_containerTempTag = text + L"_";
-            }
-        }
-
-        if (m_containerTempTag.empty())
-        {
-            // 极端情况兜底：拿不到 GUID 就用运行时长和进程号拼一个
-            m_containerTempTag = L"yexplorer_" +
-                                 std::to_wstring(::GetTickCount64()) + L"_" +
-                                 std::to_wstring(::GetCurrentProcessId()) + L"_";
-        }
+        containerBytes = (static_cast<unsigned long long>(containerAttributes.nFileSizeHigh) << 32) |
+                         static_cast<unsigned long long>(containerAttributes.nFileSizeLow);
+        containerModified = containerAttributes.ftLastWriteTime;
     }
 
+    // ---- 2) 包路径的短 hash（FNV-1a 32 位；先统一成小写，Windows 路径不分大小写）----
+    unsigned int pathHash = 2166136261u;   // FNV-1a 32 位初始值
+
+    for (wchar_t ch : containerRoot)
+    {
+        if (ch >= L'A' && ch <= L'Z')
+        {
+            ch = static_cast<wchar_t>(ch + (L'a' - L'A'));
+        }
+
+        pathHash = (pathHash ^ static_cast<unsigned int>(ch & 0xFFFF)) * 16777619u;
+    }
+
+    // ---- 3) 包修改时间 → 本地时间字符串 YYYYMMDDHHMMSS ----
+    FILETIME localModified = {};
+    ::FileTimeToLocalFileTime(&containerModified, &localModified);
+
+    SYSTEMTIME modifiedParts = {};
+    ::FileTimeToSystemTime(&localModified, &modifiedParts);
+
+    wchar_t timeText[32] = {};
+    ::swprintf_s(timeText, L"%04u%02u%02u%02u%02u%02u",
+                 modifiedParts.wYear, modifiedParts.wMonth, modifiedParts.wDay,
+                 modifiedParts.wHour, modifiedParts.wMinute, modifiedParts.wSecond);
+
+    // ---- 4) 包名只留尾部 24 字符（扩展名在最后，所以从扩展名往左数 24 个）----
+    std::wstring containerName = containerRoot;
+    const size_t nameSeparator = containerName.find_last_of(L"\\/");
+    if (nameSeparator != std::wstring::npos)
+    {
+        containerName = containerName.substr(nameSeparator + 1);
+    }
+
+    if (containerName.size() > 24)
+    {
+        containerName = containerName.substr(containerName.size() - 24);
+    }
+
+    // ---- 5) 拼成目录名 ----
     wchar_t tempPath[MAX_PATH] = {};
     if (::GetTempPathW(_countof(tempPath), tempPath) == 0)
     {
         return L"";
     }
 
-    std::wstring containerName = containerRoot;
-    size_t nameSeparator = containerName.find_last_of(L"\\/");
-    if (nameSeparator != std::wstring::npos)
-    {
-        containerName = containerName.substr(nameSeparator + 1);
-    }
+    wchar_t hashText[16] = {};
+    ::swprintf_s(hashText, L"%08X", pathHash);
 
-    // GetTempPathW 返回的路径自带末尾反斜杠，直接拼
-    return std::wstring(tempPath) + m_containerTempTag + containerName;
+    // GetTempPathW 返回的路径自带末尾反斜杠；先套进统一的 Yexp 根目录，再拼指纹名
+    return std::wstring(tempPath) + kTempRootName + L"\\" + hashText + L"_" +
+           std::to_wstring(containerBytes) + L"_" + timeText + L"_" + containerName;
 }
 
-std::wstring MainWindow::ExtractContainerEntryToTemp(const std::wstring& virtualPath,
-                                                     std::wstring& error)
+namespace
 {
-    error.clear();
-
-    if (virtualPath.empty())
+// 「期望时间」：解出来的缓存文件应该带的修改时间
+//
+// 就是包内那一项的修改时间；包没给（全 0）时用 1980-01-01 00:00 UTC。
+// 为什么是 1980：实测 NTFS 能接受的最小时间就是 1980-01-01（设 1601 会被系统钳回 1980），
+// 拿它当"这个包没记时间"的标记值，设下去和读回来能对得上。
+FILETIME ExpectedContainerTime(const FILETIME& containerTime)
+{
+    if (containerTime.dwLowDateTime != 0 || containerTime.dwHighDateTime != 0)
     {
-        error = L"路径为空";
-        return L"";
+        return containerTime;
     }
 
-    // ---- 1) 往上找容器根（压缩包本身）----
-    //
-    // 例：C:\a\t.rar\sub\inner.txt → C:\a\t.rar
-    // 判断逻辑和右键菜单用的是同一套（shell::ContainerRootForPath），
-    // 只查文件属性、不碰 COM，很快。
-    const std::wstring containerRoot = shell::ContainerRootForPath(virtualPath);
+    SYSTEMTIME zeroPoint = {};
+    zeroPoint.wYear   = 1980;
+    zeroPoint.wMonth  = 1;
+    zeroPoint.wDay    = 1;
+    zeroPoint.wHour   = 0;
+    zeroPoint.wMinute = 0;
+    zeroPoint.wSecond = 0;
 
-    if (containerRoot.empty())
+    FILETIME stamp = {};
+    ::SystemTimeToFileTime(&zeroPoint, &stamp);   // 参数按 UTC 解释，正好对上 1980-01-01 00:00 UTC
+    return stamp;
+}
+}
+
+bool MainWindow::ContainerCacheIsUsable(const std::wstring& outputPath,
+                                        unsigned long long declaredSize,
+                                        const FILETIME&   expectedTime)
+{
+    if (outputPath.empty())
     {
-        error = L"找不到这个文件所属的压缩包";
-        return L"";
+        return false;
     }
 
-    // ---- 2) 这一项在包内的相对路径（保留包里的子目录结构）----
-    std::wstring innerPath = virtualPath.substr(containerRoot.size());
-
-    while (!innerPath.empty() && (innerPath.front() == L'\\' || innerPath.front() == L'/'))
+    WIN32_FILE_ATTRIBUTE_DATA fileData = {};
+    if (!::GetFileAttributesExW(outputPath.c_str(), ::GetFileExInfoStandard, &fileData))
     {
-        innerPath.erase(innerPath.begin());
+        return false;   // 不在 → 没有缓存
     }
 
-    // ---- 3) 临时目录 ----
-    const std::wstring tempDirectory = ContainerTempDirectoryFor(containerRoot);
-
-    if (tempDirectory.empty())
+    if ((fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
     {
-        error = L"取不到系统临时目录";
-        return L"";
+        return false;   // 是目录（拖出的是包内文件夹）→ 不做缓存复用
     }
 
-    // ---- 4) 真正去解（先读流，读不出来走 Shell 复制通道；失败原因填在 error 里）----
-    return shellops::ExtractContainerEntry(virtualPath, containerRoot, innerPath,
-                                           tempDirectory, error);
+    const unsigned long long actualSize =
+        (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
+        static_cast<unsigned long long>(fileData.nFileSizeLow);
+
+    if (actualSize == 0)
+    {
+        return false;   // 0 字节一律不算有效缓存（解压中断最常留下的就是这种）
+    }
+
+    // 包给了大小就必须对上：内容是顺序写到写满为止，写一半必然小于声明值
+    if (declaredSize > 0 && actualSize != declaredSize)
+    {
+        return false;
+    }
+
+    // 时间必须等于"包内那一项的修改时间"：
+    // 中途丢弃的文件，时间是"写入那一刻"，永远对不上这个值。
+    return (::CompareFileTime(&fileData.ftLastWriteTime, &expectedTime) == 0);
+}
+
+void MainWindow::StampExtractedFileTime(const std::wstring& path, const FILETIME& time)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    // 解出来的文件默认是只读的（保护原件不被改坏），而 SetFileTime 对只读文件会失败，
+    // 所以先临时放开只读，盖完时间戳再恢复。
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    const bool  wasReadOnly = (attributes != INVALID_FILE_ATTRIBUTES) &&
+                              ((attributes & FILE_ATTRIBUTE_READONLY) != 0);
+
+    if (wasReadOnly)
+    {
+        ::SetFileAttributesW(path.c_str(), attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
+    }
+
+    HANDLE file = ::CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    bool stamped = false;
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        FILETIME stamp = time;
+        stamped = (::SetFileTime(file, nullptr, nullptr, &stamp) != 0);
+        ::CloseHandle(file);
+    }
+
+    if (wasReadOnly)
+    {
+        ::SetFileAttributesW(path.c_str(), attributes);   // 恢复原来的只读
+    }
+
+    if (!stamped)
+    {
+        // 盖不上不影响本次使用：下次这条会被判成"对不上"，重解一次而已
+        Logger::Warn(L"解压：给缓存文件盖修改时间失败，下次会重新解压：" + path);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 把一批路径算成"要解的项"
+//
+// 只做本地查询（拼路径、查列表里已经枚举好的大小和时间），不碰 COM，很快。
+// 落点、两条通道各自的中间路径都在这里一次算好：进度显示和真正写文件用的是
+// 同一批路径，不会出现"写在一个地方、看进度看另一个地方"的错位。
+// ----------------------------------------------------------------------------
+bool MainWindow::BuildContainerExtractItems(const std::vector<std::wstring>& paths,
+                                            std::vector<ContainerExtractItem>& items,
+                                            unsigned long long& totalBytes)
+{
+    items.clear();
+    totalBytes = 0;
+
+    // 同一进程里可能有两个解压同时在跑（拖拽途中又双击了一个文件），
+    // 中间名里带一个自增序号，保证两边不会撞同一个临时文件/临时目录
+    static std::atomic<unsigned int> extractSerial{ 0 };
+
+    for (const auto& path : paths)
+    {
+        ContainerExtractItem item;
+        item.virtualPath = path;
+
+        // 往上找容器根（压缩包本身）：C:\a\t.rar\sub\inner.txt → C:\a\t.rar
+        item.containerRoot = shell::ContainerRootForPath(path);
+
+        if (item.containerRoot.empty())
+        {
+            Logger::Warn(L"解压：找不到这项所属的压缩包，已跳过：" + path);
+            continue;
+        }
+
+        // 包内相对路径（去掉前导分隔符，保留里面的子目录结构）
+        item.innerPath = path.substr(item.containerRoot.size());
+
+        while (!item.innerPath.empty() &&
+               (item.innerPath.front() == L'\\' || item.innerPath.front() == L'/'))
+        {
+            item.innerPath.erase(item.innerPath.begin());
+        }
+
+        item.tempDirectory = ContainerTempDirectoryFor(item.containerRoot);
+
+        if (item.tempDirectory.empty() || item.innerPath.empty())
+        {
+            Logger::Warn(L"解压：算不出这项的解压落点，已跳过：" + path);
+            continue;
+        }
+
+        // ---- 正式落点 = 临时目录 + 包内相对路径 ----
+        item.outputPath = item.tempDirectory;
+
+        if (item.outputPath.back() != L'\\' && item.outputPath.back() != L'/')
+        {
+            item.outputPath += L'\\';
+        }
+        item.outputPath += item.innerPath;
+
+        for (wchar_t& ch : item.outputPath)
+        {
+            if (ch == L'/')
+            {
+                ch = L'\\';   // 统一成反斜杠，后面查大小、改名都用它
+            }
+        }
+
+        // ---- 两条通道各自的中间路径 ----
+        //   zip：先写到 partialPath，写完改名成 outputPath
+        //   rar：先复制到 stagingPath 目录，收尾后再挪成 outputPath
+        // 进度就是盯着它们："正在长的那个文件多大" = 已经写了多少字节
+        const std::wstring tag = std::to_wstring(::GetCurrentProcessId()) + L"." +
+                                 std::to_wstring(extractSerial.fetch_add(1) + 1);
+
+        item.partialPath = item.outputPath + L".yexp-partial." + tag;
+
+        const size_t lastSeparator = item.outputPath.find_last_of(L'\\');
+        const std::wstring outputDirectory =
+            (lastSeparator == std::wstring::npos) ? item.outputPath
+                                                  : item.outputPath.substr(0, lastSeparator);
+        const std::wstring outputName =
+            (lastSeparator == std::wstring::npos) ? item.outputPath
+                                                  : item.outputPath.substr(lastSeparator + 1);
+
+        item.stagingPath = outputDirectory + L"\\_yexp_landing_" + tag;
+        item.landingPath = item.stagingPath + L"\\" + outputName;
+
+        // ---- 该有多大、该是什么时间（缓存判据也靠这两个）----
+        item.expectedSize = m_fileListView.SizeOfPath(path);
+        item.expectedTime = ExpectedContainerTime(m_fileListView.ModifiedOfPath(path));
+
+        totalBytes += item.expectedSize;
+        items.push_back(std::move(item));
+    }
+
+    return !items.empty();
+}
+
+// ----------------------------------------------------------------------------
+// 解压执行器：双击和拖拽共用这一套
+//
+// 主线程在这里"边等边刷屏幕"，真正的解压在后台线程里做 ——
+// CopyHere 是同步阻塞的（实测 652MB 要十几秒），放在主线程里刷不出任何提示。
+//
+// 参数：
+//   showMouseTip  true = 拖拽：显示鼠标右下提示条，并支持"松开左键取消"
+//   realPaths     解好的真实文件（按 items 顺序，失败/取消的项不在里面）
+//   lastError     最后一次失败原因（双击时拿来弹窗用）
+// 返回 false 表示被取消（ESC / 松开左键）
+// ----------------------------------------------------------------------------
+bool MainWindow::RunContainerExtraction(const std::vector<ContainerExtractItem>& items,
+                                        bool showMouseTip,
+                                        std::vector<std::wstring>& realPaths,
+                                        std::wstring& lastError)
+{
+    realPaths.clear();
+    lastError.clear();
+
+    if (items.empty())
+    {
+        return true;
+    }
+
+    // ---- 1) 先把命中缓存的挑出来（它们不用解）----
+    std::vector<const ContainerExtractItem*> pending;
+
+    for (const auto& item : items)
+    {
+        if (ContainerCacheIsUsable(item.outputPath, item.expectedSize, item.expectedTime))
+        {
+            Logger::Info(L"解压：命中缓存，直接复用：" + item.virtualPath);
+
+            // 命中的项统一维持只读：打开时保护原件；拖拽那边在拖动前会临时改成普通
+            const DWORD cacheAttributes = ::GetFileAttributesW(item.outputPath.c_str());
+            if (cacheAttributes != INVALID_FILE_ATTRIBUTES)
+            {
+                ::SetFileAttributesW(item.outputPath.c_str(),
+                                     cacheAttributes | FILE_ATTRIBUTE_READONLY);
+            }
+
+            realPaths.push_back(item.outputPath);
+        }
+        else
+        {
+            pending.push_back(&item);
+        }
+    }
+
+    if (pending.empty())
+    {
+        // 全部命中：瞬间完成，不显示任何解压文字（否则会闪一下）
+        return true;
+    }
+
+    // ---- 2) 要解的总字节（只有真要解的项才占进度）----
+    unsigned long long totalBytes = 0;
+
+    for (const auto* item : pending)
+    {
+        totalBytes += item->expectedSize;
+    }
+
+    // ---- 3) 开始显示 ----
+    m_extractInProgress = true;
+    m_extractStatusShown = false;
+    m_extractStatusText.clear();
+
+    const size_t totalItems = pending.size();
+
+    // 只有"按着左键拖出来"才需要判断松手；
+    // 不是鼠标拖的情况（触摸合成的拖动）就别乱判，否则会把正常拖动当成取消废掉
+    const bool trackLeftButton = showMouseTip &&
+                                 ((::GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
+
+    // 有没有取消请求：ESC 任何时候都算；"松开左键"只在确实是拖出来的情况下算
+    const auto cancelledNow = [trackLeftButton]() -> bool
+    {
+        return (::GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0 ||
+               (trackLeftButton && ((::GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0));
+    };
+
+    unsigned long long finishedBytes = 0;   // 已经解完的项累计字节
+    bool               aborted       = false;
+
+    for (size_t index = 0; index < totalItems; ++index)
+    {
+        const ContainerExtractItem& item = *pending[index];
+
+        // ---- 每项一个后台线程（COM 要先初始化成 STA）----
+        struct ExtractJob
+        {
+            std::atomic<bool> finished{ false };
+            std::wstring      realPath;
+            std::wstring      error;
+        };
+
+        auto job        = std::make_shared<ExtractJob>();
+        auto cancelFlag = std::make_shared<std::atomic<bool>>(false);
+
+        std::thread worker([this, item, job, cancelFlag]()
+        {
+            const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+            job->realPath = shellops::ExtractContainerEntry(item.virtualPath, item.containerRoot,
+                                                            item.innerPath, item.tempDirectory,
+                                                            item.partialPath, item.stagingPath,
+                                                            cancelFlag.get(), job->error);
+
+            // 一解出来就盖上"包内修改时间"，不管调用方还要不要这一项。
+            // 意义在于：取消时停不下来、后来才补完的那一项，也会变成"合法缓存"，
+            // 下次拖动/双击同一项直接命中，不用再解一遍。
+            if (!job->realPath.empty())
+            {
+                StampExtractedFileTime(job->realPath, item.expectedTime);
+            }
+
+            if (SUCCEEDED(comResult))
+            {
+                ::CoUninitialize();
+            }
+
+            job->finished = true;
+        });
+        worker.detach();
+
+        // ---- 主线程：每 50ms 读一次大小，刷状态栏 ----
+        while (!job->finished)
+        {
+            // 已写字节 = 三个候选里最大的那个：
+            //   partialPath（zip 的中间文件）
+            //   landingPath（rar 落地后的那个文件）
+            //   outputPath （已经改名完成的正式文件）
+            unsigned long long writtenBytes = 0;
+
+            const std::wstring* candidates[3] = { &item.partialPath, &item.landingPath,
+                                                  &item.outputPath };
+
+            for (const std::wstring* candidate : candidates)
+            {
+                WIN32_FILE_ATTRIBUTE_DATA fileData = {};
+
+                if (::GetFileAttributesExW(candidate->c_str(), ::GetFileExInfoStandard, &fileData))
+                {
+                    const unsigned long long bytes =
+                        (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
+                        static_cast<unsigned long long>(fileData.nFileSizeLow);
+
+                    if (bytes > writtenBytes)
+                    {
+                        writtenBytes = bytes;
+                    }
+                }
+            }
+
+            const unsigned long long expected  = (item.expectedSize > 0) ? item.expectedSize
+                                                                         : totalBytes;
+            const unsigned long long cappedDone = (expected > 0 && writtenBytes > expected)
+                                                  ? expected
+                                                  : writtenBytes;
+
+            int percent = 0;
+
+            if (totalBytes > 0)
+            {
+                const unsigned long long overallDone = finishedBytes + cappedDone;
+                percent = static_cast<int>((overallDone * 100ull) / totalBytes);
+            }
+            else
+            {
+                // 包一个大小都没给：退回按项数估
+                percent = static_cast<int>((index * 100ull) / totalItems);
+            }
+
+            if (percent > 100)
+            {
+                percent = 100;
+            }
+
+            // 文案统一按拖拽那一套：带项数，取消提示跟在百分比后面（不再分左右两格）
+            const std::wstring text = L"正在解压… 第 " + std::to_wstring(index + 1) + L"/" +
+                                      std::to_wstring(totalItems) + L" 项 " +
+                                      std::to_wstring(percent) + L"%";
+
+            ShowExtractStatus(text + L" (按 ESC 取消)");
+
+            // 鼠标右下角提示条：只有拖拽才显示，多说一句"松开鼠标可取消"
+            if (showMouseTip)
+            {
+                shell::ShowDragStatusTip(text + L" (松开鼠标可取消)");
+            }
+
+            // 取消：ESC（双击、拖拽都支持）；拖拽额外支持"松开左键"
+            if (cancelledNow())
+            {
+                aborted = true;
+                cancelFlag->store(true);   // 能真停的通道立刻收手，停不了的会把结果当缓存
+                break;
+            }
+
+            // 别一觉睡 200ms：小文件就在这段空隙里解完了，等于一次都没查。
+            // 拆成 4 段 50ms，每段查一次 → 松手后最迟 50ms 就通知到线程。
+            for (int slice = 0; slice < 4; ++slice)
+            {
+                if (job->finished)
+                {
+                    break;
+                }
+
+                ::Sleep(50);
+
+                if (cancelledNow())
+                {
+                    aborted = true;
+                    cancelFlag->store(true);
+                    break;
+                }
+            }
+        }
+
+        // 线程可能就在上面那一小段空隙里解完了（while 一次都没进）。
+        // 收结果之前再查一次：已经松手/按了 ESC，这一项也按取消处理。
+        if (!aborted && cancelledNow())
+        {
+            aborted = true;
+            cancelFlag->store(true);
+        }
+
+        if (aborted)
+        {
+            // 这里不去删任何中间物：能真停的通道（zip 读流）自己会把半成品删干净；
+            // 停不了的通道（rar 的 CopyHere）会把已经复制完的结果发布到正式名当缓存。
+            // 在这儿删反而会跟后台线程抢同一个目录，越删越乱。
+            break;
+        }
+
+        if (job->realPath.empty())
+        {
+            // 解不出来就跳过这一项，其余照常（日志里留个原因）
+            lastError = job->error;
+            Logger::Warn(L"解压：压缩包内项解不出来，已跳过：" + item.virtualPath +
+                         L"，原因：" + (job->error.empty() ? L"未知" : job->error));
+            continue;
+        }
+
+        // 时间戳已经在后台线程里盖好了（见 worker 里的说明），这里只收结果
+        realPaths.push_back(job->realPath);
+
+        finishedBytes += item.expectedSize;
+    }
+
+    // ---- 收尾：撤状态栏、撤鼠标提示条 ----
+    if (showMouseTip)
+    {
+        shell::HideDragStatusTip();
+    }
+
+    HideExtractStatus();
+
+    if (aborted)
+    {
+        // 已解完的项留在临时目录当缓存，下次直接命中
+        Logger::Info(L"解压：途中取消（已解出 " + std::to_wstring(realPaths.size()) + L" 项）");
+        return false;
+    }
+
+    Logger::Info(L"解压：完成 " + std::to_wstring(realPaths.size()) + L" / " +
+                 std::to_wstring(items.size()) + L" 项");
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// 解压时状态栏：整条一格，文字里自带「(按 ESC 取消)」
+//
+// 曾经切成"左文字 / 右侧固定(按 ESC 取消)"两格，用户要求取消提示就跟在百分比
+// 后面，所以又回到一格。这里的整段文字由 RunContainerExtraction 拼好传进来。
+// ----------------------------------------------------------------------------
+void MainWindow::ShowExtractStatus(const std::wstring& text)
+{
+    if (m_hStatusBar == nullptr)
+    {
+        return;
+    }
+
+    if (!m_extractStatusShown)
+    {
+        // 第一次进来：把状态栏复位成一整格（粘贴进度可能刚把它切成了几段）
+        int parts[1] = { -1 };
+        ::SendMessageW(m_hStatusBar, SB_SETPARTS, 1, reinterpret_cast<LPARAM>(parts));
+        ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, 0);
+
+        m_extractStatusShown = true;
+        m_extractStatusText.clear();
+    }
+
+    // 文字没变就不重写（每写一次状态栏都要重绘一次）
+    if (text == m_extractStatusText)
+    {
+        return;
+    }
+
+    m_extractStatusText = text;
+    ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 0,
+                   reinterpret_cast<LPARAM>(m_extractStatusText.c_str()));
+
+    // 解压期间主线程在轮询，状态栏自己收不到重绘消息，得推它一把才看得见
+    ::InvalidateRect(m_hStatusBar, nullptr, FALSE);
+    ::UpdateWindow(m_hStatusBar);
+}
+
+// ----------------------------------------------------------------------------
+// 解压结束：状态栏恢复成一整格，并把"N 个项目…"写回去
+// ----------------------------------------------------------------------------
+void MainWindow::HideExtractStatus()
+{
+    m_extractInProgress = false;
+    m_extractStatusText.clear();
+
+    if (m_hStatusBar != nullptr && m_extractStatusShown)
+    {
+        int parts[1] = { -1 };
+        ::SendMessageW(m_hStatusBar, SB_SETPARTS, 1, reinterpret_cast<LPARAM>(parts));
+        ::SendMessageW(m_hStatusBar, SB_SETTEXTW, 1, 0);
+    }
+
+    m_extractStatusShown = false;
+
+    // 缓存里还是刚才那串解压文字，清掉才能真的把"N 个项目"写回去
+    m_lastStatusText.clear();
+    UpdateStatusBar();
 }
 
 // ============================================================================
 // 拖出压缩包内部的项
 // ============================================================================
-
-namespace
-{
-// 解压超过这个字节数才显示进度小窗（小的几百 KB 是一瞬间的事，弹窗反而闪眼睛）
-const unsigned long long kDragProgressThresholdBytes = 8ull * 1024ull * 1024ull;
-}
 
 std::vector<std::wstring> MainWindow::PrepareDragPaths(const std::vector<std::wstring>& paths)
 {
@@ -5979,302 +6699,31 @@ std::vector<std::wstring> MainWindow::PrepareDragPaths(const std::vector<std::ws
         return paths;
     }
 
-    // ---- 2) 先把每一项的"落点"和"该有多大"算出来 ----
+    // ---- 2) 把路径算成"要解的项"，交给解压执行器（和双击共用同一套）----
     //
-    // 这一步全是本地查询（拼路径、查列表里已经枚举好的大小），不碰 COM，很快。
-    // 有了落点文件路径，进度就能按"文件长到多大了"来算，而不是按项数糊弄。
-    struct DragItem
-    {
-        std::wstring       virtualPath;      // 容器内路径
-        std::wstring       containerRoot;    // 压缩包本身
-        std::wstring       innerPath;        // 包内相对路径
-        std::wstring       tempDirectory;    // 解压落点的目录
-        std::wstring       outputPath;       // 会解到哪个文件（进度靠盯它的大小）
-        std::wstring       name;             // 进度窗里显示的名字
-        unsigned long long expectedSize = 0; // 解完应该多大（0 = 包没给出大小）
-    };
+    // 落点、中间路径、该有多大都在 BuildContainerExtractItems 里一次算好；
+    // 具体解压、状态栏进度、松手/ESC 取消，全在 RunContainerExtraction 里。
+    std::vector<ContainerExtractItem> items;
+    unsigned long long                totalBytes = 0;
 
-    std::vector<DragItem> items;
-    items.reserve(paths.size());
-
-    unsigned long long totalBytes = 0;   // 这一批解完一共多少字节
-
-    for (const auto& path : paths)
-    {
-        DragItem item;
-        item.virtualPath = path;
-
-        item.containerRoot = shell::ContainerRootForPath(path);
-
-        if (item.containerRoot.empty())
-        {
-            Logger::Warn(L"拖出：找不到这项所属的压缩包，已跳过：" + path);
-            continue;
-        }
-
-        // 包内相对路径（去掉前导的分隔符，保留里面的子目录结构）
-        item.innerPath = path.substr(item.containerRoot.size());
-
-        while (!item.innerPath.empty() &&
-               (item.innerPath.front() == L'\\' || item.innerPath.front() == L'/'))
-        {
-            item.innerPath.erase(item.innerPath.begin());
-        }
-
-        item.tempDirectory = ContainerTempDirectoryFor(item.containerRoot);
-
-        if (item.tempDirectory.empty() || item.innerPath.empty())
-        {
-            Logger::Warn(L"拖出：算不出这项的解压落点，已跳过：" + path);
-            continue;
-        }
-
-        // 落点 = 临时目录 + 包内相对路径（规则和 shellops::ExtractContainerEntry 一致）
-        item.outputPath = item.tempDirectory;
-
-        if (item.outputPath.back() != L'\\' && item.outputPath.back() != L'/')
-        {
-            item.outputPath += L'\\';
-        }
-        item.outputPath += item.innerPath;
-
-        for (wchar_t& ch : item.outputPath)
-        {
-            if (ch == L'/')
-            {
-                ch = L'\\';   // 统一成反斜杠，方便后面查文件大小
-            }
-        }
-
-        const size_t slash = path.find_last_of(L"\\/");
-        item.name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
-
-        item.expectedSize = m_fileListView.SizeOfPath(path);
-        totalBytes += item.expectedSize;
-
-        items.push_back(std::move(item));
-    }
-
-    if (items.empty())
+    if (!BuildContainerExtractItems(paths, items, totalBytes))
     {
         return std::vector<std::wstring>();
     }
 
-    // ---- 3) 大的才弹进度窗 ----
-    //
-    // 解压发生在进入拖动循环之前：这期间用户一直按着鼠标、屏幕上什么都不动，
-    // 很容易以为"卡住了"。小的几百毫秒就完事，弹窗反而闪眼睛。
-    const bool showProgress = totalBytes >= kDragProgressThresholdBytes;
+    (void)totalBytes;   // 进度由执行器内部按"需要解的项"自己算
 
     std::vector<std::wstring> realPaths;
-    realPaths.reserve(items.size());
+    std::wstring              lastError;
 
-    unsigned long long finishedBytes = 0;   // 已经解完的项累计多少字节
-
-    for (size_t index = 0; index < items.size(); ++index)
+    if (!RunContainerExtraction(items, true, realPaths, lastError))
     {
-        const DragItem& item = items[index];
-
-        // ---- 解压放后台线程，主线程留着刷进度条 ----
-        //
-        // 这里必须先起线程再轮询：CopyHere 是同步阻塞的（实测 652MB 要十二三秒），
-        // 在主线程里直接调，进度窗在这十几秒里一次都刷不出来。
-        struct ExtractJob
-        {
-            std::atomic<bool> finished{ false };
-            std::wstring      realPath;
-            std::wstring      error;
-        };
-
-        auto job = std::make_shared<ExtractJob>();
-
-        std::thread worker([item, job]()
-        {
-            // Shell.Application / IStream 都是 COM 对象，这条线程得先初始化成 STA
-            const HRESULT comResult = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-            job->realPath = shellops::ExtractContainerEntry(item.virtualPath, item.containerRoot,
-                                                            item.innerPath, item.tempDirectory,
-                                                            job->error);
-
-            if (SUCCEEDED(comResult))
-            {
-                ::CoUninitialize();
-            }
-
-            job->finished = true;
-        });
-        worker.detach();
-
-        // ---- 主线程：每 100 毫秒看一眼落点文件长到多大了 ----
-        while (!job->finished)
-        {
-            unsigned long long doneBytes = 0;
-
-            WIN32_FILE_ATTRIBUTE_DATA fileData = {};
-            if (::GetFileAttributesExW(item.outputPath.c_str(),
-                                       ::GetFileExInfoStandard, &fileData))
-            {
-                doneBytes = (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
-                            static_cast<unsigned long long>(fileData.nFileSizeLow);
-            }
-
-            if (showProgress)
-            {
-                // 这一项的解压进度：别超过它自己的预期大小（有的包给不出大小，就用总字节兜底）
-                const unsigned long long expected =
-                    (item.expectedSize > 0) ? item.expectedSize : totalBytes;
-                const unsigned long long cappedDone =
-                    (doneBytes < expected) ? doneBytes : expected;
-
-                const unsigned long long overallDone = finishedBytes + cappedDone;
-
-                int percent = 0;
-                if (totalBytes > 0)
-                {
-                    percent = static_cast<int>((overallDone * 100ull) / totalBytes);
-                }
-
-                std::wstring text = L"正在解出：" + item.name +
-                                    L"（第 " + std::to_wstring(index + 1) +
-                                    L" / 共 " + std::to_wstring(items.size()) + L" 项）" +
-                                    L"  " + std::to_wstring(percent) + L"%";
-
-                if (totalBytes > 0)
-                {
-                    text += L"（" + std::to_wstring(overallDone / (1024ull * 1024ull)) + L" / " +
-                            std::to_wstring(totalBytes / (1024ull * 1024ull)) + L" MB）";
-                }
-
-                ShowDragProgress(text, percent);
-            }
-
-            ::Sleep(100);
-        }
-
-        if (job->realPath.empty())
-        {
-            // 解不出来就跳过这一项，其余照拖（日志里留个原因）
-            Logger::Warn(L"拖出：压缩包内项解不出来，已跳过：" + item.virtualPath +
-                         L"，原因：" + (job->error.empty() ? L"未知" : job->error));
-            continue;
-        }
-
-        realPaths.push_back(std::move(job->realPath));
-        finishedBytes += item.expectedSize;
+        // 松开左键 / 按 ESC 取消：不进拖动循环（已解完的项留在临时目录当缓存）
+        return std::vector<std::wstring>();
     }
-
-    if (showProgress)
-    {
-        HideDragProgress();
-    }
-
-    Logger::Info(L"拖出：从压缩包解出 " + std::to_wstring(realPaths.size()) + L" / " +
-                 std::to_wstring(items.size()) + L" 项到临时目录");
 
     // 一项都没成功：返回空，调用方据此放弃这次拖动
     return realPaths;
-}
-
-void MainWindow::ShowDragProgress(const std::wstring& text, int percent)
-{
-    RECT client = {};
-    ::GetClientRect(m_hWnd, &client);
-
-    const int panelWidth  = 420;   // 要放得下"名字 + 项数 + 百分比 + 已解/总量"
-    const int panelHeight = 96;
-    const int left = ((client.right - client.left) - panelWidth) / 2;
-    const int top  = ((client.bottom - client.top) - panelHeight) / 2;
-
-    // ---- 第一次用的时候创建三个控件 ----
-    //
-    // 面板用 STATIC + SS_WHITERECT（一个白底方块），文字和进度条做成它的子窗口。
-    //
-    // 【为什么文字/进度条必须是面板的子窗口，而不是主窗口的子窗口】
-    //   解压这段是同步循环，主窗口在解压期间不处理任何消息（没有消息泵），
-    //   所以主窗口的子窗口永远等不到 WM_PAINT，画不出来。
-    //   只有把它们挂在面板下面，才能靠一次 RedrawWindow(RDW_ALLCHILDREN)
-    //   把"白底 + 文字 + 进度条"三块一起强制画出来。
-    //   （之前的写法三块都挂在主窗口上，结果屏幕上只有一块空白的白底。）
-    if (m_dragProgressPanel == nullptr)
-    {
-        HINSTANCE instance = ::GetModuleHandleW(nullptr);
-
-        m_dragProgressPanel = ::CreateWindowExW(0, L"STATIC", L"",
-                                                WS_CHILD | WS_VISIBLE | WS_BORDER | SS_WHITERECT,
-                                                left, top, panelWidth, panelHeight,
-                                                m_hWnd, nullptr, instance, nullptr);
-
-        // 坐标相对面板（也就是面板内部左上角）
-        // SS_ENDELLIPSIS：名字特别长的时候尾巴上打省略号，不至于被硬生生切掉
-        m_dragProgressText = ::CreateWindowExW(0, L"STATIC", text.c_str(),
-                                               WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX |
-                                                   SS_ENDELLIPSIS,
-                                               12, 20, panelWidth - 24, 22,
-                                               m_dragProgressPanel, nullptr, instance, nullptr);
-
-        m_dragProgressBar = ::CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE,
-                                              12, 54, panelWidth - 24, 18,
-                                              m_dragProgressPanel, nullptr, instance, nullptr);
-
-        if (m_dragProgressBar != nullptr)
-        {
-            ::SendMessageW(m_dragProgressBar, PBM_SETRANGE32, 0, 100);
-        }
-
-        // 字体跟列表一致，看起来不像"野控件"
-        if (m_dragProgressText != nullptr && m_fileListView.Handle() != nullptr)
-        {
-            HFONT font = reinterpret_cast<HFONT>(
-                ::SendMessageW(m_fileListView.Handle(), WM_GETFONT, 0, 0));
-            if (font != nullptr)
-            {
-                ::SendMessageW(m_dragProgressText, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-            }
-        }
-    }
-
-    if (m_dragProgressText != nullptr)
-    {
-        ::SetWindowTextW(m_dragProgressText, text.c_str());
-    }
-    if (m_dragProgressBar != nullptr)
-    {
-        ::SendMessageW(m_dragProgressBar, PBM_SETPOS, static_cast<WPARAM>(percent), 0);
-    }
-
-    // 同步循环里没有消息泵：这三块必须自己强制画出来，
-    // 否则要等到解压结束（控件销毁）才会真的出现在屏幕上。
-    if (m_dragProgressPanel != nullptr)
-    {
-        ::ShowWindow(m_dragProgressPanel, SW_SHOW);
-
-        for (HWND control : { m_dragProgressText, m_dragProgressBar })
-        {
-            if (control != nullptr)
-            {
-                ::ShowWindow(control, SW_SHOW);
-            }
-        }
-
-        // RDW_ALLCHILDREN 会把面板下面的文字和进度条一起重画
-        ::RedrawWindow(m_dragProgressPanel, nullptr, nullptr,
-                       RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-    }
-}
-
-void MainWindow::HideDragProgress()
-{
-    // 三个控件一起销毁，下次需要时重新建（用它的时间是"拖大文件"这种低频场景，
-    // 常驻没必要，留着还容易被别的重绘逻辑误伤）
-    for (HWND* handle : { &m_dragProgressBar, &m_dragProgressText, &m_dragProgressPanel })
-    {
-        if (*handle != nullptr)
-        {
-            ::DestroyWindow(*handle);
-            *handle = nullptr;
-        }
-    }
 }
 
 // ============================================================================
@@ -6764,17 +7213,15 @@ void MainWindow::RegisterDropTargets()
     listCallbacks.ResolveTargetDirectory = [this](POINT ptClient) -> std::wstring
     {
         // ------------------------------------------------------------------
-        // 只读压缩包内部（rar / 7z / tar）：整个列表都不接受放置
+        // 压缩包内部（zip / rar / 7z / tar，不分格式）：整个列表都不接受放置
         //
         // 返回空串就是对拖拽那边说"这里不能放"：系统给禁止光标、提示条也显示
-        // 「不能放到 此处」，松手不落地（和资源管理器表现一致）。
+        // 「⊘ 不能放到 此处」，松手不落地（和资源管理器表现一致）。
         //
-        // 注：曾经改成"接受但不落地"，好处是在压缩包里按住文件往外拖、
-        // 光标还压在列表上时不会立刻变成禁止；但那样提示条会显示成「复制到 xxx」，
-        // 和实际"放不进去"的语义打架，用户选择回到禁止这一种。
-        // zip 内部是可写的，照常接受。
+        // 以前 zip 被单独当成"内部可写"放行了，结果拖到 zip 内部空白区或文件夹上，
+        // 光标显示能复制、松手才弹错 —— 压缩包其实是只读的，不分格式一律不接受。
         // ------------------------------------------------------------------
-        if (m_currentIsContainer && !m_currentIsZipContainer)
+        if (m_currentIsContainer)
         {
             return std::wstring();
         }
@@ -7486,7 +7933,6 @@ void MainWindow::OnEnumerationDone()
     // 记下"当前显示的是不是压缩包内部"：右键菜单、剪切、删除都按它决定能力
     // （zip 内部能剪能删，rar/7z 这类只读，菜单只给「打开 / 复制」）
     m_currentIsContainer    = result->isContainer;
-    m_currentIsZipContainer = result->isZipContainer;
 
     // 按当前排序状态排一遍（默认名称升序）
     std::sort(result->entries.begin(), result->entries.end(),
@@ -7791,18 +8237,43 @@ void MainWindow::OnItemActivated(size_t index)
         // ----------------------------------------------------------
         if (shell::IsPathInsideContainer(entry.fullPath))
         {
-            std::wstring extractError;
-            const std::wstring extractedPath = ExtractContainerEntryToTemp(entry.fullPath,
-                                                                          extractError);
+            // 和拖拽共用同一套解压：状态栏显示"正在解压… 45%"，按 ESC 可取消。
+            // 这里不显示鼠标右下角提示条（showMouseTip = false）。
+            std::vector<ContainerExtractItem> items;
+            unsigned long long                totalBytes = 0;
+            std::vector<std::wstring>         realPaths;
+            std::wstring                      lastError;
 
-            if (extractedPath.empty())
+            if (!BuildContainerExtractItems({ entry.fullPath }, items, totalBytes))
             {
-                Logger::Error(L"提取容器内部文件失败：" + entry.fullPath + L"，原因：" + extractError);
+                Logger::Error(L"打开：算不出这一项的解压落点：" + entry.fullPath);
 
-                std::wstring message = L"打开失败：\r\n" + extractError;
+                std::wstring message = L"打开失败：\r\n" + entry.name;
                 ::MessageBoxW(m_hWnd, message.c_str(), L"打开文件", MB_OK | MB_ICONWARNING);
                 return;
             }
+
+            (void)totalBytes;   // 进度由执行器内部自己算
+
+            if (!RunContainerExtraction(items, false, realPaths, lastError))
+            {
+                // 按 ESC 取消：不打开文件（已解完的项留在临时目录当缓存）
+                Logger::Info(L"打开：解压途中按 ESC，取消打开：" + entry.fullPath);
+                return;
+            }
+
+            if (realPaths.empty())
+            {
+                Logger::Error(L"提取容器内部文件失败：" + entry.fullPath +
+                              L"，原因：" + (lastError.empty() ? L"未知" : lastError));
+
+                std::wstring message = L"打开失败：\r\n" + entry.name + L" —— " +
+                                       (lastError.empty() ? L"解压没有成功" : lastError);
+                ::MessageBoxW(m_hWnd, message.c_str(), L"打开文件", MB_OK | MB_ICONWARNING);
+                return;
+            }
+
+            const std::wstring extractedPath = realPaths.front();
 
             Logger::Info(L"已提取到临时文件：" + extractedPath);
 
@@ -8228,6 +8699,15 @@ void MainWindow::UpdateStatusBar()
 {
     if (m_hStatusBar == nullptr)
     {
+        return;
+    }
+
+    // 正在解压压缩包内部的项（双击 / 拖拽）：状态栏让位给"正在解压…"，
+    // 文字由 RunContainerExtraction 直接写，这里只负责别把它覆盖掉。
+    if (m_extractInProgress.load())
+    {
+        // 解压结束后要能立刻把"N 个项目"写回去，所以这里把缓存清掉
+        m_lastStatusText.clear();
         return;
     }
 

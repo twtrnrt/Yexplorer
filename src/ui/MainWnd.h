@@ -402,21 +402,81 @@ private:
     void NavigateContainerEntry(const shell::ShellEntry& entry);
 
     // ----------------------------------------------------------------
-    // 打开容器内部的一个文件：先解成只读临时文件，再打开那个临时文件
+    // 解压"压缩包内部的项"：只有一套流程，双击和拖拽都走这里
     //
-    // 和资源管理器一个做法：容器里的路径（C:\a.rar\inner.txt）磁盘上不存在，
-    // 直接把路径交给 Shell 打不开。所以先解到
-    //   %TEMP%\<本进程固定的 guid>_<压缩包文件名>\
-    // 再启动解出来的真实文件。
+    // 一步一步：
+    //   1. BuildContainerExtractItems 把路径算成"要解的项"（不算内容，只拼路径、查大小）
+    //   2. 缓存命中的直接跳过，不重解
+    //   3. 每项放后台线程解，主线程每 200ms 刷一次状态栏文字（真实百分比）
+    //   4. 取消条件：ESC（双击、拖拽都支持），拖拽额外支持"松开左键"
+    //   5. 取消时：已解完的项留着当缓存，正在写的那一项的半成品删掉
+    //   6. 交出解好的真实文件路径清单
     //
-    // 返回解出来的真实路径；失败返回空串并填 error（中文，可直接弹给用户）。
+    // 两个调用方的唯一区别：拖拽多显示一个鼠标右下角提示条（showMouseTip）。
     // ----------------------------------------------------------------
-    std::wstring ExtractContainerEntryToTemp(const std::wstring& virtualPath,
-                                             std::wstring& error);
+
+    // 一项"要解的项"：开解之前就把落点、中间路径、该有多大全部算好
+    struct ContainerExtractItem
+    {
+        std::wstring       virtualPath;         // 容器内路径（C:\a.rar\sub\inner.txt）
+        std::wstring       containerRoot;       // 压缩包本身（C:\a.rar）
+        std::wstring       innerPath;           // 包内相对路径（sub\inner.txt）
+        std::wstring       tempDirectory;       // 解到哪个临时目录
+        std::wstring       outputPath;          // 解完的正式文件路径
+        std::wstring       partialPath;         // zip 通道的中间文件（写完改名成正式文件）
+        std::wstring       stagingPath;         // rar 通道的临时子目录
+        std::wstring       landingPath;         // rar 落地后的那个文件（进度也盯它）
+        unsigned long long expectedSize = 0;    // 包内声明的大小（0 = 包没给）
+        FILETIME           expectedTime = {};   // 包内那一项的修改时间（缓存判据）
+    };
+
+    // 把一批路径算成"要解的项"。一项都算不出来时返回 false（原因已记日志）。
+    bool BuildContainerExtractItems(const std::vector<std::wstring>& paths,
+                                    std::vector<ContainerExtractItem>& items,
+                                    unsigned long long& totalBytes);
+
+    // 解压执行器（双击和拖拽共用）
+    //   showMouseTip  true = 拖拽：显示鼠标右下提示条，并支持"松开左键取消"
+    //   realPaths     解好的真实文件（按 items 顺序，失败/取消的项不在里面）
+    //   lastError     最后一次失败原因（双击时拿来弹窗）
+    //   返回 false 表示被取消
+    bool RunContainerExtraction(const std::vector<ContainerExtractItem>& items,
+                                bool showMouseTip,
+                                std::vector<std::wstring>& realPaths,
+                                std::wstring& lastError);
+
+    // 状态栏显示解压进度：切成"左文字 / (按 ESC 取消)"两段
+    //   leftText：例如"正在解压… 第 2/5 项 45%"或"正在解压… 45%"
+    void ShowExtractStatus(const std::wstring& leftText);
+
+    // 解压结束：状态栏恢复成一整格，并把"N 个项目…"写回去
+    void HideExtractStatus();
 
     // 这个压缩包里的东西解到哪个临时目录。
     // 返回空串表示取不到临时目录（调用方自己决定怎么报错）。
     std::wstring ContainerTempDirectoryFor(const std::wstring& containerRoot);
+
+    // ----------------------------------------------------------------
+    // 缓存命中判断（拖动前 / 双击打开前都要过一遍）
+    //
+    // 上次解出来的文件还在、大小对得上、修改时间对得上，就直接复用它，
+    // 不再重新解压。判断依据只有"大小 + 修改时间"两条：
+    //   · 大小：跟包内声明的大小比（声明为 0 时跳过，包没给）；
+    //   · 修改时间：解压时被设成了包内那一项的修改时间，两边一比就知道
+    //     这个文件是不是我们上次亲手写的那一份（写一半被中断的文件时间是
+    //     "写入那一刻"，永远对不上）。
+    // 目录名本身带"包大小 + 包修改时间"，所以包被换掉时根本不会落到这个目录，
+    // 不需要再单独记一份包指纹。
+    // ----------------------------------------------------------------
+    bool ContainerCacheIsUsable(const std::wstring& outputPath,
+                                unsigned long long declaredSize,
+                                const FILETIME&   expectedTime);
+
+    // 解压成功后把解出来的文件盖上"包内修改时间"这个时间戳（顺便维持只读属性）
+    //
+    // 顺序很重要：必须等文件写完、句柄关掉之后再调，否则半截文件也会盖到时间戳，
+    // 缓存判据就失效了。失败只记日志，不影响本次使用（下次会自然重解）。
+    void StampExtractedFileTime(const std::wstring& path, const FILETIME& time);
 
     // ----------------------------------------------------------------
     // 拖出前的路径准备（文件列表的 LVN_BEGINDRAG 会调它）
@@ -426,14 +486,10 @@ private:
     // 一项都没解出来时返回空，调用方据此放弃这次拖动。
     //
     // 解压放在后台线程做，这里每 100 毫秒看一眼"落点文件长到多大了"，
-    // 进度窗显示的是真实解压进度（不是按项数估的）。
+    // 光标右下角的提示条显示的是真实解压进度（不是按项数估的），
+    // 并且在这期间松开鼠标就等于取消这次拖动（返回空路径）。
     // ----------------------------------------------------------------
     std::vector<std::wstring> PrepareDragPaths(const std::vector<std::wstring>& paths);
-
-    // 「正在解出以便拖出」的小进度窗（拖动前解压时挡住视线的那块）。
-    // 只有总大小超过阈值才显示，解完立即销毁。percent 传 0~100。
-    void ShowDragProgress(const std::wstring& text, int percent);
-    void HideDragProgress();
 
     // 把某条程序的存在状态记进配置（只在值真的变了才写盘，避免频繁落盘）
     void SetOpenWithProgramAlive(const std::wstring& extension,
@@ -614,6 +670,16 @@ private:
     //   m_virtualPasteResultPaths —— 后台线程最终写出的真实路径（撤销记录要用）
     std::atomic<bool>                            m_pasteInProgress{ false };
 
+    // ---- 正在解压压缩包内部的项（双击 / 拖拽都走同一套）----
+    //
+    //   m_extractInProgress  —— 解压期间为 true：UpdateStatusBar 要让位，
+    //                           不能把解压文字覆盖成"N 个项目"
+    //   m_extractStatusShown —— 状态栏是否已经切成"左文字 / (按 ESC 取消)"两段
+    //   m_extractStatusText  —— 当前左格文字（没变就不重写，少一次重绘）
+    std::atomic<bool>                            m_extractInProgress{ false };
+    bool                                         m_extractStatusShown = false;
+    std::wstring                                 m_extractStatusText;
+
     // 取消标志用 shared_ptr 交给后台线程：窗口关闭/析构时线程可能还在跑，
     // 用共享所有权就不会读到已经销毁的成员
     std::shared_ptr<std::atomic<bool>>           m_pasteCancelRequested;
@@ -700,26 +766,14 @@ private:
     // ----------------------------------------------------------------
     // 当前显示的是不是「压缩包内部」
     //
-    // 枚举结果里带回来的两个标记（见 shell::EnumerateResult）：
-    //   m_currentIsContainer    —— 当前目录是压缩包这类容器
-    //   m_currentIsZipContainer —— 且是 .zip（系统支持写入：能剪、能删）
+    // 枚举结果里带回来的标记（见 shell::EnumerateResult）：
+    //   m_currentIsContainer —— 当前目录是压缩包这类容器（不分格式）
     //
-    // 用途：右键菜单里该出现哪些项、Ctrl+X / 删除要不要生效。
+    // 用途：右键菜单里该出现哪些项、Ctrl+X / 删除 / 粘贴要不要生效。
+    // 压包内部一律只读（zip 也一样），所以没有"哪种格式能写"的第二套判断。
     // 存成成员是为了右键菜单弹出时零成本（不查磁盘、不碰 COM）。
     // ----------------------------------------------------------------
     bool                                         m_currentIsContainer = false;
-    bool                                         m_currentIsZipContainer = false;
-
-    // 解容器内部文件用的临时目录前缀（"{guid}_" 这一段）
-    //
-    // 只在本进程第一次需要时生成一次：同一个压缩包反复双击里面的文件，
-    // 会一直用同一个临时目录（%TEMP%\{guid}_{压缩包名}），不会每次都堆一个新目录。
-    std::wstring                                 m_containerTempTag;
-
-    // 「正在解出以便拖出」小浮窗的三个控件（第一次需要时才创建，用完销毁）
-    HWND                                         m_dragProgressPanel = nullptr;
-    HWND                                         m_dragProgressText  = nullptr;
-    HWND                                         m_dragProgressBar   = nullptr;
 
     std::vector<std::wstring>                    m_operationPaths;   // 操作涉及的路径
 
@@ -746,6 +800,11 @@ private:
     // 同样只在文字真的变了才重设，否则「14 个项目」和「正在读取…」来回切，
     // 状态栏看着一直在闪
     std::wstring                                 m_lastStatusText;
+
+    // ---- 选中变化后要不要再刷一次状态栏（合并通知用）----
+    // 虚拟列表在 Shift 多选时先发通知、后提交选中状态，所以选中变化不立刻算，
+    // 而是丢一条 WM_APP_SELECTION_CHANGED 到队尾；这个标志防止连发几十条。
+    bool                                         m_selectionRefreshPending = false;
 
     // ---- 左栏宽度（拖中间那条分隔线时改变）----
     // 拖动只改这一次运行里的值；松手那一刻会写进配置文件（阶段 10 已做）

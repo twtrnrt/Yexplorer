@@ -260,8 +260,10 @@ bool WriteProxyToTempFile(const std::vector<BYTE>& data, std::wstring& outPath)
         return false;
     }
 
-    // %TEMP%\Yexplorer\ 目录，已存在时 CreateDirectory 会失败，忽略即可
-    std::wstring dir = std::wstring(tempDir) + L"Yexplorer";
+    // 统一收进 %TEMP%\Yexp\proxy\（目录已存在时 CreateDirectory 返回失败，忽略即可）
+    const std::wstring root = std::wstring(tempDir) + L"Yexp";
+    ::CreateDirectoryW(root.c_str(), nullptr);
+    const std::wstring dir = root + L"\\proxy";
     ::CreateDirectoryW(dir.c_str(), nullptr);
 
     outPath = dir + L"\\explorer-proxy-x64.exe";

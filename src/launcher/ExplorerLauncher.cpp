@@ -60,7 +60,7 @@ std::wstring NowStamp()
     return buf;
 }
 
-// 日志目录：优先 %LOCALAPPDATA%\Yexplorer，其次 %TEMP%，最后 C:\Windows\Temp
+// 日志目录：优先 %LOCALAPPDATA%\Yexplorer，其次 %TEMP%\Yexp，最后 C:\Windows\Temp
 std::wstring LogFilePath()
 {
     std::wstring dir;
@@ -72,7 +72,8 @@ std::wstring LogFilePath()
     }
     else if (::GetEnvironmentVariableW(L"TEMP", env, 512) > 0 && env[0] != L'\0')
     {
-        dir = env;
+        // 兜底日志也收进统一的临时根目录 %TEMP%\Yexp
+        dir = std::wstring(env) + L"\\Yexp";
     }
     else
     {

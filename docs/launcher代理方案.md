@@ -88,7 +88,7 @@ OriginalFilename = "explorer.exe"
 代理的二进制作为 RCDATA 资源嵌进了 `FileExplorer.exe`
 （`res\app.rc` 的 `IDR_EXPLORER_PROXY`，ID 定义在 `res\resource.h`，
 payload 文件是 `res\explorer-proxy-x64.exe`）。
-部署时程序自己释放：`FindResource` → 写 `%TEMP%\Yexplorer\explorer-proxy-x64.exe`
+部署时程序自己释放：`FindResource` → 写 `%TEMP%\Yexp\proxy\explorer-proxy-x64.exe`
 → `CopyFile` 到 System32 → 删掉临时文件。
 
 所以：
@@ -144,7 +144,7 @@ pwsh -File tools\update-proxy-payload.ps1 -Build   # 先编 x64 代理再复制
 %LOCALAPPDATA%\Yexplorer\launcher.log
 ```
 
-（如果调用方是 SYSTEM 账户、拿不到 LOCALAPPDATA，会退到 `%TEMP%` 或 `C:\Windows\Temp`）
+（如果调用方是 SYSTEM 账户、拿不到 LOCALAPPDATA，会退到 `%TEMP%\Yexp\launcher.log` 或 `C:\Windows\Temp`）
 
 日志每行一条，两种前缀：
 

@@ -1576,6 +1576,25 @@ unsigned long long FileListView::SizeOfPath(const std::wstring& path) const
     return 0;
 }
 
+FILETIME FileListView::ModifiedOfPath(const std::wstring& path) const
+{
+    if (m_result == nullptr || path.empty())
+    {
+        return FILETIME{};
+    }
+
+    for (const auto& entry : m_result->entries)
+    {
+        if (entry.fullPath == path)
+        {
+            // 压缩包处理器没给时间时这里是全 0（调用方自己决定拿什么兜底）
+            return entry.modified;
+        }
+    }
+
+    return FILETIME{};
+}
+
 void FileListView::SelectAll()
 {
     if (m_hWnd == nullptr)
@@ -2528,6 +2547,20 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
                                              ? DROPEFFECT_COPY
                                              : (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
             const DWORD preferredEffect = extractedFromContainer ? DROPEFFECT_COPY : 0;
+
+            // 从压缩包解出来的临时副本是只读的，拖出去时目标复制会继承只读，
+            // 用户就拿到一个改不了的文件。所以拖之前把它们临时改成普通属性。
+            //
+            // 拖完不恢复只读：资源管理器的复制可能在后台线程跑，这时候把只读加回去，
+            // 复制读到的就是"只读源"，副本又变只读。缓存是不是那份原件，靠
+            // "修改时间对不对得上"判断（MainWindow::ContainerCacheIsUsable），不依赖只读。
+            if (extractedFromContainer)
+            {
+                for (const auto& path : dragPaths)
+                {
+                    ::SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+                }
+            }
 
             DWORD effect = shell::DoDragFiles(dragPaths, m_hWnd, dragInfo->ptAction,
                                              allowedEffects, preferredEffect);

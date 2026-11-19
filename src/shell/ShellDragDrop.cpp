@@ -9,6 +9,7 @@
 
 #include "core/Logger.h"
 #include "shell/ShellFolder.h"   // IsDriveRootPath：拖盘符时默认效果改成"链接"
+#include "shell/ShellOperations.h"   // IsPathInsideContainer：落点在压缩包内部要禁止
 
 #include <commoncontrols.h>
 #include <cstring>      // std::memcpy（往 DROPDESCRIPTION 结构里拷数据）
@@ -943,6 +944,19 @@ struct DropTipContent
 DropTipContent g_dropTipContent;       // 当前要显示的内容（同一时刻只有一个拖动，全局够用）
 HFONT         g_dropTipFont = nullptr; // 系统界面字体（Win11 上是微软雅黑 UI）
 
+// ----------------------------------------------------------------------------
+// 拖动开始前的"状态提示条"（比如「正在解压…」）
+//
+// 和上面那条拖拽提示条是同一个窗口类、同一套配色，区别只有两点：
+//   1) 窗口上打了 kStatusTipProp 属性，窗口过程据此走"只画一行文字"的路径；
+//   2) 它有自己的窗口实例（g_statusTipWindow），和拖拽提示条的实例互不干扰。
+// 两者不会同时出现：解压阶段只有它，进入拖拽循环就换成另一条。
+// ----------------------------------------------------------------------------
+constexpr wchar_t kStatusTipProp[] = L"YExplorerDragStatusTip";
+
+std::wstring g_statusTipText;          // 状态提示条上要显示的那行字
+HWND         g_statusTipWindow = nullptr;
+
 // 系统界面字体，取一次就缓存
 HFONT DropTipFont()
 {
@@ -1213,6 +1227,23 @@ LRESULT CALLBACK DropTipWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             ::SelectObject(dc, font);
         }
 
+        // 状态提示条（「正在解压…」这类）：只画一行文字，底色和描边跟上面完全一样
+        if (::GetPropW(hwnd, kStatusTipProp) != nullptr)
+        {
+            RECT textRect = { client.left + kDropTipPaddingX, client.top,
+                              client.right - kDropTipPaddingX, client.bottom };
+
+            ::SetTextColor(dc, kDropTipAction);   // 和「移动到/复制到」同色，一眼看出是"正在做某事"
+            ::DrawTextW(dc, g_statusTipText.c_str(), static_cast<int>(g_statusTipText.size()),
+                        &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            ::DeleteObject(border);
+            ::DeleteObject(background);
+
+            ::EndPaint(hwnd, &paint);
+            return 0;
+        }
+
         const DropTipContent& content = g_dropTipContent;
 
         // 分段量宽度：符号 + 动作词 + 目标名
@@ -1339,6 +1370,92 @@ HWND CreateDropTipWindow()
 }
 }
 
+// ----------------------------------------------------------------------------
+// 拖动开始前的"状态提示条"（「正在解压…」）
+// ----------------------------------------------------------------------------
+void ShowDragStatusTip(const std::wstring& text)
+{
+    if (g_statusTipWindow == nullptr)
+    {
+        g_statusTipWindow = CreateDropTipWindow();
+
+        if (g_statusTipWindow == nullptr)
+        {
+            // 窗口建不出来就当没有提示，拖动照常进行（不能因为画不出提示就挡住往外拖）
+            return;
+        }
+
+        // 打标记：窗口过程看到这个属性就走"只画一行字"的路径
+        ::SetPropW(g_statusTipWindow, kStatusTipProp, reinterpret_cast<HANDLE>(1));
+    }
+
+    g_statusTipText = text;
+
+    // 跟着光标走：右下角，和系统那条提示一样的位置
+    POINT cursor = {};
+    ::GetCursorPos(&cursor);
+
+    // 宽度按文字量算（条高固定 30，和拖拽提示条保持一致）
+    HDC dc = ::GetDC(g_statusTipWindow);
+    HFONT font = DropTipFont();
+    HFONT previousFont = nullptr;
+
+    if (font != nullptr)
+    {
+        previousFont = static_cast<HFONT>(::SelectObject(dc, font));
+    }
+
+    SIZE textSize = {};
+    if (!text.empty())
+    {
+        ::GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &textSize);
+    }
+
+    if (previousFont != nullptr)
+    {
+        ::SelectObject(dc, previousFont);
+    }
+
+    ::ReleaseDC(g_statusTipWindow, dc);
+
+    const int width  = textSize.cx + kDropTipPaddingX * 2;
+    const int height = kDropTipHeight;
+
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    ::SetWindowPos(g_statusTipWindow, HWND_TOPMOST,
+                   cursor.x + kDropTipOffsetX, cursor.y + kDropTipOffsetY,
+                   width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    // 圆角裁剪：不裁的话圆角外面会露出窗口底色（黑角），和拖拽提示条是同一个原因
+    HRGN region = ::CreateRoundRectRgn(0, 0, width, height, 12, 12);
+    if (region != nullptr)
+    {
+        if (::SetWindowRgn(g_statusTipWindow, region, TRUE) == 0)
+        {
+            ::DeleteObject(region);   // 设置失败时区域还归我们，得自己删掉
+        }
+    }
+
+    // 调用方是在同步等待的循环里（没有消息泵），这里强制刷出来
+    ::InvalidateRect(g_statusTipWindow, nullptr, FALSE);
+    ::UpdateWindow(g_statusTipWindow);
+}
+
+void HideDragStatusTip()
+{
+    if (g_statusTipWindow != nullptr)
+    {
+        ::DestroyWindow(g_statusTipWindow);
+        g_statusTipWindow = nullptr;
+    }
+
+    g_statusTipText.clear();
+}
+
 class WindowDropTarget final : public IDropTarget
 {
 public:
@@ -1454,6 +1571,14 @@ public:
         // 建快捷方式（Alt）例外：在自己里面建一个指向自己的 .lnk 是合法的。
         if (chosen != DROPEFFECT_LINK && IsDropIntoSelf(targetDirectory, sources))
         {
+            chosen = DROPEFFECT_NONE;
+        }
+
+        // 第二道保险：落点在压缩包内部时什么都不做（拖动阶段已经判死了，
+        // 这里防止左栏树、地址栏等别的入口绕过来）
+        if (chosen != DROPEFFECT_NONE && IsInsideContainerDirectory(targetDirectory))
+        {
+            Logger::Info(L"落点无效（目标在压缩包内部）：" + targetDirectory);
             chosen = DROPEFFECT_NONE;
         }
 
@@ -1810,6 +1935,31 @@ private:
         return false;
     }
 
+    // 落点是不是「某个压缩包内部」的虚拟目录（C:\a.zip\sub 这种）
+    //
+    // 压缩包是只读的，往里复制/移动/建快捷方式都不可能成功；放行只会让松手那一刻
+    // 弹一个错误框（以前就是这样）。所以拖动阶段就判死。
+    //
+    // DragOver 会非常频繁地调，这里按落点路径做一次记忆：
+    // 同一个目录连着来几十次也只查一次磁盘。
+    bool IsInsideContainerDirectory(const std::wstring& directory)
+    {
+        if (directory.empty())
+        {
+            return false;
+        }
+
+        if (directory == m_containerCheckPath)
+        {
+            return m_containerCheckResult;
+        }
+
+        m_containerCheckPath   = directory;
+        m_containerCheckResult = IsPathInsideContainer(directory);
+
+        return m_containerCheckResult;
+    }
+
     void UpdateEffect(DWORD keyState, POINTL pt, DWORD* effect)
     {
         std::wstring targetDirectory = ResolveDirectory(pt);
@@ -1840,6 +1990,14 @@ private:
                 computed = DROPEFFECT_NONE;
             }
 
+            // 落点在压缩包内部（C:\a.zip\sub）：压缩包是只读的，复制/移动/建快捷方式
+            // 都不可能成功 —— 拖动阶段就判死，光标变禁止、提示条显示"不能放到 此处"，
+            // 免得松手才弹一个错误框。
+            if (computed != DROPEFFECT_NONE && IsInsideContainerDirectory(targetDirectory))
+            {
+                computed = DROPEFFECT_NONE;
+            }
+
             *effect = computed;
         }
     }
@@ -1850,6 +2008,10 @@ private:
     DropTargetCallbacks       m_callbacks;
     std::vector<std::wstring> m_sourcePaths;            // 正在拖过来的东西（DragEnter 时记下）
     DWORD                     m_sourcePreferredEffect = 0;
+
+    // 落点"是不是压缩包内部"的记忆（DragOver 每秒来几十次，别每次都去查磁盘）
+    std::wstring m_containerCheckPath;
+    bool         m_containerCheckResult = false;
 
     HWND         m_tipWindow = nullptr;   // 自己画的那条提示（跟着光标右下角走）
     std::wstring m_tipText;               // 当前提示文字
