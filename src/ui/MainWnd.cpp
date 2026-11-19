@@ -3323,8 +3323,8 @@ void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
 // ---------------------------------------------------------------------------
 void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath)
 {
-    // 压缩包内部的子目录：按容器能力给菜单
-    // （zip 里能进去、能剪能删；rar/7z 里只能「打开 / 复制」，和系统一致）
+    // 压缩包内部（不管 zip / rar / 7z）：一律只读，只给「打开 / 复制」，
+    // 和系统的只读容器一致。（zip 内部的剪切 / 删除 / 属性还没接。）
     if (m_currentIsContainer)
     {
         BuildContainerItemMenu(menu);
@@ -3924,45 +3924,16 @@ static HRESULT RestoreDeletedFromRecycleBin(const std::vector<std::wstring>& ori
 }
 
 // ---------------------------------------------------------------------------
-// 撤销栈的维护
+// 撤销栈的维护（栈本身在 core::UndoStack，这里只做转发）
 // ---------------------------------------------------------------------------
 void MainWindow::PushUndoRecord(const UndoRecord& record)
 {
-    if (record.kind == UndoKind::None)
-    {
-        return;
-    }
-
-    m_undoStack.push_back(record);
-
-    // 超出上限就把最老的一步挤掉
-    if (m_undoStack.size() > kMaxUndoSteps)
-    {
-        m_undoStack.erase(m_undoStack.begin());
-    }
-
-    // 出现新操作后，原来"恢复"过的那些步骤就作废了（和所有编辑器一样）
-    m_redoStack.clear();
+    m_undo.Push(record);
 }
 
 void MainWindow::ClearUndoHistory()
 {
-    m_undoStack.clear();
-    m_redoStack.clear();
-}
-
-// 把一步操作的动词转成菜单文案里的字（新建 / 重命名 / 移动 / 复制 / 删除）
-const wchar_t* MainWindow::UndoVerbText(UndoKind kind)
-{
-    switch (kind)
-    {
-    case UndoKind::Create: return L"新建";
-    case UndoKind::Rename: return L"重命名";
-    case UndoKind::Move:   return L"移动";
-    case UndoKind::Copy:   return L"复制";
-    case UndoKind::Delete: return L"删除";
-    default:               return nullptr;
-    }
+    m_undo.Clear();
 }
 
 void MainWindow::FillUndoItem(HMENU menu)
@@ -3970,13 +3941,14 @@ void MainWindow::FillUndoItem(HMENU menu)
     bool anyItem = false;
 
     // 「撤销 删除」：撤销栈顶那一步
-    if (!m_undoStack.empty())
+    if (const UndoRecord* top = m_undo.TopUndo())
     {
-        const UndoRecord& record = m_undoStack.back();
+        const UndoRecord& record = *top;
 
         // 批量重命名单独说一句「撤销 批量重命名」，让用户一眼看出这一条
         // 和单文件改名不是同一档（也就不会奇怪 Ctrl+Z 为什么不动它）
-        const wchar_t* verb = record.batchRename ? L"批量重命名" : UndoVerbText(record.kind);
+        const wchar_t* verb = record.batchRename ? L"批量重命名"
+                                                 : core::UndoStack::VerbText(record.kind);
 
         if (verb != nullptr)
         {
@@ -3987,11 +3959,12 @@ void MainWindow::FillUndoItem(HMENU menu)
     }
 
     // 「恢复 删除」：重做栈顶那一步（撤销过、还没被新操作冲掉的那些）
-    if (!m_redoStack.empty())
+    if (const UndoRecord* top = m_undo.TopRedo())
     {
-        const UndoRecord& record = m_redoStack.back();
+        const UndoRecord& record = *top;
 
-        const wchar_t* verb = record.batchRename ? L"批量重命名" : UndoVerbText(record.kind);
+        const wchar_t* verb = record.batchRename ? L"批量重命名"
+                                                 : core::UndoStack::VerbText(record.kind);
 
         if (verb != nullptr)
         {
@@ -4015,7 +3988,7 @@ void MainWindow::PerformUndo(bool fromKeyboard)
         return;
     }
 
-    if (m_undoStack.empty())
+    if (!m_undo.CanUndo())
     {
         Logger::Info(L"撤销：没有可撤销的步骤");
         return;
@@ -4024,15 +3997,14 @@ void MainWindow::PerformUndo(bool fromKeyboard)
     // 批量重命名：只能在右键菜单里撤，Ctrl+Z 不响应（用户拍板）。
     // 这里是"整条不执行"，不是"跳过这条去撤上一条"——跳过去会让撤销和用户看到的
     // 操作顺序对不上，太容易误删。
-    if (fromKeyboard && m_undoStack.back().batchRename)
+    if (fromKeyboard && m_undo.TopUndo()->batchRename)
     {
         Logger::Info(L"撤销：批量重命名不支持 Ctrl+Z，请用右键菜单里的「撤销 批量重命名」");
         return;
     }
 
     // 从栈顶那一 步开始反着做
-    const UndoRecord record = m_undoStack.back();
-    m_undoStack.pop_back();
+    const UndoRecord record = m_undo.TakeUndo();
 
     switch (record.kind)
     {
@@ -4050,11 +4022,11 @@ void MainWindow::PerformUndo(bool fromKeyboard)
         // 把重做栈清掉，免得 Ctrl+Y 恢复到一半
         if (record.kind == UndoKind::Create)
         {
-            m_redoStack.clear();
+            m_undo.ClearRedo();
         }
         else
         {
-            m_redoStack.push_back(record);
+            m_undo.PushRedo(record);
         }
         break;
     }
@@ -4069,7 +4041,7 @@ void MainWindow::PerformUndo(bool fromKeyboard)
             shellops::MoveItems({ record.afterPaths[i] }, parent, m_hWnd);
         }
         Logger::Info(L"撤销：已移回 " + std::to_wstring(count) + L" 项");
-        m_redoStack.push_back(record);
+        m_undo.PushRedo(record);
         break;
     }
 
@@ -4092,7 +4064,7 @@ void MainWindow::PerformUndo(bool fromKeyboard)
             Logger::Info(L"撤销：批量重命名已改回 " +
                          std::to_wstring(record.afterPaths.size() - static_cast<size_t>(failures)) +
                          L" 项" + (failures > 0 ? L"，" + std::to_wstring(failures) + L" 项失败" : L""));
-            m_redoStack.push_back(record);
+            m_undo.PushRedo(record);
             break;
         }
 
@@ -4103,13 +4075,13 @@ void MainWindow::PerformUndo(bool fromKeyboard)
             shellops::RenameItem(record.afterPaths[i], FileNameOf(record.beforePaths[i]), m_hWnd);
         }
         Logger::Info(L"撤销：已改回 " + std::to_wstring(count) + L" 项的名字");
-        m_redoStack.push_back(record);
+        m_undo.PushRedo(record);
         break;
     }
 
     case UndoKind::Delete:
         RestoreDeletedFromRecycleBin(record.beforePaths, m_hWnd);
-        m_redoStack.push_back(record);
+        m_undo.PushRedo(record);
         break;
 
     default:
@@ -4137,21 +4109,20 @@ void MainWindow::PerformRedo(bool fromKeyboard)
         return;
     }
 
-    if (m_redoStack.empty())
+    if (!m_undo.CanRedo())
     {
         Logger::Info(L"恢复：没有可恢复的步骤");
         return;
     }
 
     // 和撤销对称：批量重命名的重做也只能走右键菜单，Ctrl+Y 不碰它
-    if (fromKeyboard && m_redoStack.back().batchRename)
+    if (fromKeyboard && m_undo.TopRedo()->batchRename)
     {
         Logger::Info(L"恢复：批量重命名不支持 Ctrl+Y，请用右键菜单里的「恢复 批量重命名」");
         return;
     }
 
-    const UndoRecord record = m_redoStack.back();
-    m_redoStack.pop_back();
+    const UndoRecord record = m_undo.TakeRedo();
 
     switch (record.kind)
     {
@@ -4172,7 +4143,7 @@ void MainWindow::PerformRedo(bool fromKeyboard)
             Logger::Info(L"恢复：批量重命名已重做 " +
                          std::to_wstring(record.afterPaths.size() - static_cast<size_t>(failures)) +
                          L" 项" + (failures > 0 ? L"，" + std::to_wstring(failures) + L" 项失败" : L""));
-            m_undoStack.push_back(record);
+            m_undo.PushUndoOnly(record);
             break;
         }
 
@@ -4182,7 +4153,7 @@ void MainWindow::PerformRedo(bool fromKeyboard)
             shellops::RenameItem(record.beforePaths[i], FileNameOf(record.afterPaths[i]), m_hWnd);
         }
         Logger::Info(L"恢复：已改回新名字 " + std::to_wstring(count) + L" 项");
-        m_undoStack.push_back(record);
+        m_undo.PushUndoOnly(record);
         break;
     }
 
@@ -4195,7 +4166,7 @@ void MainWindow::PerformRedo(bool fromKeyboard)
                                 NavigationHistory::ParentPath(record.afterPaths[i]), m_hWnd);
         }
         Logger::Info(L"恢复：已再移动 " + std::to_wstring(count) + L" 项");
-        m_undoStack.push_back(record);
+        m_undo.PushUndoOnly(record);
         break;
     }
 
@@ -4208,7 +4179,7 @@ void MainWindow::PerformRedo(bool fromKeyboard)
                                 NavigationHistory::ParentPath(record.afterPaths[i]), m_hWnd);
         }
         Logger::Info(L"恢复：已再复制 " + std::to_wstring(count) + L" 项");
-        m_undoStack.push_back(record);
+        m_undo.PushUndoOnly(record);
         break;
     }
 
@@ -4218,7 +4189,7 @@ void MainWindow::PerformRedo(bool fromKeyboard)
             shellops::DeleteItems({ path }, m_hWnd);
         }
         Logger::Info(L"恢复：已再删除 " + std::to_wstring(record.beforePaths.size()) + L" 项");
-        m_undoStack.push_back(record);
+        m_undo.PushUndoOnly(record);
         break;
 
     default:
@@ -6865,7 +6836,17 @@ void MainWindow::OnEnumerationDone()
     // （已经在盯同一个目录的话内部会直接返回，不会反复拆建线程）
     // 第 4 个参数是日志路径：日志就写在本程序旁边，用户停在 exe 目录时
     // 每写一行日志都会让监视器以为"目录变了"，必须跳过，否则会自我刷新死循环。
-    m_watcher.Start(result->path, m_hWnd, WM_APP_FOLDER_CHANGED, Logger::FilePath());
+    //
+    // 压缩包内部（C:\a.zip\inner）是虚拟路径，ReadDirectoryChangesW 打不开，
+    // 每进一次只会刷一条 warning；那里也不会被别的程序原地改，所以直接跳过。
+    if (shell::IsFileSystemPath(result->path) && !shell::IsPathInsideContainer(result->path))
+    {
+        m_watcher.Start(result->path, m_hWnd, WM_APP_FOLDER_CHANGED, Logger::FilePath());
+    }
+    else
+    {
+        m_watcher.Stop();
+    }
 
     size_t logCount = (result->entries.size() < kMaxLogItems) ? result->entries.size() : kMaxLogItems;
     for (size_t i = 0; i < logCount; ++i)

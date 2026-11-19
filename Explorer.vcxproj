@@ -149,6 +149,7 @@
     <ClCompile Include="src\core\Logger.cpp" />
     <ClCompile Include="src\core\PinyinInitials.cpp" />
     <ClCompile Include="src\core\Settings.cpp" />
+    <ClCompile Include="src\core\UndoStack.cpp" />
     <ClCompile Include="src\shell\ContainerExtract.cpp" />
     <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\shell\ShellIcon.cpp" />
@@ -181,6 +182,7 @@
     <ClInclude Include="src\core\PinyinInitials.h" />
     <ClInclude Include="src\core\NavigationHistory.h" />
     <ClInclude Include="src\core\Settings.h" />
+    <ClInclude Include="src\core\UndoStack.h" />
     <ClInclude Include="src\shell\ContainerExtract.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />
     <ClInclude Include="src\shell\ShellIcon.h" />

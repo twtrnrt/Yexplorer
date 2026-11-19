@@ -35,6 +35,7 @@
 #include "core/AsyncTask.h"
 #include "core/FolderWatcher.h"
 #include "core/NavigationHistory.h"
+#include "core/UndoStack.h"
 #include "shell/ShellFolder.h"
 #include "shell/ShellIcon.h"
 #include "shell/ShellOpenWith.h"
@@ -280,32 +281,12 @@ private:
     //
     // 菜单文案跟系统一样，显示「撤销 删除」「撤销 重命名」「撤销 移动」
     // 「撤销 复制」「撤销 新建」；栈空时这一项整条不出现。
-    enum class UndoKind
-    {
-        None,
-        Create,     // 新建（文件夹 / 新建菜单里建出来的文件）
-        Rename,     // 重命名
-        Move,       // 剪切粘贴（移动）
-        Copy,       // 复制粘贴
-        Delete,     // 删除（进回收站，撤销 = 从回收站还原）
-    };
+    //
+    // 栈本身（50 级上限、新操作清空重做栈）在 core::UndoStack，这里只负责执行。
+    using UndoKind   = core::UndoKind;
+    using UndoRecord = core::UndoRecord;
 
-    struct UndoRecord
-    {
-        UndoKind                  kind = UndoKind::None;
-        std::vector<std::wstring> afterPaths;    // 操作之后这些项在哪（撤销要动它们）
-        std::vector<std::wstring> beforePaths;   // 操作之前在哪（重命名前的全路径 / 移动和删除的源路径）
-
-        // 批量重命名专用的标记：这条记录照样在撤销栈里、右键「撤销」能撤，
-        // 但 Ctrl+Z / Ctrl+Y 会被拦掉（用户拍板：批量改名不能走快捷键）。
-        bool batchRename = false;
-    };
-
-    // 最多记多少级（再多也没人真的会连撤 50 步，省点内存）
-    static const size_t kMaxUndoSteps = 50;
-
-    std::vector<UndoRecord> m_undoStack;   // 撤销栈（末尾是最新的一步）
-    std::vector<UndoRecord> m_redoStack;   // 重做栈（撤销过的步骤按顺序排在这里）
+    core::UndoStack m_undo;
 
     void PushUndoRecord(const UndoRecord& record);   // 操作成功后压栈（同时清空重做栈）
     void FillUndoItem(HMENU menu);                   // 有可撤销/可恢复的步骤才往菜单里加
@@ -316,9 +297,6 @@ private:
     // 批量改名记录的撤销/恢复：两段式把一批文件改成另一批名字，返回失败项数
     int RenameManyTwoStage(const std::vector<std::wstring>& fromPaths,
                            const std::vector<std::wstring>& toNames);
-
-    // 把操作的动词转成文案（「撤销 删除」里的"删除"）
-    static const wchar_t* UndoVerbText(UndoKind kind);
 
     // 在另一个窗口里打开这个目录（「在新窗口中打开」/ 按住 Ctrl 双击）。
     // 已经有窗口停在这个目录时会把它拉到前台，不再开新窗口。
