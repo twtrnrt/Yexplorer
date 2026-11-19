@@ -1001,6 +1001,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             return PrepareDragPaths(paths);
         });
 
+        // 选中项变了：状态栏里的"选中 N 项 / 总大小"要跟着变
+        m_fileListView.SetSelectionChangedCallback([this]()
+        {
+            UpdateStatusBar();
+        });
+
         // 注册拖放接收：资源管理器/桌面/别的程序把文件拖进列表或左栏都能落地
         RegisterDropTargets();
 
@@ -8178,6 +8184,46 @@ void MainWindow::UpdateNavigationState()
     ::EnableWindow(m_upButton.Handle(), parent.empty() ? FALSE : TRUE);
 }
 
+// ----------------------------------------------------------------------------
+// 字节数 → 人能看的大小文字（状态栏选中总大小用）
+//   0 ~ 1023 字节   → "512 B"（整数，不带小数）
+//   ≥ 1 KB          → "12.5 KB"
+//   ≥ 1024 KB       → "1.2 MB"，再往上 GB / TB，一律保留 1 位小数
+// ----------------------------------------------------------------------------
+static std::wstring FormatByteSize(unsigned long long bytes)
+{
+    if (bytes < 1024ULL)
+    {
+        return std::to_wstring(bytes) + L" B";
+    }
+
+    double         value = static_cast<double>(bytes) / 1024.0;
+    std::wstring   unit  = L"KB";
+
+    if (value >= 1024.0)
+    {
+        value /= 1024.0;
+        unit = L"MB";
+    }
+
+    if (value >= 1024.0)
+    {
+        value /= 1024.0;
+        unit = L"GB";
+    }
+
+    if (value >= 1024.0)
+    {
+        value /= 1024.0;
+        unit = L"TB";
+    }
+
+    wchar_t buffer[64] = {};
+    _snwprintf_s(buffer, _countof(buffer), _TRUNCATE, L"%.1f ", value);
+
+    return std::wstring(buffer) + unit;
+}
+
 void MainWindow::UpdateStatusBar()
 {
     if (m_hStatusBar == nullptr)
@@ -8218,6 +8264,35 @@ void MainWindow::UpdateStatusBar()
             }
 
             text = std::to_wstring(realCount) + L" 个项目";
+
+            // 选中信息：列表数据已就绪，直接从控件里汇总（只遍历内存里的条目，
+            // 不查磁盘）。规则：
+            //   选中 1 项   → "选中1个项目"（是文件还要带大小，文件夹没有大小）
+            //   选中多项    → "已选择N个项目"；全是文件才带总大小，混了文件夹就不带
+            size_t             selectedCount = 0;
+            bool               hasFolder     = false;
+            unsigned long long selectedSize  = 0;
+
+            m_fileListView.SelectedSummary(selectedCount, hasFolder, selectedSize);
+
+            if (selectedCount == 1)
+            {
+                text += L"　选中1个项目";
+
+                if (!hasFolder)
+                {
+                    text += L"　" + FormatByteSize(selectedSize);
+                }
+            }
+            else if (selectedCount > 1)
+            {
+                text += L"　已选择" + std::to_wstring(selectedCount) + L"个项目";
+
+                if (!hasFolder)
+                {
+                    text += L"　" + FormatByteSize(selectedSize);
+                }
+            }
         }
         else
         {

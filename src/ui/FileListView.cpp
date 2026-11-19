@@ -1507,11 +1507,24 @@ size_t FileListView::ItemCount() const
 
 unsigned long long FileListView::SelectedTotalSize() const
 {
+    size_t count = 0;
+    bool   hasFolder = false;
     unsigned long long total = 0;
+
+    SelectedSummary(count, hasFolder, total);
+    return total;
+}
+
+void FileListView::SelectedSummary(size_t& count, bool& hasFolder,
+                                   unsigned long long& totalSize) const
+{
+    count     = 0;
+    hasFolder = false;
+    totalSize = 0;
 
     if (m_hWnd == nullptr || m_result == nullptr)
     {
-        return total;
+        return;
     }
 
     const int itemCount = static_cast<int>(m_result->entries.size());
@@ -1523,15 +1536,25 @@ unsigned long long FileListView::SelectedTotalSize() const
             continue;
         }
 
-        // 目录没有"大小"的概念，按 0 算（解压只看文件的实际字节数）
         const shell::ShellEntry& entry = m_result->entries[index];
-        if (!entry.isFolder)
+
+        // 组标题行、占位格画出来但不是"项目"，别算进选中数
+        if (entry.isGroupHeader || entry.isSpacer)
         {
-            total += entry.size;
+            continue;
+        }
+
+        ++count;
+
+        if (entry.isFolder)
+        {
+            hasFolder = true;   // 目录没有大小，混进一个目录就不报总大小
+        }
+        else
+        {
+            totalSize += entry.size;
         }
     }
-
-    return total;
 }
 
 unsigned long long FileListView::SizeOfPath(const std::wstring& path) const
@@ -2763,6 +2786,26 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             break;
         }
         return CDRF_DODEFAULT;
+    }
+
+    // --------------------------------------------------------------
+    // 选中状态已经变了：通知主窗口刷新状态栏（"选中 N 项 / 总大小"）
+    //
+    // 只认"选中位"的变化：焦点移动、重绘、文字变化都会走到这里，
+    // 那些跟状态栏无关，别每次点一下都刷一遍。
+    // --------------------------------------------------------------
+    case LVN_ITEMCHANGED:
+    {
+        const NMLISTVIEW* changeInfo = reinterpret_cast<const NMLISTVIEW*>(lParam);
+
+        if ((changeInfo->uChanged & LVIF_STATE) != 0 &&
+            ((changeInfo->uOldState ^ changeInfo->uNewState) & LVIS_SELECTED) != 0 &&
+            m_onSelectionChanged != nullptr)
+        {
+            m_onSelectionChanged();
+        }
+
+        return 0;
     }
 
     // --------------------------------------------------------------

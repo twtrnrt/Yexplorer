@@ -172,6 +172,20 @@ public:
     // 只看已经枚举好的大小，不额外查磁盘。
     unsigned long long SelectedTotalSize() const;
 
+    // 选中信息汇总（状态栏用，一次遍历拿三项）：
+    //   count     选中了几项（组标题行、占位格不可选，天然不会算进来）
+    //   hasFolder 选中的里面有没有文件夹
+    //   totalSize 选中项的总字节数（文件夹按 0 算）
+    // 只读内存里的条目，不碰磁盘，选中上千项也只是遍历一次数组。
+    void SelectedSummary(size_t& count, bool& hasFolder, unsigned long long& totalSize) const;
+
+    // 选中状态变化回调：主窗口拿它刷新状态栏里的"选中 N 项 / 总大小"
+    using SelectionChangedCallback = std::function<void()>;
+    void SetSelectionChangedCallback(SelectionChangedCallback callback)
+    {
+        m_onSelectionChanged = std::move(callback);
+    }
+
     // 某一个路径的字节数（按完整路径查，找不到返回 0；目录按 0 算）。
     // 拖出压缩包里的项时用它算"这一项解完该有多大"，进度条靠这个算百分比。
     unsigned long long SizeOfPath(const std::wstring& path) const;
@@ -314,6 +328,7 @@ private:
     PrepareDragPathsCallback                      m_onPrepareDragPaths;
     Comparator                                    m_comparator;
     ColumnWidthChangedCallback                    m_onColumnWidthChanged;
+    SelectionChangedCallback                      m_onSelectionChanged;
 
     // 三列固定列的宽度（用户可以拖表头改，改完会存进配置）
     int                                           m_timeColumnWidth = 160;
