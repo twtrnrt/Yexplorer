@@ -404,98 +404,25 @@ private:
     // ----------------------------------------------------------------
     // 解压"压缩包内部的项"：只有一套流程，双击和拖拽都走这里
     //
-    // 一步一步：
-    //   1. BuildContainerExtractItems 把路径算成"要解的项"（不算内容，只拼路径、查大小）
-    //   2. 缓存命中的直接跳过，不重解
-    //   3. 每项放后台线程解，主线程每 200ms 刷一次状态栏文字（真实百分比）
-    //   4. 取消条件：ESC（双击、拖拽都支持），拖拽额外支持"松开左键"
-    //   5. 取消时：已解完的项留着当缓存，正在写的那一项的半成品删掉
-    //   6. 交出解好的真实文件路径清单
+    // 执行侧全部在 shell::ContainerExtract（解压、缓存、临时目录、进度轮询），
+    // 这里只做两件事：
+    //   1) 从当前列表快照给解压模块提供 大小 / 修改时间 / 是不是文件夹；
+    //   2) 把它的进度回调接到状态栏，并在解压期间立起 m_extractInProgress。
     //
-    // 两个调用方的唯一区别：拖拽多显示一个鼠标右下角提示条（showMouseTip）。
+    // 返回 false = 用户中途取消（ESC / 松开鼠标）；
+    // 返回 true 但 realPaths 为空 = 一项都没解出来，原因在 lastError。
+    // showMouseTip：拖拽时为 true（鼠标右下角提示条 + 松开左键取消）。
     // ----------------------------------------------------------------
+    bool ExtractContainerPaths(const std::vector<std::wstring>& paths,
+                               bool showMouseTip,
+                               std::vector<std::wstring>& realPaths,
+                               std::wstring& lastError);
 
-    // 一项"要解的项"：开解之前就把落点、中间路径、该有多大全部算好
-    struct ContainerExtractItem
-    {
-        std::wstring       virtualPath;         // 容器内路径（C:\a.rar\sub\inner.txt）
-        std::wstring       containerRoot;       // 压缩包本身（C:\a.rar）
-        std::wstring       innerPath;           // 包内相对路径（sub\inner.txt）
-        std::wstring       tempDirectory;       // 解到哪个临时目录
-        std::wstring       outputPath;          // 解完的正式文件路径
-        std::wstring       partialPath;         // zip 通道的中间文件（写完改名成正式文件）
-        std::wstring       stagingPath;         // rar 通道的临时子目录
-        std::wstring       landingPath;         // rar 落地后的那个文件（进度也盯它）
-        unsigned long long expectedSize = 0;    // 包内声明的大小（0 = 包没给）
-        FILETIME           expectedTime = {};   // 包内那一项的修改时间（缓存判据）
-
-        // ---- 下面两项只对"文件夹项"有值 ----
-        //
-        // 整目录复制（CopyHere）中途拿不到"当前复制到哪个文件"，所以解压前先把这个
-        // 目录在包里的文件清单数出来（文件名和大小），复制过程中每秒对着清单问一次
-        // "这个文件出现了没有、长了多少"，就能算出真实进度和当前正在写的文件名。
-        std::vector<std::wstring>       childRelativePaths;  // 相对该目录的子路径
-        std::vector<unsigned long long> childSizes;          // 每个子文件在包内声明的大小
-        std::vector<FILETIME>           childTimes;          // 每个子文件在包内的修改时间
-    };
-
-    // 把一批路径算成"要解的项"。一项都算不出来时返回 false（原因已记日志）。
-    bool BuildContainerExtractItems(const std::vector<std::wstring>& paths,
-                                    std::vector<ContainerExtractItem>& items,
-                                    unsigned long long& totalBytes);
-
-    // 解压执行器（双击和拖拽共用）
-    //   showMouseTip  true = 拖拽：显示鼠标右下提示条，并支持"松开左键取消"
-    //   realPaths     解好的真实文件（按 items 顺序，失败/取消的项不在里面）
-    //   lastError     最后一次失败原因（双击时拿来弹窗）
-    //   返回 false 表示被取消
-    bool RunContainerExtraction(const std::vector<ContainerExtractItem>& items,
-                                bool showMouseTip,
-                                std::vector<std::wstring>& realPaths,
-                                std::wstring& lastError);
-
-    // 状态栏显示解压进度：切成"左文字 / (按 ESC 取消)"两段
-    //   leftText：例如"正在解压… 第 2/5 项 45%"或"正在解压… 45%"
-    void ShowExtractStatus(const std::wstring& leftText);
+    // 状态栏显示解压进度（文字由解压模块拼好传进来）
+    void ShowExtractStatus(const std::wstring& text);
 
     // 解压结束：状态栏恢复成一整格，并把"N 个项目…"写回去
     void HideExtractStatus();
-
-    // 这个压缩包里的东西解到哪个临时目录。
-    // 返回空串表示取不到临时目录（调用方自己决定怎么报错）。
-    std::wstring ContainerTempDirectoryFor(const std::wstring& containerRoot);
-
-    // ----------------------------------------------------------------
-    // 缓存命中判断（拖动前 / 双击打开前都要过一遍）
-    //
-    // 上次解出来的文件还在、大小对得上、修改时间对得上，就直接复用它，
-    // 不再重新解压。判断依据只有"大小 + 修改时间"两条：
-    //   · 大小：跟包内声明的大小比（声明为 0 时跳过，包没给）；
-    //   · 修改时间：解压时被设成了包内那一项的修改时间，两边一比就知道
-    //     这个文件是不是我们上次亲手写的那一份（写一半被中断的文件时间是
-    //     "写入那一刻"，永远对不上）。
-    // 目录名本身带"包大小 + 包修改时间"，所以包被换掉时根本不会落到这个目录，
-    // 不需要再单独记一份包指纹。
-    //
-    // 文件夹项（拖/打开压缩包里的整个文件夹）判据不同：目录里有一堆文件，
-    // 没法比"一个文件的大小"，改成三条同时满足：
-    //   ① 目录存在、且确实是目录；
-    //   ② 目录的修改时间 == 包内这个目录的时间（整目录解压收尾时会盖上）；
-    //   ③ 清单里每个文件都存在、都是文件、大小对得上（声明为 0 时跳过）。
-    // 这样"文件"和"文件夹"共用同一份缓存：整目录先解过，之后再单独打开里面的
-    // 某个文件，靠收尾时逐个盖上的时间戳就能判命中，不用重解。
-    // ----------------------------------------------------------------
-    bool ContainerCacheIsUsable(const std::wstring& outputPath,
-                                unsigned long long declaredSize,
-                                const FILETIME&   expectedTime,
-                                const std::vector<std::wstring>& childRelativePaths,
-                                const std::vector<unsigned long long>& childSizes);
-
-    // 解压成功后把解出来的文件盖上"包内修改时间"这个时间戳（顺便维持只读属性）
-    //
-    // 顺序很重要：必须等文件写完、句柄关掉之后再调，否则半截文件也会盖到时间戳，
-    // 缓存判据就失效了。失败只记日志，不影响本次使用（下次会自然重解）。
-    void StampExtractedFileTime(const std::wstring& path, const FILETIME& time);
 
     // ----------------------------------------------------------------
     // 拖出前的路径准备（文件列表的 LVN_BEGINDRAG 会调它）

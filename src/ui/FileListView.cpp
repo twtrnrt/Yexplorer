@@ -2571,7 +2571,7 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
             //
             // 拖完不恢复只读：资源管理器的复制可能在后台线程跑，这时候把只读加回去，
             // 复制读到的就是"只读源"，副本又变只读。缓存是不是那份原件，靠
-            // "修改时间对不对得上"判断（MainWindow::ContainerCacheIsUsable），不依赖只读。
+            // "修改时间对不对得上"判断（shell::CacheIsUsable），不依赖只读。
             if (extractedFromContainer)
             {
                 for (const auto& path : dragPaths)
