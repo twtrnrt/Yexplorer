@@ -144,6 +144,9 @@ private:
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
+    // 菜单 / 快捷键命令分发（WM_COMMAND 的处理体）。true = 已处理
+    bool HandleCommandMessage(WPARAM wParam);
+
     // 创建工具栏按钮、地址栏、状态栏、字体
     void CreateChildControls();
 

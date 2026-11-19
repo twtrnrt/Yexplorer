@@ -1010,267 +1010,11 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // 按钮点击
     // --------------------------------------------------------------
     case WM_COMMAND:
-    {
-        int controlId = LOWORD(wParam);
-
-        // ---- 「打开方式」子菜单里点了某个程序：命令 ID = 3400 + 账本下标 ----
-        if (controlId >= kCommandOpenWithBase &&
-            controlId <= kCommandOpenWithBase + 99)
+        if (HandleCommandMessage(wParam))
         {
-            OpenSelectionWithProgram(static_cast<size_t>(controlId - kCommandOpenWithBase));
             return 0;
-        }
-
-        // ---- 「新建」子菜单里点了某一项：命令 ID = 3500 + 快照下标 ----
-        if (controlId >= kCommandNewBase && controlId <= kCommandNewBase + 99)
-        {
-            DoNewItem(static_cast<size_t>(controlId - kCommandNewBase));
-            return 0;
-        }
-
-        // ---- 快捷键命令（由加速键表发来，通知码为 0/1）----
-        switch (controlId)
-        {
-        case kCommandCopy:
-            DoCopy();
-            return 0;
-        case kCommandCopyPath:
-            DoCopyPath();
-            return 0;
-        case kCommandCut:
-            DoCut();
-            return 0;
-        case kCommandPaste:
-            DoPaste();
-            return 0;
-        case kCommandDelete:
-            // Delete：进回收站；按住 Shift 则永久删除（Shell 会弹"确实要永久删除"确认框）
-            //
-            // 为什么这里还要读一次 Shift 状态：
-            //   正常情况下 Shift+Delete 会先命中表里那条 FSHIFT 条目（走 kCommandDeletePermanent），
-            //   但保险起见再兜一层——万一哪天条目顺序被调整、或系统把带修饰键的匹配让给了
-            //   普通条目，这里读真实键盘状态仍能走对分支。GetAsyncKeyState 读的是全局键状态，
-            //   真人按键时可靠。
-            DoDelete((::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
-            return 0;
-        case kCommandRefresh:
-            RefreshCurrentFolder();
-            return 0;
-        case kCommandNewFolder:
-            DoNewFolder();
-            return 0;
-        case kCommandSelectAll:
-            m_fileListView.SelectAll();
-            return 0;
-        case kCommandGoUp:
-            GoUp();
-            return 0;
-        case kCommandOpen:
-            OpenSelection();
-            return 0;
-        case kCommandUndo:
-            PerformUndo(false);   // 右键菜单「撤销」：批量重命名也能撤
-            return 0;
-        case kCommandRedo:
-            PerformRedo(false);
-            return 0;
-        case kCommandUndoKeyboard:
-            PerformUndo(true);    // Ctrl+Z：批量重命名这条会被拦掉
-            return 0;
-        case kCommandRedoKeyboard:
-            PerformRedo(true);    // Ctrl+Y：同上
-            return 0;
-        case kCommandOpenInNewWindow:
-        {
-            // 「在新窗口中打开」：文件夹 / 盘符 用自身进程新开一个窗口
-            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
-
-            if (!selected.empty())
-            {
-                OpenFolderInNewWindow(selected.front());
-            }
-            else
-            {
-                OpenFolderInNewWindow(m_history.Current());
-            }
-            return 0;
-        }
-        case kCommandOpenWithSelf:
-        {
-            // 「打开方式 → Yexplorer（本程序）」：这一次用本程序打开选中的压缩包，
-            // 进容器里浏览。改不改默认由用户自己在设置窗口里决定，这里不动账本。
-            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
-
-            if (!selected.empty() && shell::IsContainerFileExtension(selected.front()))
-            {
-                NavigateToPath(selected.front());
-            }
-            return 0;
-        }
-        case kCommandOpenWithManage:
-        {
-            // 「添加或管理程序…」：管的是当前选中文件那个扩展名
-            std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
-            if (!selected.empty())
-            {
-                ShowOpenWithSettings(shell::ExtensionKeyForPath(selected.front()), false);
-            }
-            return 0;
-        }
-        case kCommandOpenTerminal:
-        {
-            // 「在终端中打开」：选中一个文件夹/盘符就用它，否则用当前目录
-            // （只在空白处、单个文件夹、盘符这三种场景出现，所以这里不会拿到文件路径）
-            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
-
-            const std::wstring target = (selected.size() == 1 && shell::IsFileSystemPath(selected.front()))
-                                        ? selected.front()
-                                        : m_history.Current();
-
-            if (shell::IsFileSystemPath(target))
-            {
-                DoOpenTerminalIn(target);
-            }
-            return 0;
-        }
-        case kCommandProperties:
-            ShowPropertiesForSelection();
-            return 0;
-        case kCommandRename:
-            m_fileListView.BeginRenameSelected();
-            return 0;
-        case kCommandBatchRename:
-            DoBatchRename();
-            return 0;
-        case kCommandViewLarge:
-            ApplyViewMode(FileListView::ViewMode::LargeIcon, true);
-            return 0;
-        case kCommandViewSmall:
-            ApplyViewMode(FileListView::ViewMode::SmallIcon, true);
-            return 0;
-        case kCommandViewList:
-            ApplyViewMode(FileListView::ViewMode::List, true);
-            return 0;
-        case kCommandViewDetails:
-            ApplyViewMode(FileListView::ViewMode::Details, true);
-            return 0;
-        case kCommandViewTiles:
-            ApplyViewMode(FileListView::ViewMode::Tiles, true);
-            return 0;
-
-        // ---- 2026-11-18 新增的快捷键命令 ----
-        case kCommandNewWindow:
-        {
-            // Ctrl+N：选中的是一个文件夹就用它；否则把当前目录再开一遍。
-            // 用户要求"不排除当前目录"，所以跳过"该目录已有窗口就拉前台"的去重
-            // （forceNewWindow = true），一定开出一个新窗口。
-            std::wstring target = m_history.Current();
-
-            const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
-            if (selected.size() == 1)
-            {
-                // 只有"单选 且 确实是文件夹"才改目标；选的是文件、或选了多个，都按当前目录
-                std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
-                const int index = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
-
-                if (result != nullptr && index >= 0 &&
-                    index < static_cast<int>(result->entries.size()))
-                {
-                    const shell::ShellEntry& entry = result->entries[index];
-                    if (entry.isFolder && !entry.isGroupHeader && !entry.isSpacer)
-                    {
-                        target = selected.front();
-                    }
-                }
-            }
-
-            OpenFolderInNewWindow(target, true);
-            return 0;
-        }
-        case kCommandHomeWindow:
-            // Ctrl+T：开一个停在「主文件夹」的新窗口（同样跳过"已有窗口就拉前台"）
-            OpenFolderInNewWindow(shell::kTopDesktopPath, true);
-            return 0;
-        case kCommandCloseWindow:
-            // Ctrl+W：关掉当前窗口。用 PostMessage 而不是直接销毁，
-            // 让关闭走正常流程（会把窗口大小/位置存进配置）
-            ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
-            return 0;
-        case kCommandGoBackKey:
-            GoBack();
-            return 0;
-        case kCommandGoForwardKey:
-            GoForward();
-            return 0;
-        case kCommandFocusAddressBar:
-            // Alt+D / Ctrl+L：地址栏进入输入状态
-            // （内部会放到编辑框、设置焦点并全选，效果和点地址栏空白处一样）
-            m_addressBar.BeginEditing();
-            return 0;
-        case kCommandDeletePermanent:
-            // Shift+Delete、以及 Shift+右键点「删除」：永久删除（Shell 会弹确认框）
-            DoDelete(true);
-            return 0;
-        case kCommandAutoFitColumns:
-            // Ctrl+加号：列宽按内容自适应
-            m_fileListView.AutoFitColumns();
-            return 0;
-        default:
-            break;
-        }
-
-        int notification = HIWORD(wParam);
-
-        if (notification == BN_CLICKED)
-        {
-            switch (controlId)
-            {
-            case kControlIdBack:
-                GoBack();
-                return 0;
-            case kControlIdForward:
-                GoForward();
-                return 0;
-            case kControlIdUp:
-                GoUp();
-                return 0;
-            case kControlIdHome:
-                // 主页：去「主文件夹」（和 Ctrl+T 开的主文件夹窗口、导航栏里那一项一致）
-                NavigateToPath(shell::kTopDesktopPath);
-                return 0;
-            case kControlIdRefresh:
-                RefreshCurrentFolder();
-                return 0;
-            case kControlIdThisPc:
-                // 计算机图标：去「此电脑」（虚拟文件夹，路径是它的 CLSID）
-                NavigateToPath(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
-                return 0;
-            case kControlIdSettings:
-            {
-                // 设置窗口（右键菜单图标、显示隐藏文件、默认文件管理器）
-                //
-                // 显示隐藏文件 / 显示系统文件这两个开关一改，当前目录的内容就会变，
-                // 所以记下改之前的值，关窗后发现有变化就按新规则重新枚举一次。
-                const core::Settings& settings = core::Settings::Instance();
-                const bool wasHidden = settings.ShowHiddenFiles();
-                const bool wasSystem = settings.ShowSystemFiles();
-
-                SettingsDialog dialog;
-                dialog.ShowModal(m_hWnd);
-
-                if (wasHidden != settings.ShowHiddenFiles() ||
-                    wasSystem != settings.ShowSystemFiles())
-                {
-                    RefreshCurrentFolder();
-                }
-                return 0;
-            }
-            default:
-                break;
-            }
         }
         break;
-    }
 
     // --------------------------------------------------------------
     // 自绘菜单项：量尺寸 + 绘制
@@ -1647,6 +1391,275 @@ void MainWindow::OnOperationDone(HRESULT hr)
     }
     m_lastOperation = FileOperationKind::None;
     m_lastOperationPermanent = false;
+}
+
+// ----------------------------------------------------------------------------
+// 菜单 / 快捷键命令分发（WM_COMMAND）
+//
+// 原来整段在 HandleMessage 的 WM_COMMAND 分支里（约 270 行），抽出来以后
+// 消息分发只留几行。返回 true = 这条命令已经处理；false = 不认识，交回默认流程。
+// ----------------------------------------------------------------------------
+bool MainWindow::HandleCommandMessage(WPARAM wParam)
+{
+    int controlId = LOWORD(wParam);
+
+    // ---- 「打开方式」子菜单里点了某个程序：命令 ID = 3400 + 账本下标 ----
+    if (controlId >= kCommandOpenWithBase &&
+        controlId <= kCommandOpenWithBase + 99)
+    {
+        OpenSelectionWithProgram(static_cast<size_t>(controlId - kCommandOpenWithBase));
+        return true;
+    }
+
+    // ---- 「新建」子菜单里点了某一项：命令 ID = 3500 + 快照下标 ----
+    if (controlId >= kCommandNewBase && controlId <= kCommandNewBase + 99)
+    {
+        DoNewItem(static_cast<size_t>(controlId - kCommandNewBase));
+        return true;
+    }
+
+    // ---- 快捷键命令（由加速键表发来，通知码为 0/1）----
+    switch (controlId)
+    {
+    case kCommandCopy:
+        DoCopy();
+        return true;
+    case kCommandCopyPath:
+        DoCopyPath();
+        return true;
+    case kCommandCut:
+        DoCut();
+        return true;
+    case kCommandPaste:
+        DoPaste();
+        return true;
+    case kCommandDelete:
+        // Delete：进回收站；按住 Shift 则永久删除（Shell 会弹"确实要永久删除"确认框）
+        //
+        // 为什么这里还要读一次 Shift 状态：
+        //   正常情况下 Shift+Delete 会先命中表里那条 FSHIFT 条目（走 kCommandDeletePermanent），
+        //   但保险起见再兜一层——万一哪天条目顺序被调整、或系统把带修饰键的匹配让给了
+        //   普通条目，这里读真实键盘状态仍能走对分支。GetAsyncKeyState 读的是全局键状态，
+        //   真人按键时可靠。
+        DoDelete((::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+        return true;
+    case kCommandRefresh:
+        RefreshCurrentFolder();
+        return true;
+    case kCommandNewFolder:
+        DoNewFolder();
+        return true;
+    case kCommandSelectAll:
+        m_fileListView.SelectAll();
+        return true;
+    case kCommandGoUp:
+        GoUp();
+        return true;
+    case kCommandOpen:
+        OpenSelection();
+        return true;
+    case kCommandUndo:
+        PerformUndo(false);   // 右键菜单「撤销」：批量重命名也能撤
+        return true;
+    case kCommandRedo:
+        PerformRedo(false);
+        return true;
+    case kCommandUndoKeyboard:
+        PerformUndo(true);    // Ctrl+Z：批量重命名这条会被拦掉
+        return true;
+    case kCommandRedoKeyboard:
+        PerformRedo(true);    // Ctrl+Y：同上
+        return true;
+    case kCommandOpenInNewWindow:
+    {
+        // 「在新窗口中打开」：文件夹 / 盘符 用自身进程新开一个窗口
+        const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+        if (!selected.empty())
+        {
+            OpenFolderInNewWindow(selected.front());
+        }
+        else
+        {
+            OpenFolderInNewWindow(m_history.Current());
+        }
+        return true;
+    }
+    case kCommandOpenWithSelf:
+    {
+        // 「打开方式 → Yexplorer（本程序）」：这一次用本程序打开选中的压缩包，
+        // 进容器里浏览。改不改默认由用户自己在设置窗口里决定，这里不动账本。
+        const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+        if (!selected.empty() && shell::IsContainerFileExtension(selected.front()))
+        {
+            NavigateToPath(selected.front());
+        }
+        return true;
+    }
+    case kCommandOpenWithManage:
+    {
+        // 「添加或管理程序…」：管的是当前选中文件那个扩展名
+        std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+        if (!selected.empty())
+        {
+            ShowOpenWithSettings(shell::ExtensionKeyForPath(selected.front()), false);
+        }
+        return true;
+    }
+    case kCommandOpenTerminal:
+    {
+        // 「在终端中打开」：选中一个文件夹/盘符就用它，否则用当前目录
+        // （只在空白处、单个文件夹、盘符这三种场景出现，所以这里不会拿到文件路径）
+        const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+
+        const std::wstring target = (selected.size() == 1 && shell::IsFileSystemPath(selected.front()))
+                                    ? selected.front()
+                                    : m_history.Current();
+
+        if (shell::IsFileSystemPath(target))
+        {
+            DoOpenTerminalIn(target);
+        }
+        return true;
+    }
+    case kCommandProperties:
+        ShowPropertiesForSelection();
+        return true;
+    case kCommandRename:
+        m_fileListView.BeginRenameSelected();
+        return true;
+    case kCommandBatchRename:
+        DoBatchRename();
+        return true;
+    case kCommandViewLarge:
+        ApplyViewMode(FileListView::ViewMode::LargeIcon, true);
+        return true;
+    case kCommandViewSmall:
+        ApplyViewMode(FileListView::ViewMode::SmallIcon, true);
+        return true;
+    case kCommandViewList:
+        ApplyViewMode(FileListView::ViewMode::List, true);
+        return true;
+    case kCommandViewDetails:
+        ApplyViewMode(FileListView::ViewMode::Details, true);
+        return true;
+    case kCommandViewTiles:
+        ApplyViewMode(FileListView::ViewMode::Tiles, true);
+        return true;
+
+    // ---- 2026-11-18 新增的快捷键命令 ----
+    case kCommandNewWindow:
+    {
+        // Ctrl+N：选中的是一个文件夹就用它；否则把当前目录再开一遍。
+        // 用户要求"不排除当前目录"，所以跳过"该目录已有窗口就拉前台"的去重
+        // （forceNewWindow = true），一定开出一个新窗口。
+        std::wstring target = m_history.Current();
+
+        const std::vector<std::wstring> selected = m_fileListView.GetSelectedPaths();
+        if (selected.size() == 1)
+        {
+            // 只有"单选 且 确实是文件夹"才改目标；选的是文件、或选了多个，都按当前目录
+            std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
+            const int index = ListView_GetNextItem(m_fileListView.Handle(), -1, LVNI_SELECTED);
+
+            if (result != nullptr && index >= 0 &&
+                index < static_cast<int>(result->entries.size()))
+            {
+                const shell::ShellEntry& entry = result->entries[index];
+                if (entry.isFolder && !entry.isGroupHeader && !entry.isSpacer)
+                {
+                    target = selected.front();
+                }
+            }
+        }
+
+        OpenFolderInNewWindow(target, true);
+        return true;
+    }
+    case kCommandHomeWindow:
+        // Ctrl+T：开一个停在「主文件夹」的新窗口（同样跳过"已有窗口就拉前台"）
+        OpenFolderInNewWindow(shell::kTopDesktopPath, true);
+        return true;
+    case kCommandCloseWindow:
+        // Ctrl+W：关掉当前窗口。用 PostMessage 而不是直接销毁，
+        // 让关闭走正常流程（会把窗口大小/位置存进配置）
+        ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
+        return true;
+    case kCommandGoBackKey:
+        GoBack();
+        return true;
+    case kCommandGoForwardKey:
+        GoForward();
+        return true;
+    case kCommandFocusAddressBar:
+        // Alt+D / Ctrl+L：地址栏进入输入状态
+        // （内部会放到编辑框、设置焦点并全选，效果和点地址栏空白处一样）
+        m_addressBar.BeginEditing();
+        return true;
+    case kCommandDeletePermanent:
+        // Shift+Delete、以及 Shift+右键点「删除」：永久删除（Shell 会弹确认框）
+        DoDelete(true);
+        return true;
+    case kCommandAutoFitColumns:
+        // Ctrl+加号：列宽按内容自适应
+        m_fileListView.AutoFitColumns();
+        return true;
+    default:
+        break;
+    }
+
+    int notification = HIWORD(wParam);
+
+    if (notification == BN_CLICKED)
+    {
+        switch (controlId)
+        {
+        case kControlIdBack:
+            GoBack();
+            return true;
+        case kControlIdForward:
+            GoForward();
+            return true;
+        case kControlIdUp:
+            GoUp();
+            return true;
+        case kControlIdHome:
+            // 主页：去「主文件夹」（和 Ctrl+T 开的主文件夹窗口、导航栏里那一项一致）
+            NavigateToPath(shell::kTopDesktopPath);
+            return true;
+        case kControlIdRefresh:
+            RefreshCurrentFolder();
+            return true;
+        case kControlIdThisPc:
+            // 计算机图标：去「此电脑」（虚拟文件夹，路径是它的 CLSID）
+            NavigateToPath(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
+            return true;
+        case kControlIdSettings:
+        {
+            // 设置窗口（右键菜单图标、显示隐藏文件、默认文件管理器）
+            //
+            // 显示隐藏文件 / 显示系统文件这两个开关一改，当前目录的内容就会变，
+            // 所以记下改之前的值，关窗后发现有变化就按新规则重新枚举一次。
+            const core::Settings& settings = core::Settings::Instance();
+            const bool wasHidden = settings.ShowHiddenFiles();
+            const bool wasSystem = settings.ShowSystemFiles();
+
+            SettingsDialog dialog;
+            dialog.ShowModal(m_hWnd);
+
+            if (wasHidden != settings.ShowHiddenFiles() ||
+                wasSystem != settings.ShowSystemFiles())
+            {
+                RefreshCurrentFolder();
+            }
+            return true;
+        }
+        default:
+            break;
+        }
+    }
+    return false;
 }
 
 // ============================================================================
