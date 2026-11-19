@@ -374,8 +374,59 @@ bool Settings::Load()
 // 写
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// 配置保存的跨进程互斥
+//
+// 为什么需要：多开几个窗口时，几个实例可能同时保存同一份 settings.json。
+// 原来它们都写同一个 settings.json.tmp 再各自覆盖，极端情况下会写出
+// "两份 JSON 叠在一起"的坏文件（2026-11-19 真实发生过一次，配置被判坏、
+// 被改名成 settings.json.bad，用户丢了 4 个固定项和十几个扩展名账本）。
+//
+// 这里用命名互斥把保存串行化；拿不到锁（5 秒超时）也照常保存，属于尽力而为。
+// ----------------------------------------------------------------------------
+namespace
+{
+class SettingsSaveLock
+{
+public:
+    SettingsSaveLock()
+    {
+        m_handle = ::CreateMutexW(nullptr, FALSE, L"Local\\FileExplorer.SettingsSave");
+
+        if (m_handle != nullptr)
+        {
+            const DWORD wait = ::WaitForSingleObject(m_handle, 5000);
+            m_owned = (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED);
+        }
+    }
+
+    ~SettingsSaveLock()
+    {
+        if (m_handle != nullptr)
+        {
+            if (m_owned)
+            {
+                ::ReleaseMutex(m_handle);
+            }
+
+            ::CloseHandle(m_handle);
+        }
+    }
+
+    SettingsSaveLock(const SettingsSaveLock&) = delete;
+    SettingsSaveLock& operator=(const SettingsSaveLock&) = delete;
+
+private:
+    HANDLE m_handle = nullptr;
+    bool   m_owned  = false;
+};
+} // namespace
+
 bool Settings::Save()
 {
+    // 整个写入过程串行化：别的实例正在保存就等它写完（最多 5 秒）
+    SettingsSaveLock saveLock;
+
     std::wstring path = ConfigFilePath();
     if (path.empty())
     {
