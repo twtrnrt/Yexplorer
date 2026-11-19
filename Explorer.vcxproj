@@ -164,6 +164,7 @@
     <ClCompile Include="src\ui\FileListView.cpp" />
     <ClCompile Include="src\ui\FlatButton.cpp" />
     <ClCompile Include="src\ui\MainWnd.cpp" />
+    <ClCompile Include="src\ui\MainWndMenus.cpp" />
     <ClCompile Include="src\ui\NavigationPane.cpp" />
     <ClCompile Include="src\ui\OpenWithDialog.cpp" />
     <ClCompile Include="src\ui\PasteProgressBar.cpp" />
