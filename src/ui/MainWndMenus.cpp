@@ -685,3 +685,182 @@ void MainWindow::FillNewFolderAndNewMenu(HMENU menu)
 
     FillNewMenu(menu);
 }
+
+// ----------------------------------------------------------------------------
+// 打开方式子菜单 / 新建子菜单
+//
+// 这两块也是菜单代码（原来在 MainWnd.cpp），一起放在这个翻译单元里。
+// 它们只读内存里的账本 / 新建项快照，弹出时零 IO。
+// ----------------------------------------------------------------------------
+
+void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extension)
+{
+    if (parentMenu == nullptr)
+    {
+        return;
+    }
+
+    HMENU subMenu = ::CreatePopupMenu();
+    if (subMenu == nullptr)
+    {
+        return;
+    }
+
+    // 菜单里要不要画图标（设置窗口里那个开关）
+    const bool showIcons = core::Settings::Instance().MenuIcons();
+
+    // ---- 这里零 IO：只读配置里已经加载好的账本 ----
+    const core::OpenWithEntry* entry = core::Settings::Instance().FindOpenWith(extension);
+
+    int visibleCount = 0;
+    bool ledgerHasSelf = false;   // 账本里已经有「本程序」这一项了（下面别重复加）
+
+    if (entry != nullptr)
+    {
+        for (size_t i = 0; i < entry->items.size(); ++i)
+        {
+            // 命令 ID 只有 3400~3499 这一百个坑，超了就截断
+            if (static_cast<int>(i) > 99)
+            {
+                break;
+            }
+
+            const core::OpenWithItem& item = entry->items[i];
+
+            // 没勾选的（用户在设置窗口里取消过）不进菜单
+            if (!item.enabled)
+            {
+                continue;
+            }
+
+            // 已知已经卸载/找不到的，直接消失（不标灰）。
+            // alive = -1 表示"还没查过"——这种照常显示，
+            // 否则右键菜单就得去探测，那正是用户不允许的。
+            if (item.alive == 0)
+            {
+                continue;
+            }
+
+            std::wstring text = item.name;
+            if (core::OpenWithKey(item) == entry->defaultKey)
+            {
+                text += L"（默认）";
+            }
+
+            if (item.kind == L"self")
+            {
+                ledgerHasSelf = true;
+            }
+
+            const UINT commandId =
+                static_cast<UINT>(kCommandOpenWithBase + static_cast<int>(i));
+
+            if (showIcons)
+            {
+                // 自绘菜单项：图标从内存缓存里拿（没有就留空，绝不在这里探测）
+                auto drawItem = std::make_unique<MenuDrawItem>();
+                drawItem->text = text;
+                drawItem->icon = m_menuIcons.Get(MenuIconCache::KeyForProgram(item));
+
+                MenuDrawItem* raw = drawItem.get();
+                m_menuDrawItems.push_back(std::move(drawItem));
+
+                ::AppendMenuW(subMenu, MF_OWNERDRAW, commandId,
+                              reinterpret_cast<LPCTSTR>(raw));
+            }
+            else
+            {
+                ::AppendMenuW(subMenu, MF_STRING, commandId, text.c_str());
+            }
+
+            ++visibleCount;
+        }
+    }
+
+    if (visibleCount > 0)
+    {
+        ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
+    }
+
+    // 压缩包（zip/rar/7z…）：固定给一条「Yexplorer（本程序）」入口
+    //
+    // 为什么要固定加：账本里记默认程序时，压缩包的默认很可能是 WinRAR/7-Zip
+    // （系统关联就是这样）。用户想用我们自己的文件管理器进去浏览内部，
+    // 就得有个随时可点的入口，而不是只能改默认程序。
+    // 点它不改账本，只是这一次用本程序打开（进容器浏览）。
+    if (shell::IsContainerExtension(extension) && !ledgerHasSelf)
+    {
+        ::AppendMenuW(subMenu, MF_STRING, kCommandOpenWithSelf,
+                      L"Yexplorer");
+        ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
+    }
+
+    // 一个程序都没有时，这一项就是"直接进窗口去设置"
+    ::AppendMenuW(subMenu, MF_STRING, kCommandOpenWithManage, L"添加或管理程序…");
+
+    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(subMenu), L"打开方式");
+}
+
+void MainWindow::FillNewMenu(HMENU parentMenu)
+{
+    if (parentMenu == nullptr)
+    {
+        return;
+    }
+
+    HMENU subMenu = ::CreatePopupMenu();
+    if (subMenu == nullptr)
+    {
+        return;
+    }
+
+    std::vector<shell::ShellNewItem> items;
+
+    {
+        std::lock_guard<std::mutex> lock(m_shellNewMutex);
+        items = m_shellNewItems;
+    }
+
+    const bool showIcons = core::Settings::Instance().MenuIcons();
+
+    // 虚拟文件夹（此电脑、控制面板这类）里不能建文件，全部变灰（和资源管理器一致）
+    const std::wstring currentPath = m_history.Current();
+    const bool canCreate = !currentPath.empty() &&
+                           currentPath.compare(0, 2, L"::") != 0 &&
+                           currentPath.compare(0, 6, L"shell:") != 0;
+
+    for (size_t i = 0; i < items.size() && i < 100; ++i)
+    {
+        const shell::ShellNewItem& item = items[i];
+        const UINT commandId = static_cast<UINT>(kCommandNewBase + static_cast<int>(i));
+
+        if (showIcons)
+        {
+            auto drawItem = std::make_unique<MenuDrawItem>();
+            drawItem->text = item.displayName;
+            drawItem->icon = m_menuIcons.Get(MenuIconCache::KeyForNewItem(item));
+
+            MenuDrawItem* raw = drawItem.get();
+            m_menuDrawItems.push_back(std::move(drawItem));
+
+            ::AppendMenuW(subMenu, MF_OWNERDRAW | (canCreate ? 0 : MF_GRAYED), commandId,
+                          reinterpret_cast<LPCTSTR>(raw));
+        }
+        else
+        {
+            ::AppendMenuW(subMenu, MF_STRING | (canCreate ? 0 : MF_GRAYED), commandId,
+                          item.displayName.c_str());
+        }
+    }
+
+    // 快照还没准备好（启动那一刻就点了右键）：至少给个「新建文件夹」占位，
+    // 别让菜单是空的
+    if (items.empty())
+    {
+        ::AppendMenuW(subMenu, MF_STRING, kCommandNewFolder, L"文件夹");
+    }
+
+    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(subMenu), L"新建(&W)");
+}
