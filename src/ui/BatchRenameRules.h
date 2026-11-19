@@ -1,0 +1,73 @@
+// ============================================================================
+// 文件管理器（自研 Explorer 替代品）
+// 文件：src/ui/BatchRenameRules.h
+//
+// 批量重命名的「规则」值对象 + 算名字的函数。
+//
+// 为什么单独拆出来：
+//   以前 ComputeNewName 是 BatchRenameDialog 的成员函数，里面直接
+//   ::SendMessage(m_hFind / m_hNumberEnable / ...) 读界面控件。结果是：
+//     · 算名字这段逻辑离不开窗口，没法单独测试；
+//     · 想把它搬到独立翻译单元时，得先把一堆控件成员一起搬走。
+//   现在规则先由 CaptureCurrentRules 收成一份纯数据（RenameRules），
+//   ComputeNewName 只认这份数据，跟控件、窗口、对话框都无关。
+//   模板（RenameTemplate）在这个结构上只多加一个槽名字。
+//
+// 注意：改这里的字段时，界面上对应的控件、模板文件的读写都要跟着看
+//       （字段和控件一一对应，见 BatchRenameDialog.cpp 的 kId* 表）。
+// ============================================================================
+#pragma once
+
+#include <cstddef>
+#include <string>
+
+// ----------------------------------------------------------------------------
+// 一套“怎么算新名字”的规则。
+//
+// 默认值 = 界面上“什么都没设”的样子；字段和界面控件一一对应。
+// 这里只放“算名字需要的”字段，窗口句柄、模板槽、列表状态都不进来。
+// ----------------------------------------------------------------------------
+struct RenameRules
+{
+    std::wstring prefix;        // 前缀
+    std::wstring suffix;        // 后缀
+    std::wstring find;          // 查找
+    std::wstring replace;       // 替换为
+    bool         caseSensitive = false;   // 区分大小写
+    bool         includeExt    = false;   // 查找替换是否连扩展名一起处理
+
+    // 替换范围：0 = 替换全部（默认）；1 = 从左往右数，只换前 N 处；2 = 从右往左数，只换后 N 处
+    // 配合 replaceCount 用：选 0 时 count 那一格是灰的，不参与计算
+    int          replaceMode   = 0;
+    int          replaceCount  = 1;       // 替换几处（只在 replaceMode 1 / 2 时有意义）
+
+    // 查找方式：0 = 普通查找；1~9 = 内置正则预设；10 = 自定义正则
+    // （除了普通查找以外全都按正则解释）
+    int          regexPreset   = 0;
+
+    bool         number        = false;   // 加序号
+    bool         numberReplace = false;   // 序号直接替换原名（勾上就只剩序号，不再拼原名）
+    int          numberStart   = 1;       // 起始
+    int          numberStep    = 1;       // 步长
+    int          numberDigits  = 2;       // 位数
+    int          numberPos     = 1;       // 0 = 放后面，1 = 放前面（默认放前面）
+    std::wstring numberSep     = L"-";    // 分隔符
+
+    // 扩展名：0 不修改 / 1 修改（右边那个框填什么就用什么，留空等于去掉扩展名）
+    // 2 是老模板里"去掉扩展名"那一项的旧值，界面上已经不提供了，读到就按"修改且清空"处理
+    int          extMode       = 0;
+    std::wstring extValue;                // 改成什么扩展名
+
+    int          caseMode      = 0;       // 0 保持 / 1 大写 / 2 小写 / 3 首字母
+    int          sortMode      = 0;       // 0 名称 / 1 时间 / 2 大小 / 3 自定义顺序
+    bool         sortReverse   = false;   // 倒序
+};
+
+// ----------------------------------------------------------------------------
+// 按规则算第 index 项（排序后的位置，从 0 起）的新文件名（不含目录）。
+//
+// originalName 含扩展名，返回值也含扩展名。
+// 纯函数：不读控件、不碰磁盘；正则编译缓存是进程内共享的（只影响速度，不影响结果）。
+// ----------------------------------------------------------------------------
+std::wstring ComputeNewName(const RenameRules& rules, std::size_t index,
+                            const std::wstring& originalName);

@@ -1,0 +1,402 @@
+# 由重构前的 BatchRenameDialog::ComputeNewName 生成，作为 C8-1 的行为基准。
+# 列：caseIndex|itemIndex|caseLabel|originalName|newName（UTF-8）
+0|0|默认（所有规则都是默认值）|alpha.txt|alpha.txt
+0|1|默认（所有规则都是默认值）|Beta.TXT|Beta.TXT
+0|2|默认（所有规则都是默认值）|.gitignore|.gitignore
+0|3|默认（所有规则都是默认值）|报告 2024.docx|报告 2024.docx
+0|4|默认（所有规则都是默认值）|a.b.c.txt|a.b.c.txt
+0|5|默认（所有规则都是默认值）|noext|noext
+0|6|默认（所有规则都是默认值）|trailing.|trailing.
+0|7|默认（所有规则都是默认值）|100% (copy).txt|100% (copy).txt
+0|8|默认（所有规则都是默认值）|MiXeD case Name.md|MiXeD case Name.md
+0|9|默认（所有规则都是默认值）|file12name.txt|file12name.txt
+1|0|前缀 P_|alpha.txt|P_alpha.txt
+1|1|前缀 P_|Beta.TXT|P_Beta.TXT
+1|2|前缀 P_|.gitignore|P_.gitignore
+1|3|前缀 P_|报告 2024.docx|P_报告 2024.docx
+1|4|前缀 P_|a.b.c.txt|P_a.b.c.txt
+1|5|前缀 P_|noext|P_noext
+1|6|前缀 P_|trailing.|P_trailing.
+1|7|前缀 P_|100% (copy).txt|P_100% (copy).txt
+1|8|前缀 P_|MiXeD case Name.md|P_MiXeD case Name.md
+1|9|前缀 P_|file12name.txt|P_file12name.txt
+2|0|后缀 _done|alpha.txt|alpha_done.txt
+2|1|后缀 _done|Beta.TXT|Beta_done.TXT
+2|2|后缀 _done|.gitignore|.gitignore_done
+2|3|后缀 _done|报告 2024.docx|报告 2024_done.docx
+2|4|后缀 _done|a.b.c.txt|a.b.c_done.txt
+2|5|后缀 _done|noext|noext_done
+2|6|后缀 _done|trailing.|trailing_done.
+2|7|后缀 _done|100% (copy).txt|100% (copy)_done.txt
+2|8|后缀 _done|MiXeD case Name.md|MiXeD case Name_done.md
+2|9|后缀 _done|file12name.txt|file12name_done.txt
+3|0|前后缀同时|alpha.txt|[[alpha]].txt
+3|1|前后缀同时|Beta.TXT|[[Beta]].TXT
+3|2|前后缀同时|.gitignore|[[.gitignore]]
+3|3|前后缀同时|报告 2024.docx|[[报告 2024]].docx
+3|4|前后缀同时|a.b.c.txt|[[a.b.c]].txt
+3|5|前后缀同时|noext|[[noext]]
+3|6|前后缀同时|trailing.|[[trailing]].
+3|7|前后缀同时|100% (copy).txt|[[100% (copy)]].txt
+3|8|前后缀同时|MiXeD case Name.md|[[MiXeD case Name]].md
+3|9|前后缀同时|file12name.txt|[[file12name]].txt
+4|0|前缀带空格|alpha.txt|  alpha.txt
+4|1|前缀带空格|Beta.TXT|  Beta.TXT
+4|2|前缀带空格|.gitignore|  .gitignore
+4|3|前缀带空格|报告 2024.docx|  报告 2024.docx
+4|4|前缀带空格|a.b.c.txt|  a.b.c.txt
+4|5|前缀带空格|noext|  noext
+4|6|前缀带空格|trailing.|  trailing.
+4|7|前缀带空格|100% (copy).txt|  100% (copy).txt
+4|8|前缀带空格|MiXeD case Name.md|  MiXeD case Name.md
+4|9|前缀带空格|file12name.txt|  file12name.txt
+5|0|查找 a 替换 X（默认不区分大小写）|alpha.txt|XlphX.txt
+5|1|查找 a 替换 X（默认不区分大小写）|Beta.TXT|BetX.TXT
+5|2|查找 a 替换 X（默认不区分大小写）|.gitignore|.gitignore
+5|3|查找 a 替换 X（默认不区分大小写）|报告 2024.docx|报告 2024.docx
+5|4|查找 a 替换 X（默认不区分大小写）|a.b.c.txt|X.b.c.txt
+5|5|查找 a 替换 X（默认不区分大小写）|noext|noext
+5|6|查找 a 替换 X（默认不区分大小写）|trailing.|trXiling.
+5|7|查找 a 替换 X（默认不区分大小写）|100% (copy).txt|100% (copy).txt
+5|8|查找 a 替换 X（默认不区分大小写）|MiXeD case Name.md|MiXeD cXse NXme.md
+5|9|查找 a 替换 X（默认不区分大小写）|file12name.txt|file12nXme.txt
+6|0|查找 a 替换 X（区分大小写）|alpha.txt|XlphX.txt
+6|1|查找 a 替换 X（区分大小写）|Beta.TXT|BetX.TXT
+6|2|查找 a 替换 X（区分大小写）|.gitignore|.gitignore
+6|3|查找 a 替换 X（区分大小写）|报告 2024.docx|报告 2024.docx
+6|4|查找 a 替换 X（区分大小写）|a.b.c.txt|X.b.c.txt
+6|5|查找 a 替换 X（区分大小写）|noext|noext
+6|6|查找 a 替换 X（区分大小写）|trailing.|trXiling.
+6|7|查找 a 替换 X（区分大小写）|100% (copy).txt|100% (copy).txt
+6|8|查找 a 替换 X（区分大小写）|MiXeD case Name.md|MiXeD cXse NXme.md
+6|9|查找 a 替换 X（区分大小写）|file12name.txt|file12nXme.txt
+7|0|查找 A 替换 X（区分大小写，命中大写 A）|alpha.txt|alpha.txt
+7|1|查找 A 替换 X（区分大小写，命中大写 A）|Beta.TXT|Beta.TXT
+7|2|查找 A 替换 X（区分大小写，命中大写 A）|.gitignore|.gitignore
+7|3|查找 A 替换 X（区分大小写，命中大写 A）|报告 2024.docx|报告 2024.docx
+7|4|查找 A 替换 X（区分大小写，命中大写 A）|a.b.c.txt|a.b.c.txt
+7|5|查找 A 替换 X（区分大小写，命中大写 A）|noext|noext
+7|6|查找 A 替换 X（区分大小写，命中大写 A）|trailing.|trailing.
+7|7|查找 A 替换 X（区分大小写，命中大写 A）|100% (copy).txt|100% (copy).txt
+7|8|查找 A 替换 X（区分大小写，命中大写 A）|MiXeD case Name.md|MiXeD case Name.md
+7|9|查找 A 替换 X（区分大小写，命中大写 A）|file12name.txt|file12name.txt
+8|0|删除所有空格（含扩展名）|alpha.txt|alpha.txt
+8|1|删除所有空格（含扩展名）|Beta.TXT|Beta.TXT
+8|2|删除所有空格（含扩展名）|.gitignore|.gitignore
+8|3|删除所有空格（含扩展名）|报告 2024.docx|报告2024.docx
+8|4|删除所有空格（含扩展名）|a.b.c.txt|a.b.c.txt
+8|5|删除所有空格（含扩展名）|noext|noext
+8|6|删除所有空格（含扩展名）|trailing.|trailing.
+8|7|删除所有空格（含扩展名）|100% (copy).txt|100%(copy).txt
+8|8|删除所有空格（含扩展名）|MiXeD case Name.md|MiXeDcaseName.md
+8|9|删除所有空格（含扩展名）|file12name.txt|file12name.txt
+9|0|查找 . 替换 _（含扩展名）|alpha.txt|alpha_txt
+9|1|查找 . 替换 _（含扩展名）|Beta.TXT|Beta_TXT
+9|2|查找 . 替换 _（含扩展名）|.gitignore|_gitignore
+9|3|查找 . 替换 _（含扩展名）|报告 2024.docx|报告 2024_docx
+9|4|查找 . 替换 _（含扩展名）|a.b.c.txt|a_b_c_txt
+9|5|查找 . 替换 _（含扩展名）|noext|noext
+9|6|查找 . 替换 _（含扩展名）|trailing.|trailing_
+9|7|查找 . 替换 _（含扩展名）|100% (copy).txt|100% (copy)_txt
+9|8|查找 . 替换 _（含扩展名）|MiXeD case Name.md|MiXeD case Name_md
+9|9|查找 . 替换 _（含扩展名）|file12name.txt|file12name_txt
+10|0|删除所有点（含扩展名）|alpha.txt|alphatxt
+10|1|删除所有点（含扩展名）|Beta.TXT|BetaTXT
+10|2|删除所有点（含扩展名）|.gitignore|gitignore
+10|3|删除所有点（含扩展名）|报告 2024.docx|报告 2024docx
+10|4|删除所有点（含扩展名）|a.b.c.txt|abctxt
+10|5|删除所有点（含扩展名）|noext|noext
+10|6|删除所有点（含扩展名）|trailing.|trailing
+10|7|删除所有点（含扩展名）|100% (copy).txt|100% (copy)txt
+10|8|删除所有点（含扩展名）|MiXeD case Name.md|MiXeD case Namemd
+10|9|删除所有点（含扩展名）|file12name.txt|file12nametxt
+11|0|替换前 1 处（从左往右）|alpha.txt|Xlpha.txt
+11|1|替换前 1 处（从左往右）|Beta.TXT|BetX.TXT
+11|2|替换前 1 处（从左往右）|.gitignore|.gitignore
+11|3|替换前 1 处（从左往右）|报告 2024.docx|报告 2024.docx
+11|4|替换前 1 处（从左往右）|a.b.c.txt|X.b.c.txt
+11|5|替换前 1 处（从左往右）|noext|noext
+11|6|替换前 1 处（从左往右）|trailing.|trXiling.
+11|7|替换前 1 处（从左往右）|100% (copy).txt|100% (copy).txt
+11|8|替换前 1 处（从左往右）|MiXeD case Name.md|MiXeD cXse Name.md
+11|9|替换前 1 处（从左往右）|file12name.txt|file12nXme.txt
+12|0|替换前 2 处（含扩展名）|alpha.txt|alpha_txt
+12|1|替换前 2 处（含扩展名）|Beta.TXT|Beta_TXT
+12|2|替换前 2 处（含扩展名）|.gitignore|_gitignore
+12|3|替换前 2 处（含扩展名）|报告 2024.docx|报告 2024_docx
+12|4|替换前 2 处（含扩展名）|a.b.c.txt|a_b_c.txt
+12|5|替换前 2 处（含扩展名）|noext|noext
+12|6|替换前 2 处（含扩展名）|trailing.|trailing_
+12|7|替换前 2 处（含扩展名）|100% (copy).txt|100% (copy)_txt
+12|8|替换前 2 处（含扩展名）|MiXeD case Name.md|MiXeD case Name_md
+12|9|替换前 2 处（含扩展名）|file12name.txt|file12name_txt
+13|0|替换后 1 处（从右往左）|alpha.txt|alpha.txt
+13|1|替换后 1 处（从右往左）|Beta.TXT|Beta.TXT
+13|2|替换后 1 处（从右往左）|.gitignore|.gitignore
+13|3|替换后 1 处（从右往左）|报告 2024.docx|报告-2024.docx
+13|4|替换后 1 处（从右往左）|a.b.c.txt|a.b.c.txt
+13|5|替换后 1 处（从右往左）|noext|noext
+13|6|替换后 1 处（从右往左）|trailing.|trailing.
+13|7|替换后 1 处（从右往左）|100% (copy).txt|100%-(copy).txt
+13|8|替换后 1 处（从右往左）|MiXeD case Name.md|MiXeD case-Name.md
+13|9|替换后 1 处（从右往左）|file12name.txt|file12name.txt
+14|0|正则：数字加方括号|alpha.txt|alpha.txt
+14|1|正则：数字加方括号|Beta.TXT|Beta.TXT
+14|2|正则：数字加方括号|.gitignore|.gitignore
+14|3|正则：数字加方括号|报告 2024.docx|报告 [2024].docx
+14|4|正则：数字加方括号|a.b.c.txt|a.b.c.txt
+14|5|正则：数字加方括号|noext|noext
+14|6|正则：数字加方括号|trailing.|trailing.
+14|7|正则：数字加方括号|100% (copy).txt|[100]% (copy).txt
+14|8|正则：数字加方括号|MiXeD case Name.md|MiXeD case Name.md
+14|9|正则：数字加方括号|file12name.txt|file[12]name.txt
+15|0|正则：字母数字换位（含扩展名）|alpha.txt|alpha.txt
+15|1|正则：字母数字换位（含扩展名）|Beta.TXT|Beta.TXT
+15|2|正则：字母数字换位（含扩展名）|.gitignore|.gitignore
+15|3|正则：字母数字换位（含扩展名）|报告 2024.docx|报告 2024.docx
+15|4|正则：字母数字换位（含扩展名）|a.b.c.txt|a.b.c.txt
+15|5|正则：字母数字换位（含扩展名）|noext|noext
+15|6|正则：字母数字换位（含扩展名）|trailing.|trailing.
+15|7|正则：字母数字换位（含扩展名）|100% (copy).txt|100% (copy).txt
+15|8|正则：字母数字换位（含扩展名）|MiXeD case Name.md|MiXeD case Name.md
+15|9|正则：字母数字换位（含扩展名）|file12name.txt|fil1e2name.txt
+16|0|正则：写法错误|alpha.txt|alpha.txt
+16|1|正则：写法错误|Beta.TXT|Beta.TXT
+16|2|正则：写法错误|.gitignore|.gitignore
+16|3|正则：写法错误|报告 2024.docx|报告 2024.docx
+16|4|正则：写法错误|a.b.c.txt|a.b.c.txt
+16|5|正则：写法错误|noext|noext
+16|6|正则：写法错误|trailing.|trailing.
+16|7|正则：写法错误|100% (copy).txt|100% (copy).txt
+16|8|正则：写法错误|MiXeD case Name.md|MiXeD case Name.md
+16|9|正则：写法错误|file12name.txt|file12name.txt
+17|0|正则：从右往左替换 1 处|alpha.txt|alph*.txt
+17|1|正则：从右往左替换 1 处|Beta.TXT|Bet*.TXT
+17|2|正则：从右往左替换 1 处|.gitignore|.gitignor*
+17|3|正则：从右往左替换 1 处|报告 2024.docx|报告 2024.docx
+17|4|正则：从右往左替换 1 处|a.b.c.txt|*.b.c.txt
+17|5|正则：从右往左替换 1 处|noext|no*xt
+17|6|正则：从右往左替换 1 处|trailing.|trail*ng.
+17|7|正则：从右往左替换 1 处|100% (copy).txt|100% (c*py).txt
+17|8|正则：从右往左替换 1 处|MiXeD case Name.md|MiXeD case Nam*.md
+17|9|正则：从右往左替换 1 处|file12name.txt|file12nam*.txt
+18|0|序号：起始 5 步长 3 四位，放前面|alpha.txt|0005-alpha.txt
+18|1|序号：起始 5 步长 3 四位，放前面|Beta.TXT|0008-Beta.TXT
+18|2|序号：起始 5 步长 3 四位，放前面|.gitignore|0011-.gitignore
+18|3|序号：起始 5 步长 3 四位，放前面|报告 2024.docx|0014-报告 2024.docx
+18|4|序号：起始 5 步长 3 四位，放前面|a.b.c.txt|0017-a.b.c.txt
+18|5|序号：起始 5 步长 3 四位，放前面|noext|0020-noext
+18|6|序号：起始 5 步长 3 四位，放前面|trailing.|0023-trailing.
+18|7|序号：起始 5 步长 3 四位，放前面|100% (copy).txt|0026-100% (copy).txt
+18|8|序号：起始 5 步长 3 四位，放前面|MiXeD case Name.md|0029-MiXeD case Name.md
+18|9|序号：起始 5 步长 3 四位，放前面|file12name.txt|0032-file12name.txt
+19|0|序号：放后面，无分隔符|alpha.txt|alpha01.txt
+19|1|序号：放后面，无分隔符|Beta.TXT|Beta02.TXT
+19|2|序号：放后面，无分隔符|.gitignore|.gitignore03
+19|3|序号：放后面，无分隔符|报告 2024.docx|报告 202404.docx
+19|4|序号：放后面，无分隔符|a.b.c.txt|a.b.c05.txt
+19|5|序号：放后面，无分隔符|noext|noext06
+19|6|序号：放后面，无分隔符|trailing.|trailing07.
+19|7|序号：放后面，无分隔符|100% (copy).txt|100% (copy)08.txt
+19|8|序号：放后面，无分隔符|MiXeD case Name.md|MiXeD case Name09.md
+19|9|序号：放后面，无分隔符|file12name.txt|file12name10.txt
+20|0|序号：替换原文件名（放前面，分隔符 _）|alpha.txt|_01.txt
+20|1|序号：替换原文件名（放前面，分隔符 _）|Beta.TXT|_02.TXT
+20|2|序号：替换原文件名（放前面，分隔符 _）|.gitignore|_03
+20|3|序号：替换原文件名（放前面，分隔符 _）|报告 2024.docx|_04.docx
+20|4|序号：替换原文件名（放前面，分隔符 _）|a.b.c.txt|_05.txt
+20|5|序号：替换原文件名（放前面，分隔符 _）|noext|_06
+20|6|序号：替换原文件名（放前面，分隔符 _）|trailing.|_07.
+20|7|序号：替换原文件名（放前面，分隔符 _）|100% (copy).txt|_08.txt
+20|8|序号：替换原文件名（放前面，分隔符 _）|MiXeD case Name.md|_09.md
+20|9|序号：替换原文件名（放前面，分隔符 _）|file12name.txt|_10.txt
+21|0|序号：起始 0 一位|alpha.txt|0-alpha.txt
+21|1|序号：起始 0 一位|Beta.TXT|1-Beta.TXT
+21|2|序号：起始 0 一位|.gitignore|2-.gitignore
+21|3|序号：起始 0 一位|报告 2024.docx|3-报告 2024.docx
+21|4|序号：起始 0 一位|a.b.c.txt|4-a.b.c.txt
+21|5|序号：起始 0 一位|noext|5-noext
+21|6|序号：起始 0 一位|trailing.|6-trailing.
+21|7|序号：起始 0 一位|100% (copy).txt|7-100% (copy).txt
+21|8|序号：起始 0 一位|MiXeD case Name.md|8-MiXeD case Name.md
+21|9|序号：起始 0 一位|file12name.txt|9-file12name.txt
+22|0|序号：起始 99 两位（超过位数不截断）|alpha.txt|99-alpha.txt
+22|1|序号：起始 99 两位（超过位数不截断）|Beta.TXT|100-Beta.TXT
+22|2|序号：起始 99 两位（超过位数不截断）|.gitignore|101-.gitignore
+22|3|序号：起始 99 两位（超过位数不截断）|报告 2024.docx|102-报告 2024.docx
+22|4|序号：起始 99 两位（超过位数不截断）|a.b.c.txt|103-a.b.c.txt
+22|5|序号：起始 99 两位（超过位数不截断）|noext|104-noext
+22|6|序号：起始 99 两位（超过位数不截断）|trailing.|105-trailing.
+22|7|序号：起始 99 两位（超过位数不截断）|100% (copy).txt|106-100% (copy).txt
+22|8|序号：起始 99 两位（超过位数不截断）|MiXeD case Name.md|107-MiXeD case Name.md
+22|9|序号：起始 99 两位（超过位数不截断）|file12name.txt|108-file12name.txt
+23|0|序号：位数 0（按 1 位处理）|alpha.txt|1-alpha.txt
+23|1|序号：位数 0（按 1 位处理）|Beta.TXT|2-Beta.TXT
+23|2|序号：位数 0（按 1 位处理）|.gitignore|3-.gitignore
+23|3|序号：位数 0（按 1 位处理）|报告 2024.docx|4-报告 2024.docx
+23|4|序号：位数 0（按 1 位处理）|a.b.c.txt|5-a.b.c.txt
+23|5|序号：位数 0（按 1 位处理）|noext|6-noext
+23|6|序号：位数 0（按 1 位处理）|trailing.|7-trailing.
+23|7|序号：位数 0（按 1 位处理）|100% (copy).txt|8-100% (copy).txt
+23|8|序号：位数 0（按 1 位处理）|MiXeD case Name.md|9-MiXeD case Name.md
+23|9|序号：位数 0（按 1 位处理）|file12name.txt|10-file12name.txt
+24|0|序号 + 含扩展名 + 查找点|alpha.txt|01-alpha_txt
+24|1|序号 + 含扩展名 + 查找点|Beta.TXT|02-Beta_TXT
+24|2|序号 + 含扩展名 + 查找点|.gitignore|03-_gitignore
+24|3|序号 + 含扩展名 + 查找点|报告 2024.docx|04-报告 2024_docx
+24|4|序号 + 含扩展名 + 查找点|a.b.c.txt|05-a_b_c_txt
+24|5|序号 + 含扩展名 + 查找点|noext|06-noext
+24|6|序号 + 含扩展名 + 查找点|trailing.|07-trailing_
+24|7|序号 + 含扩展名 + 查找点|100% (copy).txt|08-100% (copy)_txt
+24|8|序号 + 含扩展名 + 查找点|MiXeD case Name.md|09-MiXeD case Name_md
+24|9|序号 + 含扩展名 + 查找点|file12name.txt|10-file12name_txt
+25|0|扩展名改成 md|alpha.txt|alpha.md
+25|1|扩展名改成 md|Beta.TXT|Beta.md
+25|2|扩展名改成 md|.gitignore|.gitignore.md
+25|3|扩展名改成 md|报告 2024.docx|报告 2024.md
+25|4|扩展名改成 md|a.b.c.txt|a.b.c.md
+25|5|扩展名改成 md|noext|noext.md
+25|6|扩展名改成 md|trailing.|trailing.md
+25|7|扩展名改成 md|100% (copy).txt|100% (copy).md
+25|8|扩展名改成 md|MiXeD case Name.md|MiXeD case Name.md
+25|9|扩展名改成 md|file12name.txt|file12name.md
+26|0|扩展名改成 .log（带点）|alpha.txt|alpha.log
+26|1|扩展名改成 .log（带点）|Beta.TXT|Beta.log
+26|2|扩展名改成 .log（带点）|.gitignore|.gitignore.log
+26|3|扩展名改成 .log（带点）|报告 2024.docx|报告 2024.log
+26|4|扩展名改成 .log（带点）|a.b.c.txt|a.b.c.log
+26|5|扩展名改成 .log（带点）|noext|noext.log
+26|6|扩展名改成 .log（带点）|trailing.|trailing.log
+26|7|扩展名改成 .log（带点）|100% (copy).txt|100% (copy).log
+26|8|扩展名改成 .log（带点）|MiXeD case Name.md|MiXeD case Name.log
+26|9|扩展名改成 .log（带点）|file12name.txt|file12name.log
+27|0|扩展名清空（去掉扩展名）|alpha.txt|alpha
+27|1|扩展名清空（去掉扩展名）|Beta.TXT|Beta
+27|2|扩展名清空（去掉扩展名）|.gitignore|.gitignore
+27|3|扩展名清空（去掉扩展名）|报告 2024.docx|报告 2024
+27|4|扩展名清空（去掉扩展名）|a.b.c.txt|a.b.c
+27|5|扩展名清空（去掉扩展名）|noext|noext
+27|6|扩展名清空（去掉扩展名）|trailing.|trailing
+27|7|扩展名清空（去掉扩展名）|100% (copy).txt|100% (copy)
+27|8|扩展名清空（去掉扩展名）|MiXeD case Name.md|MiXeD case Name
+27|9|扩展名清空（去掉扩展名）|file12name.txt|file12name
+28|0|扩展名模式 2（老模板的去掉扩展名）|alpha.txt|alpha
+28|1|扩展名模式 2（老模板的去掉扩展名）|Beta.TXT|Beta
+28|2|扩展名模式 2（老模板的去掉扩展名）|.gitignore|.gitignore
+28|3|扩展名模式 2（老模板的去掉扩展名）|报告 2024.docx|报告 2024
+28|4|扩展名模式 2（老模板的去掉扩展名）|a.b.c.txt|a.b.c
+28|5|扩展名模式 2（老模板的去掉扩展名）|noext|noext
+28|6|扩展名模式 2（老模板的去掉扩展名）|trailing.|trailing
+28|7|扩展名模式 2（老模板的去掉扩展名）|100% (copy).txt|100% (copy)
+28|8|扩展名模式 2（老模板的去掉扩展名）|MiXeD case Name.md|MiXeD case Name
+28|9|扩展名模式 2（老模板的去掉扩展名）|file12name.txt|file12name
+29|0|全部大写|alpha.txt|ALPHA.txt
+29|1|全部大写|Beta.TXT|BETA.TXT
+29|2|全部大写|.gitignore|.GITIGNORE
+29|3|全部大写|报告 2024.docx|报告 2024.docx
+29|4|全部大写|a.b.c.txt|A.B.C.txt
+29|5|全部大写|noext|NOEXT
+29|6|全部大写|trailing.|TRAILING.
+29|7|全部大写|100% (copy).txt|100% (COPY).txt
+29|8|全部大写|MiXeD case Name.md|MIXED CASE NAME.md
+29|9|全部大写|file12name.txt|FILE12NAME.txt
+30|0|全部小写|alpha.txt|alpha.txt
+30|1|全部小写|Beta.TXT|beta.TXT
+30|2|全部小写|.gitignore|.gitignore
+30|3|全部小写|报告 2024.docx|报告 2024.docx
+30|4|全部小写|a.b.c.txt|a.b.c.txt
+30|5|全部小写|noext|noext
+30|6|全部小写|trailing.|trailing.
+30|7|全部小写|100% (copy).txt|100% (copy).txt
+30|8|全部小写|MiXeD case Name.md|mixed case name.md
+30|9|全部小写|file12name.txt|file12name.txt
+31|0|首字母大写|alpha.txt|Alpha.txt
+31|1|首字母大写|Beta.TXT|Beta.TXT
+31|2|首字母大写|.gitignore|.gitignore
+31|3|首字母大写|报告 2024.docx|报告 2024.docx
+31|4|首字母大写|a.b.c.txt|A.b.c.txt
+31|5|首字母大写|noext|Noext
+31|6|首字母大写|trailing.|Trailing.
+31|7|首字母大写|100% (copy).txt|100% (copy).txt
+31|8|首字母大写|MiXeD case Name.md|Mixed case name.md
+31|9|首字母大写|file12name.txt|File12name.txt
+32|0|组合：前缀 + 序号 + 大写 + 改扩展名|alpha.txt|P_001#ALPHA_S.dat
+32|1|组合：前缀 + 序号 + 大写 + 改扩展名|Beta.TXT|P_002#BETA_S.dat
+32|2|组合：前缀 + 序号 + 大写 + 改扩展名|.gitignore|P_003#.GITIGNORE_S.dat
+32|3|组合：前缀 + 序号 + 大写 + 改扩展名|报告 2024.docx|P_004#报告 2024_S.dat
+32|4|组合：前缀 + 序号 + 大写 + 改扩展名|a.b.c.txt|P_005#A.B.C_S.dat
+32|5|组合：前缀 + 序号 + 大写 + 改扩展名|noext|P_006#NOEXT_S.dat
+32|6|组合：前缀 + 序号 + 大写 + 改扩展名|trailing.|P_007#TRAILING_S.dat
+32|7|组合：前缀 + 序号 + 大写 + 改扩展名|100% (copy).txt|P_008#100% (COPY)_S.dat
+32|8|组合：前缀 + 序号 + 大写 + 改扩展名|MiXeD case Name.md|P_009#MIXED CASE NAME_S.dat
+32|9|组合：前缀 + 序号 + 大写 + 改扩展名|file12name.txt|P_010#FILE12NAME_S.dat
+33|0|组合：查找替换 + 大小写 + 含扩展名|alpha.txt|alpha.txt
+33|1|组合：查找替换 + 大小写 + 含扩展名|Beta.TXT|b3ta.txt
+33|2|组合：查找替换 + 大小写 + 含扩展名|.gitignore|.gitignor3
+33|3|组合：查找替换 + 大小写 + 含扩展名|报告 2024.docx|报告 2024.docx
+33|4|组合：查找替换 + 大小写 + 含扩展名|a.b.c.txt|a.b.c.txt
+33|5|组合：查找替换 + 大小写 + 含扩展名|noext|no3xt
+33|6|组合：查找替换 + 大小写 + 含扩展名|trailing.|trailing.
+33|7|组合：查找替换 + 大小写 + 含扩展名|100% (copy).txt|100% (copy).txt
+33|8|组合：查找替换 + 大小写 + 含扩展名|MiXeD case Name.md|mix3d cas3 nam3.md
+33|9|组合：查找替换 + 大小写 + 含扩展名|file12name.txt|fil312nam3.txt
+34|0|序号：起始负数按 0|alpha.txt|00-alpha.txt
+34|1|序号：起始负数按 0|Beta.TXT|01-Beta.TXT
+34|2|序号：起始负数按 0|.gitignore|02-.gitignore
+34|3|序号：起始负数按 0|报告 2024.docx|03-报告 2024.docx
+34|4|序号：起始负数按 0|a.b.c.txt|04-a.b.c.txt
+34|5|序号：起始负数按 0|noext|05-noext
+34|6|序号：起始负数按 0|trailing.|06-trailing.
+34|7|序号：起始负数按 0|100% (copy).txt|07-100% (copy).txt
+34|8|序号：起始负数按 0|MiXeD case Name.md|08-MiXeD case Name.md
+34|9|序号：起始负数按 0|file12name.txt|09-file12name.txt
+35|0|序号：步长 0 按 1|alpha.txt|01-alpha.txt
+35|1|序号：步长 0 按 1|Beta.TXT|02-Beta.TXT
+35|2|序号：步长 0 按 1|.gitignore|03-.gitignore
+35|3|序号：步长 0 按 1|报告 2024.docx|04-报告 2024.docx
+35|4|序号：步长 0 按 1|a.b.c.txt|05-a.b.c.txt
+35|5|序号：步长 0 按 1|noext|06-noext
+35|6|序号：步长 0 按 1|trailing.|07-trailing.
+35|7|序号：步长 0 按 1|100% (copy).txt|08-100% (copy).txt
+35|8|序号：步长 0 按 1|MiXeD case Name.md|09-MiXeD case Name.md
+35|9|序号：步长 0 按 1|file12name.txt|10-file12name.txt
+36|0|序号：位数负数按 1|alpha.txt|1-alpha.txt
+36|1|序号：位数负数按 1|Beta.TXT|2-Beta.TXT
+36|2|序号：位数负数按 1|.gitignore|3-.gitignore
+36|3|序号：位数负数按 1|报告 2024.docx|4-报告 2024.docx
+36|4|序号：位数负数按 1|a.b.c.txt|5-a.b.c.txt
+36|5|序号：位数负数按 1|noext|6-noext
+36|6|序号：位数负数按 1|trailing.|7-trailing.
+36|7|序号：位数负数按 1|100% (copy).txt|8-100% (copy).txt
+36|8|序号：位数负数按 1|MiXeD case Name.md|9-MiXeD case Name.md
+36|9|序号：位数负数按 1|file12name.txt|10-file12name.txt
+37|0|序号：位数 99 夹到 20|alpha.txt|00000000000000000001-alpha.txt
+37|1|序号：位数 99 夹到 20|Beta.TXT|00000000000000000002-Beta.TXT
+37|2|序号：位数 99 夹到 20|.gitignore|00000000000000000003-.gitignore
+37|3|序号：位数 99 夹到 20|报告 2024.docx|00000000000000000004-报告 2024.docx
+37|4|序号：位数 99 夹到 20|a.b.c.txt|00000000000000000005-a.b.c.txt
+37|5|序号：位数 99 夹到 20|noext|00000000000000000006-noext
+37|6|序号：位数 99 夹到 20|trailing.|00000000000000000007-trailing.
+37|7|序号：位数 99 夹到 20|100% (copy).txt|00000000000000000008-100% (copy).txt
+37|8|序号：位数 99 夹到 20|MiXeD case Name.md|00000000000000000009-MiXeD case Name.md
+37|9|序号：位数 99 夹到 20|file12name.txt|00000000000000000010-file12name.txt
+38|0|替换：次数 0 按 1（从左往右）|alpha.txt|Xlpha.txt
+38|1|替换：次数 0 按 1（从左往右）|Beta.TXT|BetX.TXT
+38|2|替换：次数 0 按 1（从左往右）|.gitignore|.gitignore
+38|3|替换：次数 0 按 1（从左往右）|报告 2024.docx|报告 2024.docx
+38|4|替换：次数 0 按 1（从左往右）|a.b.c.txt|X.b.c.txt
+38|5|替换：次数 0 按 1（从左往右）|noext|noext
+38|6|替换：次数 0 按 1（从左往右）|trailing.|trXiling.
+38|7|替换：次数 0 按 1（从左往右）|100% (copy).txt|100% (copy).txt
+38|8|替换：次数 0 按 1（从左往右）|MiXeD case Name.md|MiXeD cXse Name.md
+38|9|替换：次数 0 按 1（从左往右）|file12name.txt|file12nXme.txt
+39|0|替换：次数负数按 1（从右往左）|alpha.txt|alphX.txt
+39|1|替换：次数负数按 1（从右往左）|Beta.TXT|BetX.TXT
+39|2|替换：次数负数按 1（从右往左）|.gitignore|.gitignore
+39|3|替换：次数负数按 1（从右往左）|报告 2024.docx|报告 2024.docx
+39|4|替换：次数负数按 1（从右往左）|a.b.c.txt|X.b.c.txt
+39|5|替换：次数负数按 1（从右往左）|noext|noext
+39|6|替换：次数负数按 1（从右往左）|trailing.|trXiling.
+39|7|替换：次数负数按 1（从右往左）|100% (copy).txt|100% (copy).txt
+39|8|替换：次数负数按 1（从右往左）|MiXeD case Name.md|MiXeD case NXme.md
+39|9|替换：次数负数按 1（从右往左）|file12name.txt|file12nXme.txt

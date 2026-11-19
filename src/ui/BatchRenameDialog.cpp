@@ -2521,9 +2521,9 @@ void BatchRenameDialog::CancelTemplateRename()
     }
 }
 
-void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
+void BatchRenameDialog::CaptureCurrentRules(RenameRules& out) const
 {
-    // 名字由调用方决定（槽名不跟着规则走）
+    // 规则值对象只收"算名字"需要的字段；模板名、当前选中的槽这些不进来
     out.prefix  = GetTextOf(m_hPrefix);
     out.suffix  = GetTextOf(m_hSuffix);
     out.find    = GetTextOf(m_hFind);
@@ -2562,6 +2562,12 @@ void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
     out.sortMode    = ComboSelection(m_hSortMode);
     out.sortReverse = (m_hSortReverse != nullptr) &&
                       (::SendMessageW(m_hSortReverse, BM_GETCHECK, 0, 0) == BST_CHECKED);
+}
+
+void BatchRenameDialog::CaptureCurrentRules(RenameTemplate& out) const
+{
+    // 名字由调用方决定（槽名不跟着规则走）；规则字段跟值对象是同一套
+    CaptureCurrentRules(static_cast<RenameRules&>(out));
 }
 
 void BatchRenameDialog::ApplyTemplateToControls(const RenameTemplate& tpl)
@@ -3134,7 +3140,8 @@ void BatchRenameDialog::OnRegexButtonClick()
     }
 }
 
-std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring& originalName) const
+std::wstring ComputeNewName(const RenameRules& rules, std::size_t index,
+                            const std::wstring& originalName)
 {
     std::wstring stem;
     std::wstring extension;
@@ -3142,11 +3149,13 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
 
     // 0) 先把「扩展名」这个下拉定下来（保留 / 改成指定 / 去掉）
     //    放在查找替换前面，是为了让勾了「含扩展名」的时候，查找看到的是"最终要用的那个扩展名"
-    switch (ComboSelection(m_hExtMode))
+    const int extMode = (rules.extMode >= 0 && rules.extMode <= 2) ? rules.extMode : 0;
+
+    switch (extMode)
     {
     case 1:   // 修改：右边框填什么就用什么，没填就是不要扩展名
     {
-        std::wstring value = GetTextOf(m_hExtValue);
+        std::wstring value = rules.extValue;
         if (value.empty())
         {
             extension.clear();   // 「修改」但空着 = 去掉扩展名
@@ -3172,32 +3181,36 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
 
     // 勾了「含扩展名」就把扩展名一起并进"要处理的那一段"；
     // 不勾就只动主文件名（默认行为，扩展名原样保留）
-    const bool includeExt = (m_hIncludeExt != nullptr) &&
-                            (::SendMessageW(m_hIncludeExt, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const bool includeExt = rules.includeExt;
 
     std::wstring working = includeExt ? (stem + extension) : stem;
 
     // 1) 查找替换（普通文字，或按正则处理）
-    const std::wstring find = GetTextOf(m_hFind);
+    const std::wstring find = rules.find;
     if (!find.empty())
     {
         // 除了「普通查找」以外都按正则解释（内置预设和自定义正则都算）
-        const bool useRegex = RegexOn();
+        const bool useRegex = (rules.regexPreset != 0);
 
-        const std::wstring replacement = GetTextOf(m_hReplace);
+        const std::wstring replacement = rules.replace;
 
         // 替换范围：0 = 全部；1 = 从左往右数只换前 N 处；2 = 从右往左数只换后 N 处
         // N 取右边那个 30px 窄框（选「替换全部」时它是灰的，不参与）
-        const int       replaceMode = ComboSelection(m_hReplaceMode);
-        const long long wantCount   = ReadInteger(m_hReplaceCount, 1, 1);   // 空 / 非法 → 1，至少 1
+        // 越界的值按 0 处理，跟原来的 ComboSelection（下拉没有选中项就是 0）一致
+        const int replaceMode =
+            (rules.replaceMode >= 0 && rules.replaceMode <= 2) ? rules.replaceMode : 0;
+
+        // 空 / 非法 → 1，至少 1（和原来的 ReadInteger(m_hReplaceCount, 1, 1) 一致）
+        const long long wantCount = (rules.replaceCount > 0) ? rules.replaceCount : 1;
 
         if (replaceMode == 0)
         {
             // 替换全部：沿用原来的两条路径（正则一次性全换，普通文字全量替换）
             if (useRegex)
             {
-                // 正则的合法性在外面已经编译验证过（m_regexValid），这里直接用缓存的那份
-                if (m_regexValid && EnsureRegexCompiled(find))
+                // 正则的合法性在外面已经编译验证过（m_regexValid）；
+                // 这里再确认一次写法（缓存命中时几乎零开销），写错就保持原名
+                if (EnsureRegexCompiled(find))
                 {
                     try
                     {
@@ -3211,9 +3224,7 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
             }
             else
             {
-                const bool caseSensitive =
-                    (m_hCaseSensitive != nullptr) &&
-                    (::SendMessageW(m_hCaseSensitive, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                const bool caseSensitive = rules.caseSensitive;
 
                 working = ReplaceAll(working, find, replacement, caseSensitive);
             }
@@ -3226,13 +3237,11 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
             std::vector<std::pair<size_t, size_t>> matches;       // (起点, 长度)
             std::vector<std::wstring>              pieces;        // 每处对应要替换进去的文字
 
-            const bool caseSensitive =
-                (m_hCaseSensitive != nullptr) &&
-                (::SendMessageW(m_hCaseSensitive, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            const bool caseSensitive = rules.caseSensitive;
 
             if (useRegex)
             {
-                if (m_regexValid && EnsureRegexCompiled(find))
+                if (EnsureRegexCompiled(find))
                 {
                     try
                     {
@@ -3317,7 +3326,10 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
     }
 
     // 2) 大小写（作用范围跟查找替换一致）
-    switch (ComboSelection(m_hCaseMode))
+    // 越界的值按 0（保持原样）处理，跟原来的 ComboSelection 一致
+    const int caseMode = (rules.caseMode >= 0 && rules.caseMode <= 3) ? rules.caseMode : 0;
+
+    switch (caseMode)
     {
     case 1:   // 全部大写
         ::CharUpperBuffW(working.data(), static_cast<DWORD>(working.size()));
@@ -3351,31 +3363,28 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
     }
 
     // 3) 序号（只有勾了才加；编号按排序后的次序给）
-    const bool numberOn = (m_hNumberEnable != nullptr) &&
-                          (::SendMessageW(m_hNumberEnable, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const bool numberOn = rules.number;
 
     if (numberOn)
     {
-        const long long start  = ReadInteger(m_hNumberStart, 1, 0);
-        const long long step   = ReadInteger(m_hNumberStep, 1, 1);
-        // 位数框空着就用 2（跟框里那句灰色提示一致，免得"提示写 2、实际出 1 位"）；
-        // 并且夹到 1~20 位，防止"位数填 99"把名字撑到几百个前导零
-        const int       digits = ClampInt(
-            static_cast<int>(ReadInteger(m_hNumberDigits, 2, 1)), 1, kMaxNumberDigits);
+        // 起始 / 步长 / 位数都按原来从编辑框读出来的口径夹一遍：
+        // 起始最小 0、步长最小 1、位数夹到 1~20（界面上位数框只收两位，值对象里可能更大）
+        const long long start  = (rules.numberStart >= 0) ? rules.numberStart : 0;
+        const long long step   = (rules.numberStep >= 1) ? rules.numberStep : 1;
+        const int       digits = ClampInt(rules.numberDigits, 1, kMaxNumberDigits);
 
         const std::wstring numberText =
             FormatNumber(start + step * static_cast<long long>(index), digits);
 
-        const bool replaceOn = (m_hNumberReplace != nullptr) &&
-                               (::SendMessageW(m_hNumberReplace, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        const bool replaceOn = rules.numberReplace;
 
         if (replaceOn)
         {
             // 替换：原文件名整段不要了，新名字就是序号本身；
             // 但「分隔符」仍然按「位置」贴在序号的一侧（分隔符留空就是干净的 01）
-            const std::wstring separator = GetTextOf(m_hNumberSep);
+            const std::wstring separator = rules.numberSep;
 
-            if (ComboSelection(m_hNumberPos) == 1)
+            if (rules.numberPos == 1)
             {
                 stem = separator + numberText;            // 位置=放在名字前面 → -01
             }
@@ -3386,9 +3395,9 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
         }
         else
         {
-            const std::wstring separator = GetTextOf(m_hNumberSep);
+            const std::wstring separator = rules.numberSep;
 
-            if (ComboSelection(m_hNumberPos) == 1)
+            if (rules.numberPos == 1)
             {
                 stem = numberText + separator + stem;     // 放在名字前面
             }
@@ -3400,7 +3409,7 @@ std::wstring BatchRenameDialog::ComputeNewName(size_t index, const std::wstring&
     }
 
     // 4) 前缀 / 后缀（加在整理好的主名两端；扩展名始终留在最后，不参与这两项）
-    stem = GetTextOf(m_hPrefix) + stem + GetTextOf(m_hSuffix);
+    stem = rules.prefix + stem + rules.suffix;
 
     return stem + extension;
 }
@@ -3409,9 +3418,14 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
 {
     m_rows.clear();
 
+    // 规则只从控件收一次，后面排序、算名字都用这一份；
+    // 这样预览、应用前复检、真正改名看到的是同一套输入，不会各读一遍控件。
+    RenameRules rules;
+    CaptureCurrentRules(rules);
+
     // ---- 正则先验证一次：写法有误就整张表标红，别让用户以为能改 ----
-    const std::wstring findText = GetTextOf(m_hFind);
-    const bool useRegex = RegexOn();
+    const std::wstring findText = rules.find;
+    const bool useRegex = (rules.regexPreset != 0);
 
     m_regexValid = true;
 
@@ -3421,9 +3435,8 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
     }
 
     // ---- 排出"谁先谁后"，序号就按这个次序给 ----
-    const int  sortMode = ComboSelection(m_hSortMode);
-    const bool reverseOn = (m_hSortReverse != nullptr) &&
-                           (::SendMessageW(m_hSortReverse, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const int  sortMode = rules.sortMode;
+    const bool reverseOn = rules.sortReverse;
 
     std::vector<size_t> order;
 
@@ -3496,7 +3509,7 @@ void BatchRenameDialog::BuildPreviewRows(bool scanDisk)
 
     for (size_t i = 0; i < order.size(); ++i)
     {
-        newNames[order[i]] = ComputeNewName(i, m_items[order[i]].name);
+        newNames[order[i]] = ComputeNewName(rules, i, m_items[order[i]].name);
     }
 
     // ---- 先把"小写后的路径 / 原名 / 新名"各算一遍 ----

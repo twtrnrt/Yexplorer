@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+#include "ui/BatchRenameRules.h"
+
 // ----------------------------------------------------------------------------
 // 一条待改名的项
 // ----------------------------------------------------------------------------
@@ -55,45 +57,13 @@ struct BatchRenameResult
 // ----------------------------------------------------------------------------
 // 一套可保存的规则（"模板"）
 //
-// 把窗口里所有规则控件的样子原样记下来，存成一份；点「载入」时按字回填，
-// 用户就不用每次都重新摆一遍。字段和界面上的控件一一对应。
+// 规则字段全在 RenameRules 里（和界面上的控件一一对应），模板只是多存一个槽名字。
+// 用继承而不是把字段再抄一遍，是为了保证"算名字用的规则"和"存模板用的规则"
+// 永远是同一份字段，不会改漏一边。
 // ----------------------------------------------------------------------------
-struct RenameTemplate
+struct RenameTemplate : RenameRules
 {
-    std::wstring name;
-
-    std::wstring prefix;        // 前缀
-    std::wstring suffix;        // 后缀
-    std::wstring find;          // 查找
-    std::wstring replace;       // 替换为
-    bool         caseSensitive = false;   // 区分大小写
-    bool         includeExt    = false;   // 查找替换是否连扩展名一起处理
-
-    // 替换范围：0 = 替换全部（默认）；1 = 从左往右数，只换前 N 处；2 = 从右往左数，只换后 N 处
-    // 配合 replaceCount 用：选 0 时 count 那一格是灰的，不参与计算
-    int          replaceMode   = 0;
-    int          replaceCount  = 1;       // 替换几处（只在 replaceMode 1 / 2 时有意义）
-
-    // 查找方式：0 = 普通查找；1~9 = 内置正则预设；10 = 自定义正则
-    // （除了普通查找以外全都按正则解释）
-    int          regexPreset   = 0;
-
-    bool         number        = false;   // 加序号
-    bool         numberReplace = false;   // 序号直接替换原名（勾上就只剩序号，不再拼原名）
-    int          numberStart   = 1;       // 起始
-    int          numberStep    = 1;       // 步长
-    int          numberDigits  = 2;       // 位数
-    int          numberPos     = 1;       // 0 = 放后面，1 = 放前面（默认放前面）
-    std::wstring numberSep     = L"-";    // 分隔符
-
-    // 扩展名：0 不修改 / 1 修改（右边那个框填什么就用什么，留空等于去掉扩展名）
-    // 2 是老模板里"去掉扩展名"那一项的旧值，界面上已经不提供了，读到就按"修改且清空"处理
-    int          extMode       = 0;
-    std::wstring extValue;                // 改成什么扩展名
-
-    int          caseMode      = 0;       // 0 保持 / 1 大写 / 2 小写 / 3 首字母
-    int          sortMode      = 0;       // 0 名称 / 1 时间 / 2 大小 / 3 自定义顺序
-    bool         sortReverse   = false;   // 倒序
+    std::wstring name;          // 模板槽的名字（空 = 这个槽没用过）
 };
 
 class BatchRenameDialog
@@ -148,9 +118,6 @@ private:
     // 这个跟规则无关（只看源文件），打开窗口、防抖到点、点应用前各扫一次。
     void ScanSourceStates();
 
-    // 计算一项的新文件名（不含目录）
-    std::wstring ComputeNewName(size_t index, const std::wstring& originalName) const;
-
     // 预览列表：填充所有行
     void FillPreviewList();
 
@@ -164,7 +131,8 @@ private:
         std::wstring stateText;
     };
 
-    // 读所有控件当前值，重算 rows
+    // 把规则控件收成一份 RenameRules（只收一次），再重算 rows。
+    // 新名字由 BatchRenameRules.h 里的纯函数 ComputeNewName 逐项算。
     void BuildPreviewRows(bool scanDisk);
 
     // ---- 落盘改名（点「应用」之后真正做的事）----
@@ -207,7 +175,8 @@ private:
     void LoadTemplatesFromDisk();
     bool SaveTemplatesToDisk() const;    // 写盘成功返回 true（失败时由调用方提示，不再只写日志）
     void EnsureTemplateSlots();                            // 保证 m_templates 正好 10 条
-    void CaptureCurrentRules(RenameTemplate& out) const;   // 把界面上的规则收成一份模板
+    void CaptureCurrentRules(RenameRules& out) const;      // 把界面上的规则收成一份纯数据（算名字用）
+    void CaptureCurrentRules(RenameTemplate& out) const;   // 把界面上的规则收成一份模板（多带槽名）
     void ApplyTemplateToControls(const RenameTemplate& tpl); // 把模板回填到控件
     void ClearAllRules();                                  // 「清空」：规则区全部回默认值
 
