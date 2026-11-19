@@ -4,6 +4,7 @@
 // ============================================================================
 
 #include "ShellClipboard.h"
+#include "core/PathUtil.h"
 
 #include <ole2.h>       // OleGetClipboard、IDataObject（"虚拟文件"要问剪贴板要内容）
 #include <shlobj.h>     // DROPFILES、DROPEFFECT_*
@@ -346,33 +347,6 @@ std::wstring HresultHex(HRESULT hr)
     ::swprintf_s(buffer, L"0x%08lX", static_cast<unsigned long>(hr));
 
     return buffer;
-}
-
-// 超过 260 字符的路径，普通 Win32 调用会失败，得换成 \\?\ 写法。
-// 和 MainWnd / ShellOperations 里的处理保持一致。
-std::wstring MakeLongPath(const std::wstring& path)
-{
-    if (path.size() < 260 || path.size() >= 32767)
-    {
-        return path;
-    }
-
-    if (path.compare(0, 4, L"\\\\?\\") == 0)
-    {
-        return path;
-    }
-
-    if (path.size() > 1 && path[1] == L':')
-    {
-        return L"\\\\?\\" + path;
-    }
-
-    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
-    {
-        return L"\\\\?\\UNC\\" + path.substr(2);
-    }
-
-    return path;
 }
 
 // 把清单里的名字清成"能当相对路径用"的形式
@@ -745,7 +719,7 @@ bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPa
     // 清单里的目录项没有内容可取，只要把目录建出来
     if (info.hasAttributes && (info.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
     {
-        const std::wstring longPath = MakeLongPath(destinationPath);
+        const std::wstring longPath = pathutil::MakeLongPath(destinationPath);
 
         if (::CreateDirectoryW(longPath.c_str(), nullptr))
         {
@@ -800,7 +774,7 @@ bool VirtualFileSession::Extract(size_t index, const std::wstring& destinationPa
     }
 
     // 目标文件用 CREATE_NEW：绝不覆盖已有文件（重名由调用方先避开）
-    const std::wstring longPath = MakeLongPath(destinationPath);
+    const std::wstring longPath = pathutil::MakeLongPath(destinationPath);
 
     HANDLE file = ::CreateFileW(longPath.c_str(),
                                 GENERIC_WRITE,

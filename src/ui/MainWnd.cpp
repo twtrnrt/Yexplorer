@@ -13,6 +13,7 @@
 #include "ui/BatchRenameDialog.h"
 #include "core/Format.h"
 #include "core/Logger.h"
+#include "core/PathUtil.h"
 #include "core/Settings.h"
 #include "shell/ContainerExtract.h"
 #include "shell/ShellClipboard.h"
@@ -4210,33 +4211,6 @@ static std::wstring FileNameOf(const std::wstring& path)
     return (slash == std::wstring::npos) ? path : path.substr(slash + 1);
 }
 
-// 超过 260 字符的路径，普通 Win32 调用会失败，得换成 \\?\ 写法。
-// 批量改名那边也是这么处理的，撤销/重做要跟它一致，否则长路径的项改不回来。
-static std::wstring MakeLongPath(const std::wstring& path)
-{
-    if (path.size() < 260 || path.size() >= 32767)
-    {
-        return path;
-    }
-
-    if (path.compare(0, 4, L"\\\\?\\") == 0)
-    {
-        return path;
-    }
-
-    if (path.size() > 1 && path[1] == L':')
-    {
-        return L"\\\\?\\" + path;                       // C:\...
-    }
-
-    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
-    {
-        return L"\\\\?\\UNC\\" + path.substr(2);        // \\server\share
-    }
-
-    return path;   // 相对路径之类，原样交给系统
-}
-
 // ---------------------------------------------------------------------------
 // 逐级创建目录（"子目录\文件" 这种剪贴板清单项要用）
 //
@@ -4251,7 +4225,7 @@ static bool CreateDirectoriesRecursive(const std::wstring& directory)
     }
 
     const DWORD result = static_cast<DWORD>(
-        ::SHCreateDirectoryExW(nullptr, MakeLongPath(directory).c_str(), nullptr));
+        ::SHCreateDirectoryExW(nullptr, pathutil::MakeLongPath(directory).c_str(), nullptr));
 
     return result == ERROR_SUCCESS || result == ERROR_FILE_EXISTS || result == ERROR_ALREADY_EXISTS;
 }
@@ -4309,7 +4283,7 @@ static std::wstring MakeUniqueTargetPath(const std::wstring& directory,
     // 先试原名：不存在就直接用
     const std::wstring firstChoice = JoinDirectoryFile(directory, relativeName);
 
-    if (::GetFileAttributesW(MakeLongPath(firstChoice).c_str()) == INVALID_FILE_ATTRIBUTES)
+    if (::GetFileAttributesW(pathutil::MakeLongPath(firstChoice).c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         return firstChoice;
     }
@@ -4331,7 +4305,7 @@ static std::wstring MakeUniqueTargetPath(const std::wstring& directory,
         const std::wstring candidate =
             JoinDirectoryFile(directory, folderPart + candidateName);
 
-        if (::GetFileAttributesW(MakeLongPath(candidate).c_str()) == INVALID_FILE_ATTRIBUTES)
+        if (::GetFileAttributesW(pathutil::MakeLongPath(candidate).c_str()) == INVALID_FILE_ATTRIBUTES)
         {
             return candidate;
         }
@@ -4833,8 +4807,8 @@ int MainWindow::RenameManyTwoStage(const std::vector<std::wstring>& fromPaths,
             parent,
             L"~urex_" + std::to_wstring(i) + L"_" + std::to_wstring(tick % 100000) + extension);
 
-        if (::MoveFileExW(MakeLongPath(fromPaths[i]).c_str(),
-                          MakeLongPath(temp).c_str(), 0))
+        if (::MoveFileExW(pathutil::MakeLongPath(fromPaths[i]).c_str(),
+                          pathutil::MakeLongPath(temp).c_str(), 0))
         {
             tempPaths[i] = temp;
         }
@@ -4855,15 +4829,15 @@ int MainWindow::RenameManyTwoStage(const std::vector<std::wstring>& fromPaths,
         const std::wstring target =
             JoinDirectoryFile(NavigationHistory::ParentPath(fromPaths[i]), toNames[i]);
 
-        if (::MoveFileExW(MakeLongPath(tempPaths[i]).c_str(), MakeLongPath(target).c_str(), 0))
+        if (::MoveFileExW(pathutil::MakeLongPath(tempPaths[i]).c_str(), pathutil::MakeLongPath(target).c_str(), 0))
         {
             continue;
         }
 
         ++failures;
 
-        if (!::MoveFileExW(MakeLongPath(tempPaths[i]).c_str(),
-                           MakeLongPath(fromPaths[i]).c_str(), 0))
+        if (!::MoveFileExW(pathutil::MakeLongPath(tempPaths[i]).c_str(),
+                           pathutil::MakeLongPath(fromPaths[i]).c_str(), 0))
         {
             Logger::Warn(L"批量改名撤销/重做失败，文件停在临时名：" + tempPaths[i]);
         }
@@ -7973,43 +7947,15 @@ void MainWindow::UpdateNavigationState()
 }
 
 // ----------------------------------------------------------------------------
-// 字节数 → 人能看的大小文字（状态栏选中总大小用）
-//   0 ~ 1023 字节   → "512 B"（整数，不带小数）
-//   ≥ 1 KB          → "12.5 KB"
-//   ≥ 1024 KB       → "1.2 MB"，再往上 GB / TB，一律保留 1 位小数
+// 字节数 → 人能看的大小文字（状态栏选中总大小）
+//
+// 用 core::format::CapacityText：和「此电脑」容量卡、列表大小列同一套口径
+// （1024 进位 + 3 位有效数字）。以前这里另写了一份 "%.1f" 的实现，
+// 于是同一次选中的大小在状态栏和列表里可能显示成 "1.2 GB" / "1.23 GB"。
 // ----------------------------------------------------------------------------
-static std::wstring FormatByteSize(unsigned long long bytes)
+static std::wstring SelectedSizeText(unsigned long long bytes)
 {
-    if (bytes < 1024ULL)
-    {
-        return std::to_wstring(bytes) + L" B";
-    }
-
-    double         value = static_cast<double>(bytes) / 1024.0;
-    std::wstring   unit  = L"KB";
-
-    if (value >= 1024.0)
-    {
-        value /= 1024.0;
-        unit = L"MB";
-    }
-
-    if (value >= 1024.0)
-    {
-        value /= 1024.0;
-        unit = L"GB";
-    }
-
-    if (value >= 1024.0)
-    {
-        value /= 1024.0;
-        unit = L"TB";
-    }
-
-    wchar_t buffer[64] = {};
-    _snwprintf_s(buffer, _countof(buffer), _TRUNCATE, L"%.1f ", value);
-
-    return std::wstring(buffer) + unit;
+    return format::CapacityText(static_cast<uint64_t>(bytes));
 }
 
 void MainWindow::UpdateStatusBar()
@@ -8078,7 +8024,7 @@ void MainWindow::UpdateStatusBar()
 
                 if (!hasFolder)
                 {
-                    text += L"　" + FormatByteSize(selectedSize);
+                    text += L"　" + SelectedSizeText(selectedSize);
                 }
             }
             else if (selectedCount > 1)
@@ -8087,7 +8033,7 @@ void MainWindow::UpdateStatusBar()
 
                 if (!hasFolder)
                 {
-                    text += L"　" + FormatByteSize(selectedSize);
+                    text += L"　" + SelectedSizeText(selectedSize);
                 }
             }
         }
