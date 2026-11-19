@@ -439,6 +439,9 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     // 后台枚举完成
     void OnEnumerationDone();
 
+    // 后台文件操作完成（复制 / 移动 / 删除）：收进度、记撤销、局部更新列表
+    void OnOperationDone(HRESULT hr);
+
     // 双击条目
     void OnItemActivated(size_t index);
 

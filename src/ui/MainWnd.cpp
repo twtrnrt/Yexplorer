@@ -1364,149 +1364,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // 后台文件操作完成（复制 / 移动 / 删除）
     // --------------------------------------------------------------
     case WM_APP_OPERATION_DONE:
-    {
-        HRESULT hr = static_cast<HRESULT>(static_cast<LONG_PTR>(wParam));
-
-        // ------------------------------------------------------------
-        // 如果是"粘贴虚拟文件"（远程桌面那类），先把进度显示收掉：
-        // 状态栏要退回"N 个项目"，进度文案和 ESC 取消都要复位
-        // ------------------------------------------------------------
-        const bool wasVirtualPaste = m_pasteInProgress.load();
-
-        if (wasVirtualPaste)
-        {
-            m_pasteInProgress.store(false);
-            m_lastStatusText.clear();   // 让下面的 UpdateStatusBar 真的把计数写回去
-
-            // 进度条数据一并收掉，状态栏恢复成一整格（下次粘贴会重新建）
-            m_pasteItemSizes.reset();
-            m_pasteDoneBytes.reset();
-            m_pasteBar.End();
-        }
-
-        if (SUCCEEDED(hr))
-        {
-            // 剪切成功：剪贴板清空，避免再粘一次；其他情况剪贴板保持不变
-            if (m_clearClipboardWhenDone)
-            {
-                m_clipboardPaths.clear();
-                m_clipboardIsCut = false;
-                shellclip::Clear(m_hWnd);   // 和资源管理器一样：剪切粘贴完成后剪贴板就空了
-            }
-
-            Logger::Info(L"文件操作完成");
-
-            // 记进撤销栈（操作成功才记，失败/取消不留记录）
-            // 永久删除例外：文件已经绕过回收站，没法还原，记了也是假的撤销
-            if (m_lastOperation == FileOperationKind::Delete && !m_lastOperationPermanent)
-            {
-                UndoRecord record;
-                record.kind        = UndoKind::Delete;
-                record.beforePaths = m_operationPaths;   // 原路径：撤销时按它从回收站还原
-                PushUndoRecord(record);
-            }
-            else if (m_lastOperation == FileOperationKind::Move ||
-                     m_lastOperation == FileOperationKind::Copy)
-            {
-                UndoRecord record;
-                record.kind        = (m_lastOperation == FileOperationKind::Move) ? UndoKind::Move
-                                                                                  : UndoKind::Copy;
-                record.beforePaths = m_operationPaths;
-
-                if (m_pendingVirtualResults != nullptr)
-                {
-                    // 虚拟文件粘贴：源在远程电脑上，本机只有"粘到哪了"，
-                    // 所以撤销就是按这些目标路径删掉（UndoKind::Copy 的逻辑正好是这个）
-                    record.afterPaths = *m_pendingVirtualResults;
-                }
-                else
-                {
-                    for (const std::wstring& source : m_operationPaths)
-                    {
-                        // 操作完成后这一项在目标目录里；用户中途改名会导致找不到，
-                        // 撤销时那种项就静默跳过，不影响其它项
-                        record.afterPaths.push_back(
-                            JoinDirectoryFile(m_operationTargetDirectory, FileNameOf(source)));
-                    }
-                }
-
-                // 一项都没记下来就不压栈，免得出现"撤销 复制"点了却什么都不做
-                if (!record.afterPaths.empty())
-                {
-                    PushUndoRecord(record);
-                }
-            }
-        }
-        else
-        {
-            // 失败（含用户在进度框点取消）：保留剪贴板，用户可以直接重试
-            Logger::Error(L"文件操作失败：" + Logger::FormatHresult(hr));
-        }
-
-        // 虚拟文件粘贴：失败/取消/部分失败时给用户一句明确提示（日志里有细节）
-        if (wasVirtualPaste && m_pendingVirtualMessage != nullptr && !m_pendingVirtualMessage->empty())
-        {
-            ::MessageBoxW(m_hWnd, m_pendingVirtualMessage->c_str(), L"粘贴", MB_OK | MB_ICONWARNING);
-        }
-
-        m_pendingVirtualResults.reset();
-        m_pendingVirtualMessage.reset();
-
-        m_clearClipboardWhenDone = false;
-
-        // 粘贴完成后取消"被剪切"的淡化显示
-        m_fileListView.SetCutPaths({});
-
-        // ------------------------------------------------------------
-        // 完成后怎么更新界面（原则：能少动就少动，不整表重画）
-        //   删除 → 只把删掉的那几行摘掉
-        //   移动 → 如果当前目录正好是源目录，把搬走的行摘掉
-        //   其余（复制/移动完成）→ 重新枚举一次，但只重绘变化的部分
-        // ------------------------------------------------------------
-        if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Delete)
-        {
-            for (const auto& path : m_operationPaths)
-            {
-                m_fileListView.RemoveItemByPath(path);
-            }
-            Logger::Info(L"删除后局部移除 " + std::to_wstring(m_operationPaths.size()) + L" 行（未重扫目录）");
-            UpdateTitle();
-            UpdateStatusBar();
-        }
-        else
-        {
-            // 移动：源目录里已经搬走的项，从列表上摘掉
-            if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Move)
-            {
-                std::wstring currentDirectory = m_history.Current();
-
-                for (const auto& path : m_operationPaths)
-                {
-                    std::wstring parent = NavigationHistory::ParentPath(path);
-                    if (_wcsicmp(parent.c_str(), currentDirectory.c_str()) == 0)
-                    {
-                        m_fileListView.RemoveItemByPath(path);
-                    }
-                }
-
-                UpdateTitle();
-                UpdateStatusBar();
-            }
-
-            // 复制/移动完成后重新枚举一次：
-            // 请求"把新出现的东西选中"（资源管理器粘贴完也是新文件高亮）
-            if (SUCCEEDED(hr))
-            {
-                m_selectNewAfterEnum = true;
-            }
-
-            RefreshCurrentFolder();
-        }
-        m_lastOperation = FileOperationKind::None;
-        m_lastOperationPermanent = false;
-        m_operationPaths.clear();
+        OnOperationDone(static_cast<HRESULT>(static_cast<LONG_PTR>(wParam)));
         return 0;
-    }
 
     // --------------------------------------------------------------
     // 选中项变了（延迟到消息队尾再算）
@@ -1640,6 +1499,154 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     return ::DefWindowProcW(m_hWnd, msg, wParam, lParam);
+}
+
+// ----------------------------------------------------------------------------
+// 后台文件操作完成（复制 / 移动 / 删除）
+//
+// 原来整段内联在 HandleMessage 的 WM_APP_OPERATION_DONE 分支里（约 140 行），
+// 抽出来以后消息分发只留一行，这段逻辑也能单独读、单独改。
+// ----------------------------------------------------------------------------
+void MainWindow::OnOperationDone(HRESULT hr)
+{
+
+    // ------------------------------------------------------------
+    // 如果是"粘贴虚拟文件"（远程桌面那类），先把进度显示收掉：
+    // 状态栏要退回"N 个项目"，进度文案和 ESC 取消都要复位
+    // ------------------------------------------------------------
+    const bool wasVirtualPaste = m_pasteInProgress.load();
+
+    if (wasVirtualPaste)
+    {
+        m_pasteInProgress.store(false);
+        m_lastStatusText.clear();   // 让下面的 UpdateStatusBar 真的把计数写回去
+
+        // 进度条数据一并收掉，状态栏恢复成一整格（下次粘贴会重新建）
+        m_pasteItemSizes.reset();
+        m_pasteDoneBytes.reset();
+        m_pasteBar.End();
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        // 剪切成功：剪贴板清空，避免再粘一次；其他情况剪贴板保持不变
+        if (m_clearClipboardWhenDone)
+        {
+            m_clipboardPaths.clear();
+            m_clipboardIsCut = false;
+            shellclip::Clear(m_hWnd);   // 和资源管理器一样：剪切粘贴完成后剪贴板就空了
+        }
+
+        Logger::Info(L"文件操作完成");
+
+        // 记进撤销栈（操作成功才记，失败/取消不留记录）
+        // 永久删除例外：文件已经绕过回收站，没法还原，记了也是假的撤销
+        if (m_lastOperation == FileOperationKind::Delete && !m_lastOperationPermanent)
+        {
+            UndoRecord record;
+            record.kind        = UndoKind::Delete;
+            record.beforePaths = m_operationPaths;   // 原路径：撤销时按它从回收站还原
+            PushUndoRecord(record);
+        }
+        else if (m_lastOperation == FileOperationKind::Move ||
+                 m_lastOperation == FileOperationKind::Copy)
+        {
+            UndoRecord record;
+            record.kind        = (m_lastOperation == FileOperationKind::Move) ? UndoKind::Move
+                                                                              : UndoKind::Copy;
+            record.beforePaths = m_operationPaths;
+
+            if (m_pendingVirtualResults != nullptr)
+            {
+                // 虚拟文件粘贴：源在远程电脑上，本机只有"粘到哪了"，
+                // 所以撤销就是按这些目标路径删掉（UndoKind::Copy 的逻辑正好是这个）
+                record.afterPaths = *m_pendingVirtualResults;
+            }
+            else
+            {
+                for (const std::wstring& source : m_operationPaths)
+                {
+                    // 操作完成后这一项在目标目录里；用户中途改名会导致找不到，
+                    // 撤销时那种项就静默跳过，不影响其它项
+                    record.afterPaths.push_back(
+                        JoinDirectoryFile(m_operationTargetDirectory, FileNameOf(source)));
+                }
+            }
+
+            // 一项都没记下来就不压栈，免得出现"撤销 复制"点了却什么都不做
+            if (!record.afterPaths.empty())
+            {
+                PushUndoRecord(record);
+            }
+        }
+    }
+    else
+    {
+        // 失败（含用户在进度框点取消）：保留剪贴板，用户可以直接重试
+        Logger::Error(L"文件操作失败：" + Logger::FormatHresult(hr));
+    }
+
+    // 虚拟文件粘贴：失败/取消/部分失败时给用户一句明确提示（日志里有细节）
+    if (wasVirtualPaste && m_pendingVirtualMessage != nullptr && !m_pendingVirtualMessage->empty())
+    {
+        ::MessageBoxW(m_hWnd, m_pendingVirtualMessage->c_str(), L"粘贴", MB_OK | MB_ICONWARNING);
+    }
+
+    m_pendingVirtualResults.reset();
+    m_pendingVirtualMessage.reset();
+
+    m_clearClipboardWhenDone = false;
+
+    // 粘贴完成后取消"被剪切"的淡化显示
+    m_fileListView.SetCutPaths({});
+
+    // ------------------------------------------------------------
+    // 完成后怎么更新界面（原则：能少动就少动，不整表重画）
+    //   删除 → 只把删掉的那几行摘掉
+    //   移动 → 如果当前目录正好是源目录，把搬走的行摘掉
+    //   其余（复制/移动完成）→ 重新枚举一次，但只重绘变化的部分
+    // ------------------------------------------------------------
+    if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Delete)
+    {
+        for (const auto& path : m_operationPaths)
+        {
+            m_fileListView.RemoveItemByPath(path);
+        }
+        Logger::Info(L"删除后局部移除 " + std::to_wstring(m_operationPaths.size()) + L" 行（未重扫目录）");
+        UpdateTitle();
+        UpdateStatusBar();
+    }
+    else
+    {
+        // 移动：源目录里已经搬走的项，从列表上摘掉
+        if (SUCCEEDED(hr) && m_lastOperation == FileOperationKind::Move)
+        {
+            std::wstring currentDirectory = m_history.Current();
+
+            for (const auto& path : m_operationPaths)
+            {
+                std::wstring parent = NavigationHistory::ParentPath(path);
+                if (_wcsicmp(parent.c_str(), currentDirectory.c_str()) == 0)
+                {
+                    m_fileListView.RemoveItemByPath(path);
+                }
+            }
+
+            UpdateTitle();
+            UpdateStatusBar();
+        }
+
+        // 复制/移动完成后重新枚举一次：
+        // 请求"把新出现的东西选中"（资源管理器粘贴完也是新文件高亮）
+        if (SUCCEEDED(hr))
+        {
+            m_selectNewAfterEnum = true;
+        }
+
+        RefreshCurrentFolder();
+    }
+    m_lastOperation = FileOperationKind::None;
+    m_lastOperationPermanent = false;
 }
 
 // ============================================================================
