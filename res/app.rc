@@ -13,6 +13,7 @@
 
 #include <windows.h>
 #include "resource.h"
+#include "version.h"   // YEXP_VER_* : the only place version numbers live
 
 // ----------------------------------------------------------------------------
 // 1. 嵌入应用程序清单
@@ -50,8 +51,8 @@ IDR_EXPLORER_PROXY RCDATA "explorer-proxy-x64.exe"
 // 2. 版本信息
 // ----------------------------------------------------------------------------
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION     1,6,0,0
- PRODUCTVERSION  1,6,0,0
+ FILEVERSION     YEXP_VER_MAJOR,YEXP_VER_MINOR,YEXP_VER_PATCH,YEXP_VER_BUILD
+ PRODUCTVERSION  YEXP_VER_MAJOR,YEXP_VER_MINOR,YEXP_VER_PATCH,YEXP_VER_BUILD
  FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
  FILEFLAGS       0
  FILEOS          VOS_NT_WINDOWS32
@@ -65,11 +66,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Personal Project"
             VALUE "FileDescription",  "File Explorer (custom implementation)"
-            VALUE "FileVersion",      "1.6.0.0"
+            VALUE "FileVersion",      YEXP_VER_STRING
             VALUE "InternalName",     "FileExplorer"
             VALUE "OriginalFilename", "FileExplorer.exe"
             VALUE "ProductName",      "File Explorer"
-            VALUE "ProductVersion",   "1.6.0.0"
+            VALUE "ProductVersion",   YEXP_VER_STRING
         END
     END
     BLOCK "VarFileInfo"
