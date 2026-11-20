@@ -16,3 +16,10 @@
 // Payload file: res\explorer-proxy-x64.exe, refreshed from
 // bin\launcher\x64\explorer.exe by tools\update-proxy-payload.ps1.
 #define IDR_EXPLORER_PROXY 201
+
+// Listary file-app plugin payload (DLL + manifest + icon), embedded so that
+// registering as the default file manager can install it into Listary without
+// shipping extra files. Refreshed by tools\build-listary-plugin.ps1.
+#define IDR_LISTARY_PLUGIN_DLL      202
+#define IDR_LISTARY_PLUGIN_MANIFEST 203
+#define IDR_LISTARY_PLUGIN_ICON     204

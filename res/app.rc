@@ -48,6 +48,18 @@ IDI_APPICON ICON "app.ico"
 IDR_EXPLORER_PROXY RCDATA "explorer-proxy-x64.exe"
 
 // ----------------------------------------------------------------------------
+// 3. Listary file-app plugin payload (DLL + manifest + icon)
+//
+//    Embedded so that "register as default file manager" can install it into
+//    the Listary plugin directory with the same UAC elevation, without a
+//    separate installer package.
+//    Refreshed by tools\build-listary-plugin.ps1.
+// ----------------------------------------------------------------------------
+IDR_LISTARY_PLUGIN_DLL      RCDATA "listary-plugin.dll"
+IDR_LISTARY_PLUGIN_MANIFEST RCDATA "listary-plugin-manifest.json"
+IDR_LISTARY_PLUGIN_ICON     RCDATA "listary-plugin-icon.png"
+
+// ----------------------------------------------------------------------------
 // 2. 版本信息
 // ----------------------------------------------------------------------------
 VS_VERSION_INFO VERSIONINFO

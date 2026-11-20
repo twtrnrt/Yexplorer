@@ -108,6 +108,14 @@ if (Test-Path $exe) {
     }
 }
 
+
+# 同步一份到 res\，供主程序内嵌（rc 资源）
+Copy-Item -LiteralPath (Join-Path $outDir 'Listary.FileAppPlugin.Yexplorer.dll') -Destination (Join-Path $root 'res\listary-plugin.dll') -Force
+Copy-Item -LiteralPath (Join-Path $outDir 'ListaryPluginManifest.json') -Destination (Join-Path $root 'res\listary-plugin-manifest.json') -Force
+if (Test-Path (Join-Path $outDir 'Icon.png')) {
+    Copy-Item -LiteralPath (Join-Path $outDir 'Icon.png') -Destination (Join-Path $root 'res\listary-plugin-icon.png') -Force
+}
+
 Write-Host "构建完成：$outDir"
 Get-ChildItem $outDir | Select-Object Name, Length
 

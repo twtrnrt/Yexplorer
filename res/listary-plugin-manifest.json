@@ -1,0 +1,16 @@
+{
+  "ManifestVersion": 1,
+
+  "Id": "Yexplorer",
+  "PluginType": "FileAppPlugin",
+  "PluginVersion": "0.1.0",
+  "DisplayName": "Yexplorer",
+  "Authors": [ "Yexplorer" ],
+  "Description": "Listary file application plugin for Yexplorer.",
+  "Homepage": "https://github.com/twtrnrt/Yexplorer",
+  "Icon": "Icon.png",
+
+  "Api": "NetFramework",
+  "ApiVersion": 1,
+  "Entry": "Listary.FileAppPlugin.Yexplorer.dll"
+}

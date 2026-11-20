@@ -22,6 +22,7 @@ bin/
 obj/
 *.exe
 *.dll
+!res/listary-plugin.dll
 *.lib
 *.exp
 *.pdb

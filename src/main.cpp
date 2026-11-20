@@ -19,6 +19,7 @@
 
 #include "core/Logger.h"
 #include "shell/ExplorerProxy.h"   // 管理员身份下部署/移除 System32 里的 explorer.exe 代理
+#include "shell/ListaryIntegration.h"   // 顺手把内嵌的 Listary 插件装进 Listary 目录
 #include "shell/ShellFolder.h"     // IsContainerFileExtension：压缩包要当目录打开
 #include "ui/MainWnd.h"
 #include "ui/WindowRelay.h"   // "这个目录已经开着了"就交给已有窗口
@@ -169,9 +170,24 @@ int WINAPI wWinMain(HINSTANCE hInstance,
 
             const int result = shell::RunProxyCommandLine(command == L"--remove-proxy");
 
+            // 注册为默认文件管理器时顺手装 Listary 插件（同一把 UAC，无额外步骤）。
+            // 恢复系统默认时不动它：插件只影响 Listary，留着不影响系统还原。
+            if (command == L"--deploy-proxy")
+            {
+                shell::InstallListaryPlugin(true);
+            }
+
             Logger::Info(L"代理操作结束，退出码=" + std::to_wstring(result));
             Logger::Shutdown();
             return result;
+        }
+
+        if (command == L"--install-listary-plugin")
+        {
+            const int installed = shell::InstallListaryPlugin(true);
+            Logger::Info(L"Listary 插件安装结果=" + std::to_wstring(installed));
+            Logger::Shutdown();
+            return installed < 0 ? 1 : 0;
         }
     }
 
