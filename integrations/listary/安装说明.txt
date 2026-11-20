@@ -1,0 +1,41 @@
+Yexplorer 的 Listary 插件 —— 安装说明
+
+一、它做什么
+  让 Listary 的「快速切换（Ctrl+G）」和「在文件管理器中打开」支持 Yexplorer：
+  在保存/打开对话框里按 Ctrl+G，会跳到 Yexplorer 当前打开的目录。
+
+二、前提
+  1. 已经安装 Listary（6.x）；
+  2. 已经解压 Yexplorer（插件不依赖它放在哪，只认进程名 FileExplorer.exe）。
+
+三、安装
+  右键 install-listary-plugin.ps1 →「使用 PowerShell 运行」，
+  会弹一次 UAC，确认即可。
+  装好后在任务栏托盘退出 Listary，再重新打开。
+
+  手动安装也可以：把本目录下
+    Listary.FileAppPlugin.Yexplorer.dll
+    ListaryPluginManifest.json
+    Icon.png
+  复制到  <Listary 安装目录>\FileAppPlugins\Yexplorer\，
+  再从 <Listary 安装目录>\FileAppPlugins\Files\ 复制
+    Listary.FileAppPlugin.dll
+    Microsoft.Extensions.Logging.Abstractions.dll
+    System.Buffers.dll
+    System.Memory.dll
+    System.Numerics.Vectors.dll
+    System.Runtime.CompilerServices.Unsafe.dll
+  到同一个目录。
+
+四、测试
+  1. 用 Yexplorer 打开一个目录；
+  2. 打开记事本/Word 的「另存为」；
+  3. 按 Ctrl+G，或先点 Yexplorer 再切回对话框。
+
+五、卸载
+  删除 <Listary 安装目录>\FileAppPlugins\Yexplorer 目录，
+  或用 install-listary-plugin.ps1 -Uninstall。
+
+六、排查
+  设置环境变量 YEXP_LISTARY_DEBUG=1 后重启 Listary，
+  插件会把调用记录写到 %TEMP%\yexp-listary-plugin.log。
