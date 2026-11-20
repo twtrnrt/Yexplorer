@@ -24,7 +24,9 @@
 
 #include <windows.h>
 
-class FlatButton
+#include "ui/CustomWindow.h"
+
+class FlatButton : public CustomWindow
 {
 public:
     enum class ArrowKind
@@ -54,12 +56,8 @@ public:
     //   地址栏里的计算机按钮 → 设成白色，和路径的白底连成一片。
     void SetBackgroundColor(COLORREF color);
 
-    HWND Handle() const { return m_hWnd; }
-
 private:
-    static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-    LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(HWND, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
     void Draw(HDC hdc);
     void DrawArrow(HDC hdc, const RECT& clientRect);
@@ -68,7 +66,6 @@ private:
     static bool EnsureClassRegistered(HINSTANCE hInstance);
 
 private:
-    HWND      m_hWnd       = nullptr;
     UINT      m_controlId  = 0;
     ArrowKind m_kind       = ArrowKind::Back;
 

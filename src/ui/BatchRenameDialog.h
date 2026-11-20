@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "ui/BatchRenameRules.h"
+#include "ui/CustomWindow.h"
 
 // ----------------------------------------------------------------------------
 // 一条待改名的项
@@ -66,7 +67,7 @@ struct RenameTemplate : RenameRules
     std::wstring name;          // 模板槽的名字（空 = 这个槽没用过）
 };
 
-class BatchRenameDialog
+class BatchRenameDialog : public CustomWindow
 {
 public:
     BatchRenameDialog() = default;
@@ -86,8 +87,7 @@ public:
                    std::vector<BatchRenameResult>& results);
 
 private:
-    static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    LRESULT HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
     static bool EnsureClassRegistered();
 
@@ -100,8 +100,6 @@ private:
     void DrawButton(HDC dc, const RECT& rect, const wchar_t* text, bool hot, bool pressed,
                     bool primary, bool enabled = true);
     void DrawTemplateSlot(HDC dc, const RECT& rect, int index);
-
-    int Scale(int value) const;
 
     // 按当前规则算一遍新名字，并刷新右侧列表与底部统计。
     // 这里只算名字（纯内存），不碰磁盘；磁盘那一部分交给 30ms 防抖定时器。
@@ -228,7 +226,6 @@ private:
     bool RegexOn() const;
 
 private:
-    HWND m_hWnd   = nullptr;
     HWND m_hOwner = nullptr;
 
     std::vector<BatchRenameItem> m_items;

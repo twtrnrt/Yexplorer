@@ -35,11 +35,12 @@
 
 #include "core/Settings.h"
 #include "shell/ShellIcon.h"
+#include "ui/CustomWindow.h"
 
 namespace ui
 {
 
-class OpenWithDialog
+class OpenWithDialog : public CustomWindow
 {
 public:
     // icons 用来取程序图标（传主窗口那份缓存即可）
@@ -66,8 +67,7 @@ public:
     bool OpenRequested() const { return m_openRequested; }
 
 private:
-    static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(HWND, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
     static bool EnsureClassRegistered();
 
@@ -99,8 +99,6 @@ private:
     void OnRemoveSelected();
     void OnButtonClick(int buttonIndex);
 
-    int  Scale(int value) const;
-
     // 按钮序号（自绘按钮，按下标分派）
     //   左边一组管"列表内容"：添加程序 / 删除 / 刷新
     //   右边一组管"这次打开"：打开 / 关闭
@@ -115,7 +113,6 @@ private:
     };
 
 private:
-    HWND m_hWnd    = nullptr;
     HWND m_hOwner  = nullptr;
 
     HWND m_hList   = nullptr;   // 程序列表

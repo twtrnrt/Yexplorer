@@ -206,21 +206,9 @@ bool AddressBar::EnsureClassRegistered(HINSTANCE hInstance)
         return true;
     }
 
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc   = &AddressBar::WindowProc;
-    wc.hInstance     = hInstance;
-    wc.hCursor       = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = kAddressBarClassName;
-
-    if (!::RegisterClassExW(&wc))
+    if (!RegisterWindowClass(kAddressBarClassName, hInstance, CS_HREDRAW | CS_VREDRAW))
     {
-        if (::GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        {
-            return false;
-        }
+        return false;
     }
 
     registered = true;
@@ -288,16 +276,6 @@ void AddressBar::SetFont(HFONT font)
 void AddressBar::SetNavigateCallback(std::function<void(const std::wstring&)> callback)
 {
     m_navigateCallback = std::move(callback);
-}
-
-int AddressBar::Scale(int value) const
-{
-    int dpi = (m_hWnd != nullptr) ? ::GetDpiForWindow(m_hWnd) : 96;
-    if (dpi <= 0)
-    {
-        dpi = 96;
-    }
-    return ::MulDiv(value, dpi, 96);
 }
 
 // ============================================================================
@@ -943,37 +921,10 @@ void AddressBar::CommitEditing()
 }
 
 // ============================================================================
-// 窗口过程
+// 消息处理
 // ============================================================================
 
-LRESULT CALLBACK AddressBar::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    AddressBar* self = nullptr;
-
-    if (msg == WM_NCCREATE)
-    {
-        CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = reinterpret_cast<AddressBar*>(cs->lpCreateParams);
-        if (self != nullptr)
-        {
-            self->m_hWnd = hWnd;
-            ::SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        }
-    }
-    else
-    {
-        self = reinterpret_cast<AddressBar*>(::GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    }
-
-    if (self != nullptr)
-    {
-        return self->HandleMessage(msg, wParam, lParam);
-    }
-
-    return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-LRESULT AddressBar::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
+LRESULT AddressBar::HandleMessage(HWND, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {

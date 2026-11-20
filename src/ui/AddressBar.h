@@ -23,7 +23,9 @@
 #include <string>
 #include <vector>
 
-class AddressBar
+#include "ui/CustomWindow.h"
+
+class AddressBar : public CustomWindow
 {
 public:
     AddressBar() = default;
@@ -67,8 +69,6 @@ public:
     // 使用主窗口的统一字体
     void SetFont(HFONT font);
 
-    HWND Handle() const { return m_hWnd; }
-
     // 当前显示/正在编辑的路径（给键盘快捷键用，比如 Alt+D 后取内容）
     std::wstring CurrentPath() const { return m_path; }
 
@@ -89,11 +89,10 @@ private:
         std::wstring fullPath;
     };
 
-    static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                              UINT_PTR idSubclass, DWORD_PTR refData);
 
-    LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(HWND, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
     void RebuildSegments();
     void LayoutSegments(HDC hdc);
@@ -108,12 +107,9 @@ private:
     void EndEditing();
     void CommitEditing();
 
-    int  Scale(int value) const;
-
     static bool EnsureClassRegistered(HINSTANCE hInstance);
 
 private:
-    HWND m_hWnd  = nullptr;
     UINT m_controlId = 0;
 
     std::wstring m_path;                          // 当前路径

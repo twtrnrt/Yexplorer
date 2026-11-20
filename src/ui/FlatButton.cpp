@@ -78,22 +78,10 @@ bool FlatButton::EnsureClassRegistered(HINSTANCE hInstance)
         return true;
     }
 
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-    wc.lpfnWndProc   = &FlatButton::WindowProc;
-    wc.hInstance     = hInstance;
-    wc.hCursor       = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;   // 自己画背景，不要让系统刷
-    wc.lpszClassName = kButtonClassName;
-
-    if (!::RegisterClassExW(&wc))
+    // CS_DBLCLKS：按钮也要能收到双击（主窗口靠它判断 Ctrl+双击文件夹）
+    if (!RegisterWindowClass(kButtonClassName, hInstance, CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS))
     {
-        // 类已经存在（多实例）也算成功
-        if (::GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        {
-            return false;
-        }
+        return false;
     }
 
     registered = true;
@@ -227,37 +215,10 @@ void FlatButton::SetBackgroundColor(COLORREF color)
 }
 
 // ============================================================================
-// 窗口过程
+// 消息处理
 // ============================================================================
 
-LRESULT CALLBACK FlatButton::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    FlatButton* self = nullptr;
-
-    if (msg == WM_NCCREATE)
-    {
-        CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = reinterpret_cast<FlatButton*>(cs->lpCreateParams);
-        if (self != nullptr)
-        {
-            self->m_hWnd = hWnd;
-            ::SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        }
-    }
-    else
-    {
-        self = reinterpret_cast<FlatButton*>(::GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    }
-
-    if (self != nullptr)
-    {
-        return self->HandleMessage(msg, wParam, lParam);
-    }
-
-    return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-LRESULT FlatButton::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
+LRESULT FlatButton::HandleMessage(HWND, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {

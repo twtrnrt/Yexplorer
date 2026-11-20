@@ -24,7 +24,9 @@
 
 #include <windows.h>
 
-class SettingsDialog
+#include "ui/CustomWindow.h"
+
+class SettingsDialog : public CustomWindow
 {
 public:
     SettingsDialog() = default;
@@ -38,8 +40,7 @@ public:
     bool ShowModal(HWND owner);
 
 private:
-    static LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    LRESULT HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
     // 窗口类只需注册一次
     static bool EnsureClassRegistered();
@@ -54,8 +55,6 @@ private:
     void DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
                     bool hot, bool pressed);
 
-    int Scale(int value) const;
-
     // 复选框状态 → 写配置
     void ApplyCheckState();
 
@@ -63,7 +62,6 @@ private:
     void ToggleDefaultManager();
 
 private:
-    HWND  m_hWnd   = nullptr;
     HWND  m_hOwner = nullptr;
     HWND  m_hCheck = nullptr;        // 系统复选框：右键菜单显示图标
     HWND  m_hCheckHidden = nullptr;  // 系统复选框：显示隐藏的文件和文件夹

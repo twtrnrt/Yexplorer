@@ -14,12 +14,16 @@
 #     期望 —— 只弹一条汇总提示（最多列 8 项），不是每项一个框；
 #     日志里每项仍有各自的失败记录。
 #
+#   用例 3（C6）：设置 / 打开方式两个自绘窗口
+#     打开再关闭这两个窗口，确认公共基类 CustomWindow 的消息分发没坏：
+#     窗口能出现、标题正常、能关掉，日志 0 个 [error]。
+#
 # 做法和 tools/e2e-batch-rename.ps1 一样：PostMessage/GetDlgItem + 读日志；
 # 弹窗用 FindWindow("#32770") 找，正文用 WM_GETTEXT 读（系统会封送字符串）。
 #
 # 用法（仓库根目录，需要先编译 Release）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\e2e-mainwindow.ps1
-#   退出码 0 = 两个用例都通过。
+#   退出码 0 = 三个用例都通过。
 #
 # 注意：
 #   · 会临时在 %TEMP%\Yexp\ 下建一个测试目录（结束后删掉）；
@@ -162,9 +166,9 @@ public static class YexpMainWindowE2E
         return all.ToString().Trim();
     }
 
-    public static void CloseMessageBox(IntPtr box)
+    public static void PostClose(IntPtr window)
     {
-        PostMessageW(box, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        PostMessageW(window, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
     }
 
     public static void PostCommand(IntPtr window, int id)
@@ -226,12 +230,12 @@ function Stop-TestProcess($process) {
     }
 }
 
-function Close-MessageBoxAndWait($process, $box) {
-    [YexpMainWindowE2E]::CloseMessageBox($box)
+function Close-WindowAndWait($process, $window, [string]$className) {
+    [YexpMainWindowE2E]::PostClose($window)
 
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($watch.ElapsedMilliseconds -lt 5000 -and
-           [YexpMainWindowE2E]::WindowExists($process.Id, '#32770')) {
+           [YexpMainWindowE2E]::WindowExists($process.Id, $className)) {
         Start-Sleep -Milliseconds 100
     }
 }
@@ -287,7 +291,7 @@ function Invoke-TempDirGoneCase {
         $boxText = [YexpMainWindowE2E]::MessageBoxText($box)
         Write-Host ('  提示正文：' + ($boxText -replace "`r?`n", ' '))
 
-        Close-MessageBoxAndWait $process $box
+        Close-WindowAndWait $process $box '#32770'
         Start-Sleep -Seconds 2
 
         $titleAfter = [YexpMainWindowE2E]::WindowTitle($main)
@@ -389,7 +393,7 @@ function Invoke-BatchOpenFailureCase {
         }
         Write-Host '  ----------------'
 
-        Close-MessageBoxAndWait $process $box
+        Close-WindowAndWait $process $box '#32770'
 
         # 旧的逐项弹框行为下，关掉一个马上又弹下一个
         $second = [YexpMainWindowE2E]::WindowExists($process.Id, '#32770')
@@ -423,6 +427,103 @@ function Invoke-BatchOpenFailureCase {
 }
 
 # ----------------------------------------------------------------------------
+# 用例 3：设置 / 打开方式两个自绘窗口（公共基类 CustomWindow）
+#
+# 这两个窗口没有被别的用例覆盖：打开它们、等一会儿（让 WM_PAINT 跑）、
+# 再关掉，能发现基类的消息分发 / 模态循环有没有问题。
+# ----------------------------------------------------------------------------
+function Invoke-DialogSmokeCase {
+    Write-Host ''
+    Write-Host '== 用例 3：设置 / 打开方式窗口（C6）=='
+
+    $dir = Join-Path $env:TEMP 'yexp-dialog-smoke'
+    if (Test-Path -LiteralPath $dir) {
+        Remove-Item -LiteralPath $dir -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dir 'sample.txt') -Value 'x' -Encoding utf8
+
+    if (Test-Path -LiteralPath $LogPath) {
+        Remove-Item -LiteralPath $LogPath -Force
+    }
+
+    $process = $null
+    $ok = $false
+
+    try {
+        $process = Start-Process -FilePath $Exe -ArgumentList ('"' + $dir + '"') -PassThru
+
+        $main = [YexpMainWindowE2E]::WaitWindow($process.Id, 'FileExplorerMainWindow', 15000)
+        if ($main -eq [IntPtr]::Zero) {
+            throw '主窗口没出来'
+        }
+
+        if (-not (Wait-LogPattern '枚举完成：路径=' 15000)) {
+            throw '等不到目录枚举完成'
+        }
+
+        # ---- 打开方式窗口：全选一个 .txt，发「添加或管理程序…」(3210) ----
+        [YexpMainWindowE2E]::PostCommand($main, 3107)
+        Start-Sleep -Milliseconds 300
+        [YexpMainWindowE2E]::PostCommand($main, 3210)
+
+        $openWith = [YexpMainWindowE2E]::WaitWindow($process.Id, 'FileExplorerOpenWithDialog', 10000)
+        if ($openWith -eq [IntPtr]::Zero) {
+            throw '「打开方式」窗口没出来'
+        }
+
+        Start-Sleep -Milliseconds 600
+        $openWithTitle = [YexpMainWindowE2E]::WindowTitle($openWith)
+        Write-Host ('  打开方式标题：' + $openWithTitle)
+        Close-WindowAndWait $process $openWith 'FileExplorerOpenWithDialog'
+
+        if ([YexpMainWindowE2E]::WindowExists($process.Id, 'FileExplorerOpenWithDialog')) {
+            throw '「打开方式」窗口关不掉'
+        }
+
+        # ---- 设置窗口：向主窗口发齿轮按钮的命令 (1013) ----
+        [YexpMainWindowE2E]::PostCommand($main, 1013)
+
+        $settingsDialog = [YexpMainWindowE2E]::WaitWindow($process.Id, 'FileExplorerSettingsDialog', 10000)
+        if ($settingsDialog -eq [IntPtr]::Zero) {
+            throw '「设置」窗口没出来'
+        }
+
+        Start-Sleep -Milliseconds 600
+        $settingsTitle = [YexpMainWindowE2E]::WindowTitle($settingsDialog)
+        Write-Host ('  设置标题：' + $settingsTitle)
+        Close-WindowAndWait $process $settingsDialog 'FileExplorerSettingsDialog'
+
+        if ([YexpMainWindowE2E]::WindowExists($process.Id, 'FileExplorerSettingsDialog')) {
+            throw '「设置」窗口关不掉'
+        }
+
+        $logText = Read-LogText
+        $errors = @($logText -split "`r?`n" | Where-Object { $_ -match '\[error\]' })
+        Write-Host ('  日志 [error]：' + $errors.Count)
+
+        $ok = ($openWithTitle -match '打开方式') -and
+              ($settingsTitle -match '设置') -and
+              ($errors.Count -eq 0)
+    }
+    finally {
+        Stop-TestProcess $process
+        if (Test-Path -LiteralPath $dir) {
+            Remove-Item -LiteralPath $dir -Recurse -Force
+        }
+    }
+
+    if ($ok) {
+        Write-Host '  通过' -ForegroundColor Green
+    } else {
+        Write-Host '  失败' -ForegroundColor Red
+    }
+
+    return $ok
+}
+
+# ----------------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------------
 $settingsPath = Join-Path $env:APPDATA 'FileExplorer\settings.json'
@@ -439,6 +540,7 @@ try {
     $results = @()
     $results += Invoke-TempDirGoneCase
     $results += Invoke-BatchOpenFailureCase
+    $results += Invoke-DialogSmokeCase
 }
 finally {
     if ($hadSettings -and (Test-Path -LiteralPath $backupPath)) {
@@ -446,12 +548,12 @@ finally {
     }
 }
 
-if ($results -contains $false -or $results.Count -ne 2) {
+if ($results -contains $false -or $results.Count -ne 3) {
     Write-Host ''
-    Write-Host '主窗口端到端测试失败' -ForegroundColor Red
+    Write-Host '主窗口 / 自绘窗口端到端测试失败' -ForegroundColor Red
     exit 1
 }
 
 Write-Host ''
-Write-Host '主窗口端到端测试全部通过' -ForegroundColor Green
+Write-Host '主窗口 / 自绘窗口端到端测试全部通过' -ForegroundColor Green
 exit 0

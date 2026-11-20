@@ -756,16 +756,6 @@ BatchRenameDialog::~BatchRenameDialog()
     }
 }
 
-int BatchRenameDialog::Scale(int value) const
-{
-    int dpi = (m_hWnd != nullptr) ? ::GetDpiForWindow(m_hWnd) : ::GetDpiForWindow(m_hOwner);
-    if (dpi <= 0)
-    {
-        dpi = 96;
-    }
-    return ::MulDiv(value, dpi, 96);
-}
-
 bool BatchRenameDialog::EnsureClassRegistered()
 {
     static bool registered = false;
@@ -774,16 +764,7 @@ bool BatchRenameDialog::EnsureClassRegistered()
         return true;
     }
 
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc   = &BatchRenameDialog::WindowProc;
-    wc.hInstance     = ::GetModuleHandleW(nullptr);
-    wc.hCursor       = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = kClassName;
-
-    if (::RegisterClassExW(&wc) == 0)
+    if (!RegisterWindowClass(kClassName, ::GetModuleHandleW(nullptr), CS_HREDRAW | CS_VREDRAW))
     {
         return false;
     }
@@ -792,35 +773,11 @@ bool BatchRenameDialog::EnsureClassRegistered()
     return true;
 }
 
-LRESULT CALLBACK BatchRenameDialog::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    BatchRenameDialog* self =
-        reinterpret_cast<BatchRenameDialog*>(::GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-
-    if (msg == WM_NCCREATE)
-    {
-        CREATESTRUCTW* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = reinterpret_cast<BatchRenameDialog*>(createStruct->lpCreateParams);
-
-        if (self != nullptr)
-        {
-            self->m_hWnd = hWnd;
-            ::SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        }
-    }
-
-    if (self == nullptr)
-    {
-        return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-    }
-
-    return self->HandleMessage(hWnd, msg, wParam, lParam);
-}
-
 bool BatchRenameDialog::ShowModal(HWND owner, const std::vector<std::wstring>& paths,
                                   std::vector<BatchRenameResult>& results)
 {
     m_hOwner = owner;
+    SetDpiSource(owner);
     m_renamedResults.clear();
 
     // ---- 把路径变成带大小/时间的条目（排序和预览都要用）----
@@ -864,31 +821,7 @@ bool BatchRenameDialog::ShowModal(HWND owner, const std::vector<std::wstring>& p
     }
 
     // ---- 模态循环（和「设置」「打开方式」同一套写法）----
-    ::EnableWindow(m_hOwner, FALSE);
-    ::ShowWindow(m_hWnd, SW_SHOW);
-    ::UpdateWindow(m_hWnd);
-
-    MSG msg;
-    while (::IsWindow(m_hWnd))
-    {
-        if (::GetMessageW(&msg, nullptr, 0, 0) <= 0)
-        {
-            if (msg.message == WM_QUIT)
-            {
-                ::PostQuitMessage(static_cast<int>(msg.wParam));
-            }
-            break;
-        }
-
-        if (!::IsDialogMessageW(m_hWnd, &msg))
-        {
-            ::TranslateMessage(&msg);
-            ::DispatchMessageW(&msg);
-        }
-    }
-
-    ::EnableWindow(m_hOwner, TRUE);
-    ::SetForegroundWindow(m_hOwner);
+    RunModalLoop(m_hOwner);
 
     // ---- 回传结果 ----
     // 只回传"真正改过名的项"（PerformBatchRename 成功时填好的 m_renamedResults）。

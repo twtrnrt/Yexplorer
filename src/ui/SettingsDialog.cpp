@@ -88,16 +88,6 @@ SettingsDialog::~SettingsDialog()
     }
 }
 
-int SettingsDialog::Scale(int value) const
-{
-    int dpi = (m_hWnd != nullptr) ? ::GetDpiForWindow(m_hWnd) : ::GetDpiForWindow(m_hOwner);
-    if (dpi <= 0)
-    {
-        dpi = 96;
-    }
-    return ::MulDiv(value, dpi, 96);
-}
-
 bool SettingsDialog::EnsureClassRegistered()
 {
     static bool registered = false;
@@ -106,16 +96,7 @@ bool SettingsDialog::EnsureClassRegistered()
         return true;
     }
 
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc   = &SettingsDialog::WindowProc;
-    wc.hInstance     = ::GetModuleHandleW(nullptr);
-    wc.hCursor       = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;   // 自己画，不要系统刷底色
-    wc.lpszClassName = kClassName;
-
-    if (::RegisterClassExW(&wc) == 0)
+    if (!RegisterWindowClass(kClassName, ::GetModuleHandleW(nullptr), CS_HREDRAW | CS_VREDRAW))
     {
         return false;
     }
@@ -124,65 +105,18 @@ bool SettingsDialog::EnsureClassRegistered()
     return true;
 }
 
-LRESULT CALLBACK SettingsDialog::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    SettingsDialog* self = reinterpret_cast<SettingsDialog*>(::GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-
-    if (msg == WM_NCCREATE)
-    {
-        CREATESTRUCTW* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = reinterpret_cast<SettingsDialog*>(createStruct->lpCreateParams);
-
-        if (self != nullptr)
-        {
-            self->m_hWnd = hWnd;
-            ::SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        }
-    }
-
-    if (self == nullptr)
-    {
-        return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-    }
-
-    return self->HandleMessage(hWnd, msg, wParam, lParam);
-}
-
 bool SettingsDialog::ShowModal(HWND owner)
 {
     m_hOwner = owner;
+    SetDpiSource(owner);
 
     if (!CreateDialogWindow())
     {
         return false;
     }
 
-    // ---- 模态循环（和「打开方式」窗口同一套写法）----
-    ::EnableWindow(m_hOwner, FALSE);
-    ::ShowWindow(m_hWnd, SW_SHOW);
-    ::UpdateWindow(m_hWnd);
-
-    MSG msg;
-    while (::IsWindow(m_hWnd))
-    {
-        if (::GetMessageW(&msg, nullptr, 0, 0) <= 0)
-        {
-            if (msg.message == WM_QUIT)
-            {
-                ::PostQuitMessage(static_cast<int>(msg.wParam));
-            }
-            break;
-        }
-
-        if (!::IsDialogMessageW(m_hWnd, &msg))
-        {
-            ::TranslateMessage(&msg);
-            ::DispatchMessageW(&msg);
-        }
-    }
-
-    ::EnableWindow(m_hOwner, TRUE);
-    ::SetForegroundWindow(m_hOwner);
+    // ---- 模态循环（禁用 owner → 显示 → 消息循环 → 恢复）----
+    RunModalLoop(m_hOwner);
 
     return true;
 }

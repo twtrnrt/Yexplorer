@@ -92,6 +92,7 @@ const wchar_t* const kDefaultLabel = L"默认程序";
 OpenWithDialog::OpenWithDialog(HWND owner, shell::IconCache* icons)
     : m_hOwner(owner), m_icons(icons)
 {
+    SetDpiSource(owner);
 }
 
 OpenWithDialog::~OpenWithDialog()
@@ -117,36 +118,14 @@ bool OpenWithDialog::EnsureClassRegistered()
         return true;
     }
 
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_DBLCLKS;
-    wc.lpfnWndProc   = &OpenWithDialog::WindowProc;
-    wc.hInstance     = ::GetModuleHandleW(nullptr);
-    wc.hCursor       = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;   // 自己画，避免闪
-    wc.lpszClassName = kClassName;
-
-    if (::RegisterClassExW(&wc) == 0)
+    // CS_DBLCLKS：列表/按钮要能收到双击
+    if (!RegisterWindowClass(kClassName, ::GetModuleHandleW(nullptr), CS_DBLCLKS))
     {
         return false;
     }
 
     registered = true;
     return true;
-}
-
-int OpenWithDialog::Scale(int value) const
-{
-    int dpi = 96;
-    if (m_hOwner != nullptr)
-    {
-        dpi = ::GetDpiForWindow(m_hOwner);
-    }
-    if (dpi <= 0)
-    {
-        dpi = 96;
-    }
-    return ::MulDiv(value, dpi, 96);
 }
 
 // ============================================================================
@@ -269,33 +248,8 @@ bool OpenWithDialog::ShowModal(const std::wstring& extension,
 
     ReloadList();
 
-    // ---- 模态循环 ----
-    ::EnableWindow(m_hOwner, FALSE);
-    ::ShowWindow(m_hWnd, SW_SHOW);
-    ::UpdateWindow(m_hWnd);
-    ::SetFocus(m_hList);
-
-    MSG msg;
-    while (::IsWindow(m_hWnd))
-    {
-        if (::GetMessageW(&msg, nullptr, 0, 0) <= 0)
-        {
-            if (msg.message == WM_QUIT)
-            {
-                ::PostQuitMessage(static_cast<int>(msg.wParam));
-            }
-            break;
-        }
-
-        if (!::IsDialogMessageW(m_hWnd, &msg))
-        {
-            ::TranslateMessage(&msg);
-            ::DispatchMessageW(&msg);
-        }
-    }
-
-    ::EnableWindow(m_hOwner, TRUE);
-    ::SetForegroundWindow(m_hOwner);
+    // ---- 模态循环（显示后把焦点给列表，键盘可以直接上下选）----
+    RunModalLoop(m_hOwner, m_hList);
 
     // ---- 写回配置（自动保存：窗口里任何改动都会即时落盘，这里再存一次兜底）----
     core::Settings::Instance().EnsureOpenWith(m_extension) = m_entry;
@@ -896,31 +850,7 @@ void OpenWithDialog::DrawFlatButton(HDC dc, int index)
 // 消息
 // ============================================================================
 
-LRESULT CALLBACK OpenWithDialog::WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    OpenWithDialog* self = nullptr;
-
-    if (msg == WM_NCCREATE)
-    {
-        CREATESTRUCTW* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<OpenWithDialog*>(create->lpCreateParams);
-        self->m_hWnd = hWnd;
-        ::SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    else
-    {
-        self = reinterpret_cast<OpenWithDialog*>(::GetWindowLongPtrW(hWnd, GWLP_USERDATA));
-    }
-
-    if (self != nullptr)
-    {
-        return self->HandleMessage(msg, wParam, lParam);
-    }
-
-    return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-LRESULT OpenWithDialog::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
+LRESULT OpenWithDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
