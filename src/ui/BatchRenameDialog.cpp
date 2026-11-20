@@ -33,6 +33,7 @@
 #include "ui/BatchRenameDialog.h"
 
 #include "core/Logger.h"
+#include "ui/FlatDraw.h"
 
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "comctl32.lib")   // TaskDialog 用它（模板未保存时那个三选提醒）
@@ -217,18 +218,6 @@ const COLORREF kDividerColor    = RGB(232, 235, 239);
 const COLORREF kRuleBandBorder  = RGB(226, 230, 236);   // 参数区三行分组框的细边线（不填色，只描边）
 const COLORREF kErrorColor      = RGB(178, 34, 34);
 const COLORREF kOkColor         = RGB(0, 120, 60);
-
-const COLORREF kButtonFace       = RGB(252, 252, 252);
-const COLORREF kButtonBorder     = RGB(173, 173, 173);
-const COLORREF kButtonHotFace    = RGB(240, 242, 245);
-const COLORREF kButtonHotBorder  = RGB(120, 150, 200);
-const COLORREF kButtonDownFace   = RGB(212, 214, 219);
-const COLORREF kButtonDownBorder = RGB(140, 140, 140);
-
-const COLORREF kPrimaryFace       = RGB(0, 103, 192);
-const COLORREF kPrimaryHotFace    = RGB(16, 120, 215);
-const COLORREF kPrimaryDownFace   = RGB(0, 84, 160);
-const COLORREF kPrimaryBorder     = RGB(0, 90, 170);
 
 const wchar_t* kTitleText = L"批量重命名";
 
@@ -3849,64 +3838,13 @@ void BatchRenameDialog::SetRunningUi(bool running)
 void BatchRenameDialog::DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
                                    bool hot, bool pressed, bool primary, bool enabled)
 {
-    COLORREF face   = kButtonFace;
-    COLORREF border = kButtonBorder;
+    ui::FlatButtonVisual visual;
+    visual.hot     = hot;
+    visual.pressed = pressed;
+    visual.primary = primary;
+    visual.enabled = enabled;
 
-    if (!enabled)
-    {
-        // 不可点：浅灰底 + 灰字，一眼能看出"现在不能点"
-        face   = RGB(246, 247, 249);
-        border = RGB(219, 221, 225);
-    }
-    else if (primary)
-    {
-        face   = pressed ? kPrimaryDownFace : (hot ? kPrimaryHotFace : kPrimaryFace);
-        border = kPrimaryBorder;
-    }
-    else if (pressed)
-    {
-        face   = kButtonDownFace;
-        border = kButtonDownBorder;
-    }
-    else if (hot)
-    {
-        face   = kButtonHotFace;
-        border = kButtonHotBorder;
-    }
-
-    // 背景与边框
-    // 注意：Rectangle() 会同时用"当前画刷"刷内部，只选画笔不选画刷的话
-    // 里面会被默认白刷盖掉（primary 的蓝底就是这么丢的），所以画笔和画刷一起选。
-    HBRUSH brush    = ::CreateSolidBrush(face);
-    HPEN   pen      = ::CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBrush = ::SelectObject(dc, brush);
-    HGDIOBJ oldPen   = ::SelectObject(dc, pen);
-
-    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-
-    ::SelectObject(dc, oldPen);
-    ::SelectObject(dc, oldBrush);
-    ::DeleteObject(pen);
-    ::DeleteObject(brush);
-
-    // 文字
-    HGDIOBJ oldFont = ::SelectObject(dc, m_font);
-
-    ::SetBkMode(dc, TRANSPARENT);
-
-    if (!enabled)
-    {
-        ::SetTextColor(dc, RGB(160, 163, 168));
-    }
-    else
-    {
-        ::SetTextColor(dc, primary ? RGB(255, 255, 255) : kTitleColor);
-    }
-
-    RECT textRect = rect;
-    ::DrawTextW(dc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    ::SelectObject(dc, oldFont);
+    ui::DrawFlatButton(dc, rect, text, m_font, visual);
 }
 
 void BatchRenameDialog::Draw(HDC dc)
@@ -4182,19 +4120,19 @@ void BatchRenameDialog::DrawTemplateSlot(HDC dc, const RECT& rect, int index)
     const bool hot      = (index == m_hotTemplate);
     const bool pressed  = (index == m_pressedTemplate);
 
-    COLORREF face   = kButtonFace;
-    COLORREF border = kButtonBorder;
+    COLORREF face   = ui::kButtonFace;
+    COLORREF border = ui::kButtonBorder;
     COLORREF text   = kTitleColor;
 
     if (selected)
     {
         face   = RGB(232, 240, 252);    // 浅蓝底
-        border = kPrimaryFace;          // 主色描边
+        border = ui::kPrimaryFace;      // 主色描边
     }
     else if (hot)
     {
-        face   = kButtonHotFace;
-        border = kButtonHotBorder;
+        face   = ui::kButtonHotFace;
+        border = ui::kButtonHotBorder;
     }
     else if (!IsDefaultRules(m_templates[index]))
     {
@@ -4204,21 +4142,10 @@ void BatchRenameDialog::DrawTemplateSlot(HDC dc, const RECT& rect, int index)
 
     if (pressed)
     {
-        face = kButtonDownFace;
+        face = ui::kButtonDownFace;
     }
 
-    HBRUSH brush = ::CreateSolidBrush(face);
-    HPEN   pen   = ::CreatePen(PS_SOLID, 1, border);
-
-    HGDIOBJ oldBrush = ::SelectObject(dc, brush);
-    HGDIOBJ oldPen   = ::SelectObject(dc, pen);
-
-    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-
-    ::SelectObject(dc, oldPen);
-    ::SelectObject(dc, oldBrush);
-    ::DeleteObject(pen);
-    ::DeleteObject(brush);
+    ui::DrawBorderedRect(dc, rect, face, border);
 
     // 就地改名时按钮被输入框盖住，文字不用画
     if (m_hRenameEdit != nullptr && index == m_renameIndex)
@@ -4226,18 +4153,8 @@ void BatchRenameDialog::DrawTemplateSlot(HDC dc, const RECT& rect, int index)
         return;
     }
 
-    HGDIOBJ oldFont = ::SelectObject(dc, m_font);
-    ::SetBkMode(dc, TRANSPARENT);
-    ::SetTextColor(dc, selected ? kPrimaryFace : text);
-
-    RECT textRect = rect;
-    textRect.left  += Scale(6);
-    textRect.right -= Scale(6);
-
-    ::DrawTextW(dc, m_templates[index].name.c_str(), -1, &textRect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    ::SelectObject(dc, oldFont);
+    ui::DrawCenteredText(dc, rect, m_templates[index].name.c_str(), m_font,
+                         selected ? ui::kPrimaryFace : text, Scale(6), true);
 }
 
 // ============================================================================

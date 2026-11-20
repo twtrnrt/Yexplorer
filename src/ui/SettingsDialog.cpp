@@ -19,6 +19,7 @@
 #include "core/Settings.h"
 #include "shell/DefaultManager.h"
 #include "shell/ExplorerProxy.h"   // System32 里 explorer.exe 代理的部署/移除
+#include "ui/FlatDraw.h"
 
 namespace
 {
@@ -42,15 +43,6 @@ const COLORREF kTitleColor      = RGB(32, 32, 32);
 const COLORREF kHintColor       = RGB(96, 103, 111);
 const COLORREF kErrorColor      = RGB(178, 34, 34);
 const COLORREF kDividerColor    = RGB(232, 235, 239);   // 分隔线（和窗口边框同一个灰）
-
-// 关闭按钮（和「打开方式」窗口里那套标准按钮外观一致）
-const COLORREF kButtonFace       = RGB(252, 252, 252);
-const COLORREF kButtonBorder     = RGB(173, 173, 173);
-const COLORREF kButtonHotFace    = RGB(240, 242, 245);
-const COLORREF kButtonHotBorder  = RGB(120, 150, 200);
-const COLORREF kButtonDownFace   = RGB(212, 214, 219);
-const COLORREF kButtonDownBorder = RGB(140, 140, 140);
-const COLORREF kButtonText       = RGB(32, 32, 32);
 
 const wchar_t* kTitleText = L"设置";
 
@@ -449,45 +441,11 @@ void SettingsDialog::Draw(HDC dc)
 void SettingsDialog::DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
                                 bool hot, bool pressed)
 {
-    COLORREF face   = kButtonFace;
-    COLORREF border = kButtonBorder;
+    ui::FlatButtonVisual visual;
+    visual.hot     = hot;
+    visual.pressed = pressed;
 
-    if (pressed)
-    {
-        face   = kButtonDownFace;
-        border = kButtonDownBorder;
-    }
-    else if (hot)
-    {
-        face   = kButtonHotFace;
-        border = kButtonHotBorder;
-    }
-
-    // 底
-    HBRUSH faceBrush = ::CreateSolidBrush(face);
-    ::FillRect(dc, &rect, faceBrush);
-    ::DeleteObject(faceBrush);
-
-    // 1 像素边
-    HPEN   borderPen = ::CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldPen   = ::SelectObject(dc, borderPen);
-    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
-
-    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-
-    ::SelectObject(dc, oldBrush);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(borderPen);
-
-    // 文字
-    HGDIOBJ oldFont = ::SelectObject(dc, m_font);
-    ::SetTextColor(dc, kButtonText);
-    ::SetBkMode(dc, TRANSPARENT);
-
-    RECT textRect = rect;
-    ::DrawTextW(dc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    ::SelectObject(dc, oldFont);
+    ui::DrawFlatButton(dc, rect, text, m_font, visual);
 }
 
 LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)

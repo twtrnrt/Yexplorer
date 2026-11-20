@@ -18,6 +18,7 @@
 #include "core/Settings.h"
 #include "shell/ShellFolder.h"     // IsContainerExtension：压缩包要有「本程序」这一项
 #include "shell/ShellOpenWith.h"
+#include "ui/FlatDraw.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -806,44 +807,16 @@ void OpenWithDialog::DrawFlatButton(HDC dc, int index)
         return;
     }
 
-    // 照参考窗口的样子画成"系统标准按钮"：白底 + 1px 灰边 + 悬停/按下变色。
-    // （项目里其它地方是纯扁平按钮，但这是个弹窗，跟参考窗口一致更顺眼）
-    COLORREF fill   = RGB(252, 252, 252);
-    COLORREF border = RGB(173, 173, 173);
-
-    if (m_pressedButton == index)
-    {
-        fill   = RGB(212, 214, 219);
-        border = RGB(140, 140, 140);
-    }
-    else if (m_hotButton == index)
-    {
-        fill   = RGB(240, 242, 245);
-        border = RGB(120, 150, 200);
-    }
-
-    HBRUSH brush = ::CreateSolidBrush(fill);
-    ::FillRect(dc, &rect, brush);
-    ::DeleteObject(brush);
-
-    // 边框：矩形向下取整到 rect 内侧（gdi 的 right/bottom 是开区间）
-    HPEN pen = ::CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldPen = ::SelectObject(dc, pen);
-    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
-    ::Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-    ::SelectObject(dc, oldBrush);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(pen);
-
     const wchar_t* texts[ButtonCount] = {
         L"添加程序…", L"删除", L"刷新", L"打开", L"关闭",
     };
 
-    ::SetTextColor(dc, RGB(32, 32, 32));
+    ui::FlatButtonVisual visual;
+    visual.hot      = (m_hotButton == index);
+    visual.pressed  = (m_pressedButton == index);
+    visual.ellipsis = true;   // 按钮宽度是按文字算的，窗口很窄时右侧省略
 
-    RECT textRect = rect;
-    ::DrawTextW(dc, texts[index], -1, &textRect,
-                DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    ui::DrawFlatButton(dc, rect, texts[index], m_font, visual);
 }
 
 // ============================================================================
