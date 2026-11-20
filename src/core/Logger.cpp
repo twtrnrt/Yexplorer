@@ -77,8 +77,25 @@ void Init(const std::wstring& logFilePath)
     std::lock_guard<std::mutex> lock(g_mutex);
     try
     {
+        // 日志改成“追加”，不再每次启动清空：
+        //   - 短命的转发进程（点一次文件夹就退出）以前会把正在运行的窗口日志整份冲掉，
+        //     排查“这次点击到底传了什么参数”时什么都看不到；
+        //   - 长期运行会变大，所以打开前做一次上限检查，超过 4 MB 就清掉重来。
+        constexpr ULONGLONG kMaxLogBytes = 4ull * 1024 * 1024;
+
+        WIN32_FILE_ATTRIBUTE_DATA attribute = {};
+        if (::GetFileAttributesExW(logFilePath.c_str(), GetFileExInfoStandard, &attribute))
+        {
+            const ULONGLONG size =
+                (static_cast<ULONGLONG>(attribute.nFileSizeHigh) << 32) | attribute.nFileSizeLow;
+            if (size > kMaxLogBytes)
+            {
+                ::DeleteFileW(logFilePath.c_str());
+            }
+        }
+
         // basic_file_sink_mt：多线程安全的文件输出
-        g_logger = spdlog::basic_logger_mt("file_explorer", ToUtf8(logFilePath), /*truncate=*/true);
+        g_logger = spdlog::basic_logger_mt("file_explorer", ToUtf8(logFilePath), /*truncate=*/false);
         // 只记信息级及以上；格式：时间 [级别] 内容
         g_logger->set_level(spdlog::level::info);
         g_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
