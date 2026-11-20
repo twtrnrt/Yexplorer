@@ -18,7 +18,8 @@
 #include "core/Logger.h"
 #include "core/Settings.h"
 #include "shell/DefaultManager.h"
-#include "shell/ExplorerProxy.h"   // System32 里 explorer.exe 代理的部署/移除
+#include "shell/ExplorerProxy.h"      // System32 里 explorer.exe 代理的部署/移除
+#include "shell/ListaryIntegration.h" // Listary 插件
 #include "ui/FlatDraw.h"
 
 namespace
@@ -28,45 +29,53 @@ const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 // 客户区大小（不含标题栏与边框）
 const int kClientWidth  = 420;
-const int kClientHeight = 474;
+const int kClientHeight = 540;
 const int kPadding      = 24;
 
 // 控件 ID
-const int kControlIdMenuIcons  = 4001;
-const int kControlIdClose      = 4002;
-const int kControlIdShowHidden = 4003;   // 显示隐藏的文件和文件夹
-const int kControlIdShowSystem = 4004;   // 显示受保护的操作系统文件
-const int kControlIdShellWindow = 4005;  // 实验性：注册成 Shell 窗口
+const int kControlIdMenuIcons     = 4001;
+const int kControlIdClose         = 4002;
+const int kControlIdShowHidden    = 4003;   // 显示隐藏的文件和文件夹
+const int kControlIdShowSystem    = 4004;   // 显示受保护的操作系统文件
+const int kControlIdShellWindow   = 4005;   // 允许其它程序定位到我打开的文件
+const int kControlIdDefaultManager= 4006;   // 注册为默认文件管理器
+const int kControlIdProxy         = 4007;   // 部署 System32 代理
+const int kControlIdListary       = 4008;   // 安装 Listary 插件
 
 // 颜色
 const COLORREF kBackgroundColor = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
 const COLORREF kHintColor       = RGB(96, 103, 111);
 const COLORREF kErrorColor      = RGB(178, 34, 34);
-const COLORREF kDividerColor    = RGB(232, 235, 239);   // 分隔线（和窗口边框同一个灰）
+const COLORREF kDividerColor    = RGB(232, 235, 239);
 
 const wchar_t* kTitleText = L"设置";
 
 const wchar_t* kHintText1 = L"勾选后，「打开方式」和「新建」菜单里的每一项前面会显示小图标。";
 const wchar_t* kHintText2 = L"不勾选就是纯文字菜单（默认，弹出更快）。改动立即保存。";
 
-// 显示隐藏 / 系统文件那一段的说明
+// 查看选项
 const wchar_t* kHiddenCheckText = L"显示隐藏的文件和文件夹";
 const wchar_t* kSystemCheckText = L"显示受保护的操作系统文件";
 const wchar_t* kHiddenHintText  = L"隐藏项用浅灰文字标示。改动立即生效，不用重启程序。";
+
+// 注册与集成：4 个独立开关
+const wchar_t* kSectionTitle = L"注册与集成（可分别勾选，互不影响）";
+
+const wchar_t* kDefaultCheckText = L"注册为默认文件管理器（文件夹和磁盘）";
+const wchar_t* kDefaultHintText  = L"只改当前用户注册表；双击文件夹/磁盘用本程序打开。";
+
+const wchar_t* kProxyCheckText = L"部署 explorer.exe 代理（需要管理员）";
+const wchar_t* kProxyHintText  = L"替换 System32 里的 explorer.exe；微信等硬编码调用才会走本程序。";
+
+const wchar_t* kListaryCheckText = L"安装 Listary 快速切换插件（需要管理员）";
+const wchar_t* kListaryHintText  = L"写入 Listary 插件目录并重启 Listary。";
+const wchar_t* kNoListaryHintText = L"未检测到 Listary，此项不可用。";
+
 const wchar_t* kShellWindowCheckText = L"允许其它程序定位到我打开的文件（实验性）";
+const wchar_t* kShellWindowHintText  = L"注册为 Shell 窗口；Listary 等工具能读到当前目录。";
 
-// 「默认文件管理器」按钮的两套文案
-const wchar_t* kActionTextRegister  = L"注册为默认文件管理器";
-const wchar_t* kActionTextRestore   = L"恢复系统默认文件管理器";
-
-const wchar_t* kDefaultHintOff1 = L"注册后，双击文件夹和磁盘都会用本程序打开。";
-const wchar_t* kDefaultHintOff2 = L"Win+E 和任务栏不受影响，仍打开系统资源管理器。";
-
-const wchar_t* kDefaultHintOn1  = L"本程序现在是打开文件夹的默认程序。";
-const wchar_t* kDefaultHintOn2  = L"点上面的按钮可以恢复成系统资源管理器。";
-
-const wchar_t* kActionFailedText = L"操作失败，详情见日志文件。";
+const wchar_t* kActionFailedText = L"上次操作失败，详情见日志文件。";
 
 } // 匿名命名空间
 
@@ -185,70 +194,46 @@ bool SettingsDialog::CreateDialogWindow()
         return false;
     }
 
-    // ---- 复选框（系统原生的，白底上看着自然）----
-    m_hCheck = ::CreateWindowExW(0,
-                                 L"BUTTON",
-                                 L"右键菜单显示图标",
-                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                 0, 0, 0, 0,
-                                 m_hWnd,
-                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdMenuIcons)),
-                                 ::GetModuleHandleW(nullptr),
-                                 nullptr);
+    auto createCheck = [this](const wchar_t* text, int id) -> HWND
+    {
+        HWND check = ::CreateWindowExW(0, L"BUTTON", text,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                       0, 0, 0, 0, m_hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                       ::GetModuleHandleW(nullptr), nullptr);
+        if (check != nullptr)
+        {
+            ::SendMessageW(check, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        }
+        return check;
+    };
+
+    // ---- 查看选项 ----
+    m_hCheck       = createCheck(L"右键菜单显示图标", kControlIdMenuIcons);
+    m_hCheckHidden = createCheck(kHiddenCheckText, kControlIdShowHidden);
+    m_hCheckSystem = createCheck(kSystemCheckText, kControlIdShowSystem);
 
     if (m_hCheck != nullptr)
     {
-        ::SendMessageW(m_hCheck, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-
-        // 按当前配置勾上/不勾
-        ::SendMessageW(m_hCheck, BM_SETCHECK,
-                       core::Settings::Instance().MenuIcons() ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetChecked(m_hCheck, core::Settings::Instance().MenuIcons());
     }
-
-    // ---- 显示隐藏文件 / 显示系统文件两个复选框 ----
-    // 和资源管理器「查看」选项卡里那两个选项一一对应，默认都不勾。
-    m_hCheckHidden = ::CreateWindowExW(0, L"BUTTON", kHiddenCheckText,
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                       0, 0, 0, 0, m_hWnd,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdShowHidden)),
-                                       ::GetModuleHandleW(nullptr), nullptr);
-
-    m_hCheckSystem = ::CreateWindowExW(0, L"BUTTON", kSystemCheckText,
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                       0, 0, 0, 0, m_hWnd,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdShowSystem)),
-                                       ::GetModuleHandleW(nullptr), nullptr);
-
     if (m_hCheckHidden != nullptr)
     {
-        ::SendMessageW(m_hCheckHidden, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-        ::SendMessageW(m_hCheckHidden, BM_SETCHECK,
-                       core::Settings::Instance().ShowHiddenFiles() ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetChecked(m_hCheckHidden, core::Settings::Instance().ShowHiddenFiles());
     }
-
     if (m_hCheckSystem != nullptr)
     {
-        ::SendMessageW(m_hCheckSystem, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-        ::SendMessageW(m_hCheckSystem, BM_SETCHECK,
-                       core::Settings::Instance().ShowSystemFiles() ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetChecked(m_hCheckSystem, core::Settings::Instance().ShowSystemFiles());
     }
 
-    // ---- 实验性：注册成 Shell 窗口（默认不勾）----
-    m_hCheckShellWindow = ::CreateWindowExW(0, L"BUTTON", kShellWindowCheckText,
-                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                            0, 0, 0, 0, m_hWnd,
-                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdShellWindow)),
-                                            ::GetModuleHandleW(nullptr), nullptr);
+    // ---- 注册与集成：4 个独立开关 ----
+    m_hCheckDefaultManager = createCheck(kDefaultCheckText, kControlIdDefaultManager);
+    m_hCheckProxy          = createCheck(kProxyCheckText, kControlIdProxy);
+    m_hCheckListary        = createCheck(kListaryCheckText, kControlIdListary);
+    m_hCheckShellWindow    = createCheck(kShellWindowCheckText, kControlIdShellWindow);
 
-    if (m_hCheckShellWindow != nullptr)
-    {
-        ::SendMessageW(m_hCheckShellWindow, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
-        ::SendMessageW(m_hCheckShellWindow, BM_SETCHECK,
-                       core::Settings::Instance().ShellWindowIntegration() ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-
-    // 「默认文件管理器」按钮的初始文案：问一次注册表，看当前 exe 是不是已经注册过
-    m_defaultManagerRegistered = shell::IsDefaultFileManager();
+    // 按实际状态勾选；Listary 没装就禁用
+    RefreshRegistrationChecks();
 
     Layout();
     return true;
@@ -260,49 +245,27 @@ void SettingsDialog::Layout()
     ::GetClientRect(m_hWnd, &clientRect);
 
     const int padding = Scale(kPadding);
+    const int width   = clientRect.right - padding * 2;
+    const int height  = Scale(24);
 
-    // 三个复选框：第一块（图标开关）在标题下面，第二块（隐藏/系统）在它说明文字下面
-    if (m_hCheck != nullptr)
+    auto place = [&](HWND control, int y)
     {
-        ::MoveWindow(m_hCheck,
-                     padding, padding + Scale(44),
-                     clientRect.right - padding * 2, Scale(24),
-                     TRUE);
-    }
+        if (control != nullptr)
+        {
+            ::MoveWindow(control, padding, padding + Scale(y), width, height, TRUE);
+        }
+    };
 
-    if (m_hCheckHidden != nullptr)
-    {
-        ::MoveWindow(m_hCheckHidden,
-                     padding, padding + Scale(132),
-                     clientRect.right - padding * 2, Scale(24),
-                     TRUE);
-    }
+    // 查看选项
+    place(m_hCheck,       44);
+    place(m_hCheckHidden, 132);
+    place(m_hCheckSystem, 160);
 
-    if (m_hCheckSystem != nullptr)
-    {
-        ::MoveWindow(m_hCheckSystem,
-                     padding, padding + Scale(160),
-                     clientRect.right - padding * 2, Scale(24),
-                     TRUE);
-    }
-
-    if (m_hCheckShellWindow != nullptr)
-    {
-        ::MoveWindow(m_hCheckShellWindow,
-                     padding, padding + Scale(236),
-                     clientRect.right - padding * 2, Scale(24),
-                     TRUE);
-    }
-
-    // 「注册 / 恢复默认文件管理器」按钮：分隔线下面，靠左
-    // （宽度按最长那句文案「恢复系统默认文件管理器」留的）
-    const int actionWidth  = Scale(236);
-    const int actionHeight = Scale(32);
-
-    m_actionRect.left   = padding;
-    m_actionRect.top    = padding + Scale(280);
-    m_actionRect.right  = m_actionRect.left + actionWidth;
-    m_actionRect.bottom = m_actionRect.top + actionHeight;
+    // 注册与集成
+    place(m_hCheckDefaultManager, 262);
+    place(m_hCheckProxy,          310);
+    place(m_hCheckListary,        358);
+    place(m_hCheckShellWindow,    406);
 
     // 关闭按钮：右下角
     const int buttonWidth  = Scale(88);
@@ -314,6 +277,19 @@ void SettingsDialog::Layout()
     m_closeRect.bottom = m_closeRect.top + buttonHeight;
 }
 
+bool SettingsDialog::IsChecked(HWND check)
+{
+    return check != nullptr && ::SendMessageW(check, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+void SettingsDialog::SetChecked(HWND check, bool checked)
+{
+    if (check != nullptr)
+    {
+        ::SendMessageW(check, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+}
+
 void SettingsDialog::ApplyCheckState()
 {
     if (m_hCheck == nullptr)
@@ -321,21 +297,10 @@ void SettingsDialog::ApplyCheckState()
         return;
     }
 
-    const bool showIcons =
-        (::SendMessageW(m_hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    // 显示隐藏 / 显示系统文件（两个独立开关，缺一个控件就沿用配置里的旧值）
-    const bool showHidden =
-        (m_hCheckHidden != nullptr) &&
-        (::SendMessageW(m_hCheckHidden, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    const bool showSystem =
-        (m_hCheckSystem != nullptr) &&
-        (::SendMessageW(m_hCheckSystem, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    const bool shellWindow =
-        (m_hCheckShellWindow != nullptr) &&
-        (::SendMessageW(m_hCheckShellWindow, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const bool showIcons  = IsChecked(m_hCheck);
+    const bool showHidden = IsChecked(m_hCheckHidden);
+    const bool showSystem = IsChecked(m_hCheckSystem);
+    const bool shellWindow = IsChecked(m_hCheckShellWindow);
 
     core::Settings& settings = core::Settings::Instance();
     settings.SetMenuIcons(showIcons);
@@ -352,35 +317,58 @@ void SettingsDialog::ApplyCheckState()
                  L"，Shell 窗口集成 = " + (shellWindow ? L"开" : L"关"));
 }
 
-void SettingsDialog::ToggleDefaultManager()
+void SettingsDialog::OnRegistrationToggle(int controlId)
 {
-    // 已注册 → 恢复系统默认；未注册 → 注册成本程序
-    const bool wasRegistered = m_defaultManagerRegistered;
-    const bool ok = wasRegistered
-                  ? shell::RestoreSystemFileManager()
-                  : shell::RegisterDefaultFileManager();
+    const bool want = IsChecked(
+        controlId == kControlIdDefaultManager ? m_hCheckDefaultManager :
+        controlId == kControlIdProxy          ? m_hCheckProxy :
+        controlId == kControlIdListary        ? m_hCheckListary :
+                                                m_hCheckShellWindow);
 
-    // 注册表改完之后，顺手处理 System32 里的 explorer.exe 代理：
-    //   注册 → 放进去（不存在就部署、是我们放的旧版就替换、是别人的就只提醒）
-    //   恢复 → 如果是我们放的，删掉（别人的不动）
-    // 这两步需要管理员权限，会弹一次 UAC；用户拒绝也不影响注册表的结果。
-    if (ok)
+    bool ok = true;
+
+    switch (controlId)
     {
-        if (wasRegistered)
+    case kControlIdDefaultManager:
+        ok = want ? shell::RegisterDefaultFileManager()
+                  : shell::RestoreSystemFileManager();
+        break;
+
+    case kControlIdProxy:
+        ok = want ? shell::DeployProxyIfNeeded(m_hWnd)
+                  : shell::RemoveProxyIfOurs(m_hWnd);
+        break;
+
+    case kControlIdListary:
+        if (shell::IsListaryInstalled())
         {
-            shell::RemoveProxyIfOurs(m_hWnd);
+            ok = want ? shell::InstallListaryPluginElevated(m_hWnd)
+                      : shell::RemoveListaryPluginElevated(m_hWnd);
         }
-        else
-        {
-            shell::DeployProxyIfNeeded(m_hWnd);
-        }
+        break;
+
+    default:
+        break;
     }
 
-    // 以注册表的实际状态为准（注册/恢复失败时按钮文案不该跟着变）
-    m_defaultManagerRegistered = shell::IsDefaultFileManager();
-    m_lastActionFailed         = !ok;
+    m_lastActionFailed = !ok;
 
+    // 以实际状态为准：UAC 取消、写注册表失败、Listary 没装，都回退勾选
+    RefreshRegistrationChecks();
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
+}
+
+void SettingsDialog::RefreshRegistrationChecks()
+{
+    SetChecked(m_hCheckDefaultManager, shell::IsDefaultFileManager());
+    SetChecked(m_hCheckProxy, shell::QuerySystemProxyState() == shell::ProxyState::OursUpToDate);
+    SetChecked(m_hCheckListary, shell::IsListaryPluginInstalled());
+    SetChecked(m_hCheckShellWindow, core::Settings::Instance().ShellWindowIntegration());
+
+    if (m_hCheckListary != nullptr)
+    {
+        ::EnableWindow(m_hCheckListary, shell::IsListaryInstalled() ? TRUE : FALSE);
+    }
 }
 
 void SettingsDialog::Draw(HDC dc)
@@ -415,14 +403,14 @@ void SettingsDialog::Draw(HDC dc)
     hintRect.top += Scale(20);
     ::DrawTextW(dc, kHintText2, -1, &hintRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-    // ---- 显示隐藏 / 系统文件那一段的说明（两个复选框下面一行小字）----
+    // ---- 显示隐藏 / 系统文件那一段的说明 ----
     RECT hiddenHintRect = { Scale(kPadding), Scale(kPadding) + Scale(188),
                             clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(214) };
 
     ::DrawTextW(dc, kHiddenHintText, -1, &hiddenHintRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
-    // ---- 分隔线（1px，浅灰）----
-    const int dividerY = Scale(kPadding) + Scale(264);
+    // ---- 分隔线 ----
+    const int dividerY = Scale(kPadding) + Scale(216);
 
     HPEN dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
     HGDIOBJ oldPen  = ::SelectObject(dc, dividerPen);
@@ -433,32 +421,34 @@ void SettingsDialog::Draw(HDC dc)
     ::SelectObject(dc, oldPen);
     ::DeleteObject(dividerPen);
 
-    // ---- 「注册 / 恢复默认文件管理器」按钮 ----
-    DrawButton(dc, m_actionRect,
-               m_defaultManagerRegistered ? kActionTextRestore : kActionTextRegister,
-               m_hotAction, m_pressedAction);
+    // ---- 「注册与集成」小标题 ----
+    RECT sectionRect = { Scale(kPadding), Scale(kPadding) + Scale(228),
+                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(252) };
 
-    // ---- 按钮下面这句状态说明 ----
-    ::SelectObject(dc, m_font);
+    ::SetTextColor(dc, kTitleColor);
+    ::DrawTextW(dc, kSectionTitle, -1, &sectionRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
+
+    // ---- 每个复选框下面的说明 ----
     ::SetTextColor(dc, kHintColor);
 
-    RECT stateRect = { Scale(kPadding), m_actionRect.bottom + Scale(10),
-                       clientRect.right - Scale(kPadding),
-                       m_closeRect.top - Scale(4) };
+    auto drawHint = [&](int y, const wchar_t* text)
+    {
+        RECT rect = { Scale(kPadding), Scale(kPadding) + Scale(y),
+                      clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(y + 20) };
+        ::DrawTextW(dc, text, -1, &rect, DT_LEFT | DT_TOP | DT_SINGLELINE);
+    };
 
-    std::wstring stateText = m_defaultManagerRegistered
-                           ? (std::wstring(kDefaultHintOn1) + L"\n" + kDefaultHintOn2)
-                           : (std::wstring(kDefaultHintOff1) + L"\n" + kDefaultHintOff2);
+    drawHint(284, kDefaultHintText);
+    drawHint(332, kProxyHintText);
+    drawHint(380, shell::IsListaryInstalled() ? kListaryHintText : kNoListaryHintText);
+    drawHint(428, kShellWindowHintText);
 
-    ::DrawTextW(dc, stateText.c_str(), -1, &stateRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
-
-    // 上一次点按钮失败：单独一行红字，别让用户以为已经生效了
+    // ---- 上一次操作失败 ----
     if (m_lastActionFailed)
     {
+        RECT errorRect = { Scale(kPadding), Scale(kPadding) + Scale(456),
+                           clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(478) };
         ::SetTextColor(dc, kErrorColor);
-
-        RECT errorRect = stateRect;
-        errorRect.top = stateRect.top + Scale(40);
         ::DrawTextW(dc, kActionFailedText, -1, &errorRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
     }
 
@@ -487,18 +477,31 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         const int controlId = LOWORD(wParam);
         const int notifyCode = HIWORD(wParam);
 
-        // 三个复选框任何一个是用户点的，都按当前三个控件的状态整体存一次
-        if ((controlId == kControlIdMenuIcons ||
-             controlId == kControlIdShowHidden ||
-             controlId == kControlIdShowSystem ||
-             controlId == kControlIdShellWindow) &&
-            notifyCode == BN_CLICKED)
+        if (notifyCode != BN_CLICKED)
+        {
+            break;
+        }
+
+        // 查看类：菜单图标 / 隐藏 / 系统 / Shell 窗口
+        if (controlId == kControlIdMenuIcons ||
+            controlId == kControlIdShowHidden ||
+            controlId == kControlIdShowSystem ||
+            controlId == kControlIdShellWindow)
         {
             ApplyCheckState();
             return 0;
         }
 
-        if (controlId == kControlIdClose && notifyCode == BN_CLICKED)
+        // 注册类：4 个独立动作
+        if (controlId == kControlIdDefaultManager ||
+            controlId == kControlIdProxy ||
+            controlId == kControlIdListary)
+        {
+            OnRegistrationToggle(controlId);
+            return 0;
+        }
+
+        if (controlId == kControlIdClose)
         {
             ::DestroyWindow(hWnd);
             return 0;
@@ -516,26 +519,17 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     }
 
     case WM_ERASEBKGND:
-        // 背景在 WM_PAINT 里整块刷，这里不刷，避免闪一下
         return 1;
 
     case WM_MOUSEMOVE:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        const bool hotClose  = (::PtInRect(&m_closeRect, pt) != FALSE);
-        const bool hotAction = (::PtInRect(&m_actionRect, pt) != FALSE);
-
+        const bool hotClose = (::PtInRect(&m_closeRect, pt) != FALSE);
         if (hotClose != m_hotClose)
         {
             m_hotClose = hotClose;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
-        }
-
-        if (hotAction != m_hotAction)
-        {
-            m_hotAction = hotAction;
-            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -559,26 +553,11 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedClose = false;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
         }
-
-        if (m_hotAction || m_pressedAction)
-        {
-            m_hotAction     = false;
-            m_pressedAction = false;
-            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
-        }
         return 0;
 
     case WM_LBUTTONDOWN:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-
-        if (::PtInRect(&m_actionRect, pt))
-        {
-            m_pressedAction = true;
-            ::SetCapture(hWnd);
-            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
-            return 0;
-        }
 
         if (::PtInRect(&m_closeRect, pt))
         {
@@ -593,29 +572,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        // 「注册 / 恢复默认文件管理器」
-        if (m_pressedAction)
-        {
-            m_pressedAction = false;
-            ::ReleaseCapture();
-
-            const bool inside = (::PtInRect(&m_actionRect, pt) != FALSE);
-            ::InvalidateRect(hWnd, &m_actionRect, FALSE);
-
-            if (inside)
-            {
-                ToggleDefaultManager();
-            }
-            return 0;
-        }
-
         if (m_pressedClose)
         {
             m_pressedClose = false;
             ::ReleaseCapture();
 
             const bool inside = (::PtInRect(&m_closeRect, pt) != FALSE);
-
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
 
             if (inside)
@@ -641,6 +603,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_DESTROY:
         m_hWnd   = nullptr;
         m_hCheck = nullptr;
+        m_hCheckHidden = nullptr;
+        m_hCheckSystem = nullptr;
+        m_hCheckDefaultManager = nullptr;
+        m_hCheckProxy = nullptr;
+        m_hCheckListary = nullptr;
+        m_hCheckShellWindow = nullptr;
         return 0;
 
     default:

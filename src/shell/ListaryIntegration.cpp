@@ -8,9 +8,11 @@
 #include "ListaryIntegration.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <tlhelp32.h>
 
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 #include "core/Logger.h"
@@ -287,6 +289,113 @@ int InstallListaryPlugin(bool restartListary)
     }
 
     return 1;
+}
+
+bool IsListaryPluginInstalled()
+{
+    const std::wstring listary = FindListaryDirectory();
+    if (listary.empty())
+    {
+        return false;
+    }
+
+    const std::wstring directory = JoinPath(JoinPath(listary, L"FileAppPlugins"), L"Yexplorer");
+    return ::GetFileAttributesW(JoinPath(directory, L"Listary.FileAppPlugin.Yexplorer.dll").c_str()) != INVALID_FILE_ATTRIBUTES &&
+           ::GetFileAttributesW(JoinPath(directory, L"ListaryPluginManifest.json").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool RemoveListaryPlugin(bool restartListary)
+{
+    const std::wstring listary = FindListaryDirectory();
+    if (listary.empty())
+    {
+        return true;
+    }
+
+    const std::wstring directory = JoinPath(JoinPath(listary, L"FileAppPlugins"), L"Yexplorer");
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    if (error)
+    {
+        Logger::Warn(L"Listary 插件删除失败：" + directory + L"，错误=" +
+                     std::to_wstring(error.value()));
+        return false;
+    }
+
+    Logger::Info(L"Listary 插件已删除：" + directory);
+
+    if (restartListary)
+    {
+        RestartListary(listary);
+    }
+    return true;
+}
+
+namespace
+{
+
+// 以管理员身份重新启动本程序，执行一个内部命令并等它结束。
+bool RunSelfElevated(const wchar_t* parameters, HWND owner)
+{
+    wchar_t exe[MAX_PATH * 2] = {};
+    const DWORD length = ::GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+    if (length == 0 || length >= ARRAYSIZE(exe))
+    {
+        return false;
+    }
+
+    SHELLEXECUTEINFOW info = {};
+    info.cbSize       = sizeof(info);
+    info.fMask        = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb       = L"runas";
+    info.lpFile       = exe;
+    info.lpParameters = parameters;
+    info.nShow        = SW_SHOWNORMAL;
+
+    if (!::ShellExecuteExW(&info))
+    {
+        const DWORD error = ::GetLastError();
+        if (error == ERROR_CANCELLED)
+        {
+            ::MessageBoxW(owner, L"需要管理员权限，操作已取消。", L"文件管理器",
+                          MB_ICONINFORMATION | MB_OK);
+        }
+        else
+        {
+            ::MessageBoxW(owner,
+                          (L"启动管理员进程失败（错误码 " + std::to_wstring(error) + L"）。").c_str(),
+                          L"文件管理器", MB_ICONWARNING | MB_OK);
+        }
+        return false;
+    }
+
+    ::WaitForSingleObject(info.hProcess, 5 * 60 * 1000);
+
+    DWORD exitCode = 2;
+    ::GetExitCodeProcess(info.hProcess, &exitCode);
+    ::CloseHandle(info.hProcess);
+
+    if (exitCode != 0)
+    {
+        ::MessageBoxW(owner,
+                      (L"操作失败（退出码 " + std::to_wstring(exitCode) + L"），详情见日志文件。").c_str(),
+                      L"文件管理器", MB_ICONWARNING | MB_OK);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool InstallListaryPluginElevated(HWND owner)
+{
+    return RunSelfElevated(L"--install-listary-plugin", owner);
+}
+
+bool RemoveListaryPluginElevated(HWND owner)
+{
+    return RunSelfElevated(L"--remove-listary-plugin", owner);
 }
 
 } // namespace shell

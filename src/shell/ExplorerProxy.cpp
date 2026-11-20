@@ -488,8 +488,8 @@ bool DeployProxyIfNeeded(HWND owner)
                       L"C:\\Windows\\System32 里已经存在一个 explorer.exe，但它不是本程序放的\n"
                       L"（可能是系统文件、别的软件，或者你以前手工放进去的、没有版本标记的旧版本）。\n\n"
                       L"为了安全，这次没有替换它。\n\n"
-                      L"如果你确认它是旧版本、想换成现在的：请先手动删除它，再点一次\n"
-                      L"「注册为默认文件管理器」。",
+                      L"如果你确认它是旧版本、想换成现在的：请先手动删除它，再勾选一次\n"
+                      L"「部署 explorer.exe 代理」复选框。",
                       L"未替换 explorer.exe 代理", MB_ICONWARNING | MB_OK);
         return false;
     }
@@ -537,6 +537,9 @@ int RunProxyCommandLine(bool remove)
             return 1;
         }
 
+        // 这台机器/这类系统上 System32 原本就没有 explorer.exe（真 Explorer 在
+        // C:\Windows\explorer.exe，按名字调用会走 PATH 找到它）。所以"取消代理"
+        // 要恢复成"没有这个文件"，而不是复制一份过去。
         if (!::DeleteFileW(target.c_str()))
         {
             ::MessageBoxW(nullptr,
@@ -546,10 +549,7 @@ int RunProxyCommandLine(bool remove)
             return 2;
         }
 
-        ::MessageBoxW(nullptr,
-                      L"已删除 C:\\Windows\\System32\\explorer.exe 代理。\n"
-                      L"微信等程序的「打开所在文件夹」会恢复成系统资源管理器。",
-                      L"文件管理器", MB_ICONINFORMATION | MB_OK);
+        Logger::Info(L"代理已移除，System32 恢复为原来的状态");
         return 0;
     }
 
@@ -618,10 +618,6 @@ int RunProxyCommandLine(bool remove)
 
     Logger::Info(L"代理已部署到 System32：" + target +
                  (fromTemp ? L"（来源：主程序内嵌资源）" : L"（来源：" + sourcePath + L"）"));
-    ::MessageBoxW(nullptr,
-                  L"已部署 explorer.exe 代理到 C:\\Windows\\System32。\n\n"
-                  L"之后微信、批量打印软件等点「打开所在文件夹」就会用本程序打开。",
-                  L"文件管理器", MB_ICONINFORMATION | MB_OK);
     return 0;
 }
 

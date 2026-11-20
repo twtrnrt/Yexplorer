@@ -189,6 +189,14 @@ int WINAPI wWinMain(HINSTANCE hInstance,
             Logger::Shutdown();
             return installed < 0 ? 1 : 0;
         }
+
+        if (command == L"--remove-listary-plugin")
+        {
+            const bool removed = shell::RemoveListaryPlugin(true);
+            Logger::Info(L"Listary 插件删除结果=" + std::wstring(removed ? L"成功" : L"失败"));
+            Logger::Shutdown();
+            return removed ? 0 : 1;
+        }
     }
 
     // ---------- 步骤 2：控件与 DPI ----------
