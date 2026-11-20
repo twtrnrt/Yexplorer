@@ -124,15 +124,18 @@ bool ForceForegroundWindow(HWND window)
     {
         ::ShowWindow(window, SW_RESTORE);
     }
+    ::ShowWindow(window, SW_SHOW);
 
-    if (::GetForegroundWindow() == window)
-    {
-        ::BringWindowToTop(window);
-        return true;
-    }
+    // 先把窗口临时置顶、马上取消置顶：这一步只改 Z 序，不需要前台权限，
+    // 能保证窗口一定盖在其它普通窗口上面（SetForegroundWindow 失败时也能看见）。
+    ::SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    ::SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
 
-    // 临时挂到前台线程上：不这样做的话，后台进程的 SetForegroundWindow
-    // 会被前台锁直接忽略（表现为任务栏闪一下、窗口不出现）。
+    ::BringWindowToTop(window);
+
+    // 再抢焦点：临时挂到当前前台线程上，否则会被前台锁静默忽略。
     const HWND foreground = ::GetForegroundWindow();
     const DWORD foregroundThread =
         (foreground != nullptr) ? ::GetWindowThreadProcessId(foreground, nullptr) : 0;
@@ -146,13 +149,18 @@ bool ForceForegroundWindow(HWND window)
 
     ::SetForegroundWindow(window);
     ::BringWindowToTop(window);
+    ::SetActiveWindow(window);
 
     if (attached)
     {
         ::AttachThreadInput(currentThread, foregroundThread, FALSE);
     }
 
-    return ::GetForegroundWindow() == window;
+    Logger::Info(std::wstring(L"置前检查：visible=") + (::IsWindowVisible(window) ? L"是" : L"否") +
+                 L"，iconic=" + (::IsIconic(window) ? L"是" : L"否") +
+                 L"，foreground=" + ((::GetForegroundWindow() == window) ? L"是" : L"否"));
+
+    return ::IsWindowVisible(window) != FALSE;
 }
 
 bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
