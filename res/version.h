@@ -33,7 +33,7 @@
 
 #define YEXP_VER_MAJOR 1
 #define YEXP_VER_MINOR 6
-#define YEXP_VER_PATCH 3
+#define YEXP_VER_PATCH 4
 #define YEXP_VER_BUILD 0
 
-#define YEXP_VER_STRING "1.6.3.0"
+#define YEXP_VER_STRING "1.6.4.0"
