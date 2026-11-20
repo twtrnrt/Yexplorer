@@ -306,6 +306,32 @@ std::wstring TempDirectoryFor(const std::wstring& containerRoot)
            std::to_wstring(containerBytes) + L"_" + timeText + L"_" + containerName;
 }
 
+// 这个路径是不是落在本程序的临时根目录（%TEMP%\Yexp\）下面。
+// 主窗口用它判断"枚举失败"是不是因为临时解压缓存被清理了。
+bool IsUnderTempRoot(const std::wstring& path)
+{
+    const std::wstring root = TempRoot();
+    if (root.empty() || path.empty())
+    {
+        return false;
+    }
+
+    // 统一成"末尾带反斜杠"再比：C:\...\Yexp 和 C:\...\Yexp\ 都算在根下
+    std::wstring normalized = path;
+    if (normalized.back() != L'\\' && normalized.back() != L'/')
+    {
+        normalized += L'\\';
+    }
+
+    // 长路径前缀（\\?\）去掉再比（枚举出来的路径一般没有，这里兜个底）
+    if (normalized.size() >= 4 && normalized.compare(0, 4, L"\\\\?\\") == 0)
+    {
+        normalized.erase(0, 4);
+    }
+
+    return ::_wcsnicmp(normalized.c_str(), root.c_str(), root.size()) == 0;
+}
+
 // 后台清理入口：扫描临时根，删超期缓存目录和半成品残留；删不掉（占用/无权限）就跳过
 void CleanupTempCache()
 {

@@ -73,6 +73,10 @@ using ContainerMetaProvider =
 // %TEMP%\Yexp\ ...（不存在的目录由解压过程自己创建）
 std::wstring TempDirectoryFor(const std::wstring& containerRoot);
 
+// 这个路径是不是落在本程序的临时根目录（%TEMP%\Yexp\）下面。
+// 主窗口用它判断"枚举失败"是不是因为临时解压缓存被清理了，好退回上级目录。
+bool IsUnderTempRoot(const std::wstring& path);
+
 // 启动时在后台线程跑一次：删过期的缓存目录和上次崩溃留下的半成品
 void CleanupTempCache();
 

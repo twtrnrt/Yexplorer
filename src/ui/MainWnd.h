@@ -345,6 +345,10 @@ private:
     // ---- 打开选中项 ----
     void OpenSelection();
 
+    // 多选打开时，把失败的项先攒着，最后合并成一条提示。
+    // 以前每项失败弹一个框：一次选 8 项就是 8 个框，几秒钟才点完。
+    void ShowBatchOpenFailures();
+
     // ----------------------------------------------------------------
     // 「打开方式」（自研账本，不受系统关联影响）
     //
@@ -445,6 +449,10 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     // 后台枚举完成
     void OnEnumerationDone();
 
+    // 枚举失败且路径在 %TEMP%\Yexp\ 下：临时解压缓存被清理了，
+    // 退回最近一个还存在的上级目录，并且只提示一次。
+    void HandleTempRootEnumerationFailure(const std::wstring& missingPath);
+
     // 后台文件操作完成（复制 / 移动 / 删除）：收进度、记撤销、局部更新列表
     void OnOperationDone(HRESULT hr);
 
@@ -510,6 +518,20 @@ private:
     // 启动时命令行传进来的是文件 → 这里是那个文件的完整路径。
     // 首次枚举完成后选中它并滚到可见，选完立刻清空（以后刷新不再抢选中）。
     std::wstring m_startupSelectFile;
+
+    // ---- 多选打开 / 临时目录失败 ----
+    // 多选打开时先收集失败的项，最后合并成一条提示（不再逐项弹框）
+    struct OpenFailure
+    {
+        std::wstring name;      // 显示名
+        std::wstring reason;    // 失败原因（解压模块给的原文）
+    };
+
+    std::vector<OpenFailure> m_batchOpenFailures;
+    bool                     m_collectBatchOpenFailures = false;
+
+    // 临时解压目录被清理的提示，每个窗口只弹一次
+    bool                     m_tempRootGoneNotified = false;
 
     // ---- 视图模式 ----
     // 当前列表视图（大图标/小图标/列表/详细信息）。

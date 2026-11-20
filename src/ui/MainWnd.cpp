@@ -3707,6 +3707,12 @@ void MainWindow::OpenSelection()
     // 状态栏会依次显示各自的解压进度（以前这里只处理了第一个，所以"多选只开一个"）。
     //
     // 文件夹跳过：多选打开多个文件夹只会让当前窗口来回跳，没有意义。
+    //
+    // 失败先攒着，整个循环结束只弹一条汇总：压缩包在打开前被删/读不了时，
+    // 每项都会解压失败，逐项弹框会连弹好几个。
+    m_batchOpenFailures.clear();
+    m_collectBatchOpenFailures = true;
+
     int index = ListView_GetNextItem(listView, -1, LVNI_SELECTED);
 
     while (index >= 0)
@@ -3729,6 +3735,50 @@ void MainWindow::OpenSelection()
 
         index = ListView_GetNextItem(listView, index, LVNI_SELECTED);
     }
+
+    m_collectBatchOpenFailures = false;
+    ShowBatchOpenFailures();
+}
+
+// ----------------------------------------------------------------------------
+// 多选打开失败：合并成一条提示
+// 逐项弹框实测很折磨人（8 项失败 = 8 个框，8 秒才点得完），
+// 这里最多列 8 条，剩下的折成"等共 N 项"。
+// ----------------------------------------------------------------------------
+void MainWindow::ShowBatchOpenFailures()
+{
+    if (m_batchOpenFailures.empty())
+    {
+        return;
+    }
+
+    const size_t total = m_batchOpenFailures.size();
+    const size_t shown = (total < 8) ? total : 8;
+
+    std::wstring message = L"有 " + std::to_wstring(total) + L" 项打开失败：\r\n\r\n";
+
+    for (size_t i = 0; i < shown; ++i)
+    {
+        message += L"· " + m_batchOpenFailures[i].name;
+
+        if (!m_batchOpenFailures[i].reason.empty())
+        {
+            message += L" —— " + m_batchOpenFailures[i].reason;
+        }
+
+        message += L"\r\n";
+    }
+
+    if (total > shown)
+    {
+        message += L"……等共 " + std::to_wstring(total) + L" 项\r\n";
+    }
+
+    Logger::Warn(L"多选打开：共 " + std::to_wstring(total) + L" 项失败，已合并提示（不再逐项弹框）");
+
+    ::MessageBoxW(m_hWnd, message.c_str(), L"打开文件", MB_OK | MB_ICONWARNING);
+
+    m_batchOpenFailures.clear();
 }
 
 // ============================================================================
@@ -5584,6 +5634,56 @@ void MainWindow::RefreshThisPcGrouping()
     Logger::Info(L"此电脑分组按新列数重排：一行 " + std::to_wstring(perRow) + L" 格");
 }
 
+// ----------------------------------------------------------------------------
+// 枚举失败：路径在 %TEMP%\Yexp\ 下 = 临时解压缓存被清理了
+//
+// 场景：双击压缩包里的文件，程序把它解到 %TEMP%\Yexp\...\ 再打开；
+// 之后磁盘清理/本程序的缓存清理把目录删了，窗口却还停在那条已经不存在的路径上。
+// 不处理的话，每次刷新/目录监视都会再枚举一次、再失败一次，日志里刷一串
+// 0x80070002（用户看到的就是日志暴涨、窗口卡在一个空目录）。
+//
+// 处理：退回最近一个还存在的上级目录；提示只弹一次（同一个窗口里）。
+// ----------------------------------------------------------------------------
+void MainWindow::HandleTempRootEnumerationFailure(const std::wstring& missingPath)
+{
+    std::wstring fallback = NavigationHistory::ParentPath(missingPath);
+
+    // 清理是整棵删的，上级目录也可能已经没了，继续往上找
+    while (!fallback.empty())
+    {
+        const DWORD attributes = ::GetFileAttributesW(fallback.c_str());
+
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            break;
+        }
+
+        fallback = NavigationHistory::ParentPath(fallback);
+    }
+
+    if (fallback.empty())
+    {
+        fallback = L"C:\\";
+    }
+
+    Logger::Warn(L"临时解压目录已经不存在，返回上级目录：" + fallback +
+                 L"（原路径：" + missingPath + L"）");
+
+    if (!m_tempRootGoneNotified)
+    {
+        m_tempRootGoneNotified = true;
+
+        ::MessageBoxW(m_hWnd,
+                      L"这个临时解压目录已经被清理了，窗口已经返回上级目录。\r\n\r\n"
+                      L"压缩包里的文件会先解到临时目录再打开；系统磁盘清理可能会把"
+                      L"临时目录删掉，重新打开那个文件就会再解一次。",
+                      L"临时目录已清理", MB_OK | MB_ICONINFORMATION);
+    }
+
+    NavigateToPath(fallback);
+}
+
 void MainWindow::OnEnumerationDone()
 {
     std::shared_ptr<shell::EnumerateResult> result;
@@ -5761,6 +5861,13 @@ void MainWindow::OnEnumerationDone()
     if (FAILED(static_cast<HRESULT>(result->hr)))
     {
         Logger::Error(L"枚举失败，路径=" + result->path);
+
+        // 临时解压目录被清理：退回还在的上级目录，别停在一个已经没了的地方反复枚举
+        if (shell::IsUnderTempRoot(result->path))
+        {
+            HandleTempRootEnumerationFailure(result->path);
+        }
+
         return;
     }
 
@@ -5933,8 +6040,16 @@ void MainWindow::OnItemActivated(size_t index)
                 Logger::Error(L"提取容器内部文件失败：" + entry.fullPath +
                               L"，原因：" + (lastError.empty() ? L"未知" : lastError));
 
-                std::wstring message = L"打开失败：\r\n" + entry.name + L" —— " +
-                                       (lastError.empty() ? L"解压没有成功" : lastError);
+                const std::wstring reason = lastError.empty() ? L"解压没有成功" : lastError;
+
+                // 多选打开时先攒着，由 ShowBatchOpenFailures 统一提示
+                if (m_collectBatchOpenFailures)
+                {
+                    m_batchOpenFailures.push_back(OpenFailure{ entry.name, reason });
+                    return;
+                }
+
+                std::wstring message = L"打开失败：\r\n" + entry.name + L" —— " + reason;
                 ::MessageBoxW(m_hWnd, message.c_str(), L"打开文件", MB_OK | MB_ICONWARNING);
                 return;
             }
