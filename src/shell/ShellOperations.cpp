@@ -18,6 +18,8 @@
 
 #include <vector>
 
+#include "core/PathUtil.h"   // MakeLongPath：包内解压路径可能超过 260
+
 namespace
 {
 
@@ -719,7 +721,10 @@ bool EnsureDirectoryExists(const std::wstring& directory)
         return false;
     }
 
-    DWORD attributes = ::GetFileAttributesW(directory.c_str());
+    // 解压落点可能超 260，这里也套一层 \\?\（上级递归同样走这里，所以整条链都覆盖）
+    const std::wstring longDirectory = pathutil::MakeLongPath(directory);
+
+    DWORD attributes = ::GetFileAttributesW(longDirectory.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES)
     {
         return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -732,9 +737,9 @@ bool EnsureDirectoryExists(const std::wstring& directory)
         return false;
     }
 
-    ::CreateDirectoryW(directory.c_str(), nullptr);
+    ::CreateDirectoryW(longDirectory.c_str(), nullptr);
 
-    attributes = ::GetFileAttributesW(directory.c_str());
+    attributes = ::GetFileAttributesW(longDirectory.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
@@ -813,9 +818,13 @@ HRESULT GetAutomationFolder(IDispatch* shellApp, const std::wstring& path,
 // 用途：解压中途取消时清掉写了一半的东西；启动时清理超期临时缓存也复用它。
 // 半截文件不可能被判成缓存（大小/时间都对不上），留着只是垃圾：
 // 名字里带进程号的，进程一重启就再也没人认得出它。
+//
+// 临时根 + 包内深层路径很容易超 260，所有 Win32 调用都套 MakeLongPath，
+// 否则深层缓存删不掉（会留下永远清不掉的残留）。
 void RemoveTreeBestEffort(const std::wstring& path)
 {
-    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    const std::wstring longPath   = pathutil::MakeLongPath(path);
+    const DWORD        attributes = ::GetFileAttributesW(longPath.c_str());
 
     if (attributes == INVALID_FILE_ATTRIBUTES)
     {
@@ -824,15 +833,15 @@ void RemoveTreeBestEffort(const std::wstring& path)
 
     if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
     {
-        ::SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);   // 只读文件要先放开
-        ::DeleteFileW(path.c_str());
+        ::SetFileAttributesW(longPath.c_str(), FILE_ATTRIBUTE_NORMAL);   // 只读文件要先放开
+        ::DeleteFileW(longPath.c_str());
         return;
     }
 
-    ::SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+    ::SetFileAttributesW(longPath.c_str(), FILE_ATTRIBUTE_NORMAL);
 
     WIN32_FIND_DATAW findData = {};
-    HANDLE find = ::FindFirstFileW((path + L"\\*").c_str(), &findData);
+    HANDLE find = ::FindFirstFileW(pathutil::MakeLongPath(path + L"\\*").c_str(), &findData);
 
     if (find != INVALID_HANDLE_VALUE)
     {
@@ -853,7 +862,7 @@ void RemoveTreeBestEffort(const std::wstring& path)
         ::FindClose(find);
     }
 
-    ::RemoveDirectoryW(path.c_str());
+    ::RemoveDirectoryW(longPath.c_str());
 }
 
 
@@ -937,13 +946,13 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
         return false;
     }
 
-    ::CreateDirectoryW(stagingDirectory.c_str(), nullptr);   // 已存在时返回失败，忽略即可
+    ::CreateDirectoryW(pathutil::MakeLongPath(stagingDirectory).c_str(), nullptr);   // 已存在时返回失败，忽略即可
 
     wil::com_ptr<IDispatch> destinationFolder;
     if (FAILED(GetAutomationFolder(shellApp.get(), stagingDirectory, destinationFolder)))
     {
         error = L"打不开临时目录：" + stagingDirectory;
-        ::RemoveDirectoryW(stagingDirectory.c_str());
+        ::RemoveDirectoryW(pathutil::MakeLongPath(stagingDirectory).c_str());
         return false;
     }
 
@@ -1009,12 +1018,17 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     //
     // 注意：复制从这里开始就已经打断不了了，所以循环里不再响应取消 ——
     // 让它跑完，结果当缓存留着（见上面 2b 的说明）。
+    // 下面所有路径操作都套 MakeLongPath：缓存目录 + 包内深层路径可能超 260。
+    const std::wstring longLandingPath = pathutil::MakeLongPath(landingPath);
+    const std::wstring longOutputPath  = pathutil::MakeLongPath(outputPath);
+    const std::wstring longStagingDir  = pathutil::MakeLongPath(stagingDirectory);
+
     bool landed = false;
     bool isDirectory = false;
 
     for (int attempt = 0; attempt < 100; ++attempt)
     {
-        const DWORD attributes = ::GetFileAttributesW(landingPath.c_str());
+        const DWORD attributes = ::GetFileAttributesW(longLandingPath.c_str());
 
         // 文件、目录都算落地：
         // 拖出压缩包里的整个文件夹时，CopyHere 复制出来的是一项目录，
@@ -1045,7 +1059,7 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     {
         for (int attempt = 0; attempt < 100; ++attempt)
         {
-            HANDLE probe = ::CreateFileW(landingPath.c_str(), GENERIC_READ, 0, nullptr,
+            HANDLE probe = ::CreateFileW(longLandingPath.c_str(), GENERIC_READ, 0, nullptr,
                                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
             if (probe != INVALID_HANDLE_VALUE)
@@ -1062,9 +1076,9 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     //
     // 走到这里复制已经完成，不再受取消影响：产物发布到正式名当缓存（见 2b）。
     // landingPath 一定在专属子目录里，和 outputPath 不会是同一个路径，所以总是移动。
-    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (::GetFileAttributesW(longOutputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
-        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::SetFileAttributesW(longOutputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
 
         if (isDirectory)
         {
@@ -1076,19 +1090,19 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
         }
         else
         {
-            ::DeleteFileW(outputPath.c_str());
+            ::DeleteFileW(longOutputPath.c_str());
         }
     }
 
     // 清完还在 → 多半是里面的文件正被别的程序打开（用户双击过缓存的 pdf）
-    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (::GetFileAttributesW(longOutputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
         error = L"缓存目录被占用，删不掉旧的同名文件夹：" + outputPath;
         RemoveTreeBestEffort(stagingDirectory);
         return false;
     }
 
-    if (!::MoveFileExW(landingPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+    if (!::MoveFileExW(longLandingPath.c_str(), longOutputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
     {
         error = L"解出来的内容挪不到目标位置：" + outputPath;
         RemoveTreeBestEffort(stagingDirectory);
@@ -1099,16 +1113,17 @@ bool ExtractViaShellAutomation(const std::wstring& containerRoot,
     // 目录不加只读标记（加了会让里面新建文件变麻烦）。
     if (!isDirectory)
     {
-        DWORD outputAttributes = ::GetFileAttributesW(outputPath.c_str());
+        DWORD outputAttributes = ::GetFileAttributesW(longOutputPath.c_str());
 
         if (outputAttributes != INVALID_FILE_ATTRIBUTES)
         {
-            ::SetFileAttributesW(outputPath.c_str(), outputAttributes | FILE_ATTRIBUTE_READONLY);
+            ::SetFileAttributesW(longOutputPath.c_str(),
+                                 outputAttributes | FILE_ATTRIBUTE_READONLY);
         }
     }
 
     // 专属子目录这时候应该是空的，删掉；里面还有别的东西就留着（不误删）
-    ::RemoveDirectoryW(stagingDirectory.c_str());
+    ::RemoveDirectoryW(longStagingDir.c_str());
 
     return true;
 }
@@ -1226,14 +1241,16 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
     // 正式名上永远是"某一次完整的结果"。
     //
     // 附带的好处：正式名一出现就代表内容完整，调用方那套"文件在就算有缓存"的判断可以直接信。
-    const std::wstring partialPath = partialFilePath;
+    const std::wstring partialPath     = partialFilePath;
+    const std::wstring longPartialPath = pathutil::MakeLongPath(partialPath);
+    const std::wstring longOutputPath  = pathutil::MakeLongPath(outputPath);
 
     // 上次中断留下的同名临时文件先清掉（这类文件不值钱，直接删）
-    ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-    ::DeleteFileW(partialPath.c_str());
+    ::SetFileAttributesW(longPartialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+    ::DeleteFileW(longPartialPath.c_str());
 
     // 临时名不设只读：写坏了要能直接删掉
-    HANDLE file = ::CreateFileW(partialPath.c_str(),
+    HANDLE file = ::CreateFileW(longPartialPath.c_str(),
                                 GENERIC_WRITE,
                                 0,
                                 nullptr,
@@ -1291,8 +1308,8 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
     if (!succeeded)
     {
         // 写坏了：临时名直接删掉，正式名从头到尾都没出现过
-        ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::DeleteFileW(partialPath.c_str());
+        ::SetFileAttributesW(longPartialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(longPartialPath.c_str());
         return L"";
     }
 
@@ -1301,32 +1318,33 @@ std::wstring ExtractContainerEntry(const std::wstring& virtualPath,
     // 发布之前最后确认一次取消：这一步过了，正式文件就出现了
     if (cancel != nullptr && cancel->load())
     {
-        ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::DeleteFileW(partialPath.c_str());
+        ::SetFileAttributesW(longPartialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(longPartialPath.c_str());
         error = L"已取消";
         return L"";
     }
 
     // 目标位置可能已经有旧文件（只读的），MoveFileEx 要替换只读文件会失败，先放开属性。
-    if (::GetFileAttributesW(outputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (::GetFileAttributesW(longOutputPath.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
-        ::SetFileAttributesW(outputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::SetFileAttributesW(longOutputPath.c_str(), FILE_ATTRIBUTE_NORMAL);
     }
 
-    if (!::MoveFileExW(partialPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+    if (!::MoveFileExW(longPartialPath.c_str(), longOutputPath.c_str(), MOVEFILE_REPLACE_EXISTING))
     {
         error = L"解出来的内容挪不到目标位置：" + outputPath;
-        ::SetFileAttributesW(partialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-        ::DeleteFileW(partialPath.c_str());
+        ::SetFileAttributesW(longPartialPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        ::DeleteFileW(longPartialPath.c_str());
         return L"";
     }
 
     // ---- 设只读：跟系统解出来的临时文件一致，防止把包里的原件改坏 ----
-    const DWORD publishedAttributes = ::GetFileAttributesW(outputPath.c_str());
+    const DWORD publishedAttributes = ::GetFileAttributesW(longOutputPath.c_str());
 
     if (publishedAttributes != INVALID_FILE_ATTRIBUTES)
     {
-        ::SetFileAttributesW(outputPath.c_str(), publishedAttributes | FILE_ATTRIBUTE_READONLY);
+        ::SetFileAttributesW(longOutputPath.c_str(),
+                             publishedAttributes | FILE_ATTRIBUTE_READONLY);
     }
 
     return outputPath;

@@ -11,6 +11,7 @@
 #include "ShellFolder.h"
 #include "ShellOperations.h"
 #include "core/Logger.h"
+#include "core/PathUtil.h"   // MakeLongPath：包内路径很长时临时路径会超 260
 
 #include <objbase.h>
 
@@ -31,6 +32,17 @@ const wchar_t* kTempRootName = L"Yexp";
 // 解压缓存保留天数：超过这个天数的缓存目录，启动时由后台线程清掉（写死常量，不做设置项）
 const int kCacheRetentionDays = 7;
 
+// 半成品名字里的标记（两边必须是同一个，生成时也只在这里取）
+//   zip 通道：正式名.yexp-partial.<进程号>.<序号>
+//   rar/7z 通道：_yexp_landing_<进程号>.<序号>
+const wchar_t* kPartialToken     = L".yexp-partial.";
+const wchar_t* kLandingDirPrefix = L"_yexp_landing_";
+
+// 启动清理的扫描预算：缓存很大（几万个文件）时不许它把启动后台拖长。
+// 用"条目数 + 毫秒"双上限，任意一个到顶就收工，剩下的下次启动再接着清。
+const size_t   kMaxCleanupScanEntries      = 30000;
+const ULONGLONG kMaxCleanupScanMilliseconds = 500;
+
 // 取临时根目录全路径（末尾带反斜杠）；取不到 TEMP 环境返回空串
 std::wstring TempRoot()
 {
@@ -42,28 +54,126 @@ std::wstring TempRoot()
     return std::wstring(tempPath) + kTempRootName + L"\\";
 }
 
-// zip 通道半成品文件名：正式名.yexp-partial.<进程号>.<序号>
+// 超长路径转成 \\?\ 写法（临时根 + 包内深层路径很容易顶到 260）。
+// 短路径原样返回，所以调用处直接套用即可。
+std::wstring LongPath(const std::wstring& path)
+{
+    return pathutil::MakeLongPath(path);
+}
+
+// zip 通道半成品：名字里带 ".yexp-partial." 就算（标记在名字中间，不在开头）
 bool IsPartialFileName(const std::wstring& name)
 {
-    const std::wstring prefix = L".yexp-partial.";
+    return name.find(kPartialToken) != std::wstring::npos;
+}
+
+// rar/7z 通道临时落地目录：名字以 "_yexp_landing_" 开头
+bool IsLandingDirName(const std::wstring& name)
+{
+    const std::wstring prefix = kLandingDirPrefix;
     return name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0;
 }
 
-// rar/7z 通道临时落地目录名：_yexp_landing_<进程号>.<序号>
-bool IsLandingDirName(const std::wstring& name)
+// 从名字里读出"属主进程号"，读不出给 0
+//
+// 为什么要读：另一个实例可能正在解压（半成品/落地目录里正写着东西），
+// 这时候不能删它的中间物，否则那次解压会失败。属主进程还活着就跳过。
+size_t OwnerProcessIdFromName(const std::wstring& name)
 {
-    const std::wstring prefix = L"_yexp_landing_";
-    return name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0;
+    std::wstring digits;
+
+    // 半成品：... .yexp-partial.<pid>.<seq>
+    if (IsPartialFileName(name))
+    {
+        const size_t tokenStart = name.find(kPartialToken);
+
+        for (size_t i = tokenStart + std::wstring(kPartialToken).size(); i < name.size(); ++i)
+        {
+            if (name[i] >= L'0' && name[i] <= L'9')
+            {
+                digits += name[i];
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+    // 落地目录：_yexp_landing_<pid>.<seq>
+    else if (IsLandingDirName(name))
+    {
+        const size_t prefixLength = std::wstring(kLandingDirPrefix).size();
+
+        for (size_t i = prefixLength; i < name.size(); ++i)
+        {
+            if (name[i] >= L'0' && name[i] <= L'9')
+            {
+                digits += name[i];
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    if (digits.empty() || digits.size() > 10)
+    {
+        return 0;
+    }
+
+    return static_cast<size_t>(std::wcstoul(digits.c_str(), nullptr, 10));
 }
+
+// 属主进程还活着吗？
+//
+// 规则：拿不准就当成"活着"（跳过多删），宁可少删一次也不要误删别人正在写的东西。
+//   · PID 读不出来（0）→ 活着；
+//   · OpenProcess 成功 → 活着；
+//   · 失败原因是 ERROR_INVALID_PARAMETER（这个 PID 根本不存在）→ 死了，可以删；
+//   · 其它失败（无权限等）→ 按活着处理。
+bool IsOwnerProcessAlive(size_t processId)
+{
+    if (processId == 0)
+    {
+        return true;
+    }
+
+    HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                   static_cast<DWORD>(processId));
+
+    if (process != nullptr)
+    {
+        ::CloseHandle(process);
+        return true;
+    }
+
+    return ::GetLastError() != ERROR_INVALID_PARAMETER;
+}
+
+// 清理扫描的预算（条目数 / 毫秒），跨整棵遍历共享
+struct CleanupBudget
+{
+    size_t    scannedEntries = 0;   // 已经看过多少条
+    bool      exhausted      = false;   // 是否撞到上限
+    ULONGLONG startTick      = 0;   // 开始时间（GetTickCount64）
+};
 
 // 递归遍历临时目录，清掉超期缓存和半成品残留
 //   root   ：当前遍历到的目录全路径
 //   depth  ：相对临时根的层级（0 = 直接挂在根下的缓存目录）
 //   cutoff ：超期时间点（当前时间 − 保留天数），早于它的缓存目录删掉
-void CleanupTempTree(const std::wstring& root, int depth, const FILETIME& cutoff)
+//   budget ：扫描预算，超了就整体收手（剩下的留到下次启动）
+void CleanupTempTree(const std::wstring& root, int depth, const FILETIME& cutoff,
+                     CleanupBudget& budget)
 {
+    if (budget.exhausted)
+    {
+        return;
+    }
+
     WIN32_FIND_DATAW findData = {};
-    HANDLE find = ::FindFirstFileW((root + L"\\*").c_str(), &findData);
+    HANDLE find = ::FindFirstFileW(LongPath(root + L"\\*").c_str(), &findData);
     if (find == INVALID_HANDLE_VALUE)
     {
         return;
@@ -71,6 +181,14 @@ void CleanupTempTree(const std::wstring& root, int depth, const FILETIME& cutoff
 
     do
     {
+        if (++budget.scannedEntries > kMaxCleanupScanEntries ||
+            ::GetTickCount64() - budget.startTick > kMaxCleanupScanMilliseconds)
+        {
+            // 这一棵树没看完也没关系：没删的下次再删
+            budget.exhausted = true;
+            break;
+        }
+
         const std::wstring name = findData.cFileName;
         if (name == L"." || name == L"..")
         {
@@ -88,10 +206,13 @@ void CleanupTempTree(const std::wstring& root, int depth, const FILETIME& cutoff
                 continue;
             }
 
-            // rar/7z 通道的落地目录：半成品，不看时间直接整棵删掉
+            // rar/7z 通道的落地目录：半成品，属主进程已经没了就整棵删掉
             if (IsLandingDirName(name))
             {
-                shellops::RemoveTreeBestEffort(fullPath);
+                if (!IsOwnerProcessAlive(OwnerProcessIdFromName(name)))
+                {
+                    shellops::RemoveTreeBestEffort(fullPath);
+                }
                 continue;
             }
 
@@ -106,7 +227,7 @@ void CleanupTempTree(const std::wstring& root, int depth, const FILETIME& cutoff
             }
 
             // 未超期的缓存目录 / 包内子目录：往下钻，清里面嵌套的半成品
-            CleanupTempTree(fullPath, depth + 1, cutoff);
+            CleanupTempTree(fullPath, depth + 1, cutoff, budget);
         }
         else
         {
@@ -115,10 +236,18 @@ void CleanupTempTree(const std::wstring& root, int depth, const FILETIME& cutoff
             {
                 continue;
             }
+
             if (IsPartialFileName(name))
             {
-                ::SetFileAttributesW(fullPath.c_str(), FILE_ATTRIBUTE_NORMAL);
-                ::DeleteFileW(fullPath.c_str());
+                // 属主进程还在（另一个实例正在写这个半成品）→ 别碰
+                if (IsOwnerProcessAlive(OwnerProcessIdFromName(name)))
+                {
+                    continue;
+                }
+
+                const std::wstring longPath = LongPath(fullPath);
+                ::SetFileAttributesW(longPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+                ::DeleteFileW(longPath.c_str());
             }
         }
     }
@@ -246,7 +375,8 @@ std::wstring TempDirectoryFor(const std::wstring& containerRoot)
     FILETIME           containerModified = {};
 
     WIN32_FILE_ATTRIBUTE_DATA containerAttributes = {};
-    if (::GetFileAttributesExW(containerRoot.c_str(), ::GetFileExInfoStandard, &containerAttributes))
+    if (::GetFileAttributesExW(LongPath(containerRoot).c_str(),
+                               ::GetFileExInfoStandard, &containerAttributes))
     {
         containerBytes = (static_cast<unsigned long long>(containerAttributes.nFileSizeHigh) << 32) |
                          static_cast<unsigned long long>(containerAttributes.nFileSizeLow);
@@ -292,8 +422,11 @@ std::wstring TempDirectoryFor(const std::wstring& containerRoot)
     }
 
     // ---- 5) 拼成目录名 ----
-    wchar_t tempPath[MAX_PATH] = {};
-    if (::GetTempPathW(ARRAYSIZE(tempPath), tempPath) == 0)
+    // 临时根只取一次（TempRoot 已经带末尾反斜杠），不再自己调 GetTempPathW，
+    // 免得两处口径不一致（改根目录名时漏改这里）
+    const std::wstring root = TempRoot();
+
+    if (root.empty())
     {
         return L"";
     }
@@ -301,9 +434,40 @@ std::wstring TempDirectoryFor(const std::wstring& containerRoot)
     wchar_t hashText[16] = {};
     ::swprintf_s(hashText, L"%08X", pathHash);
 
-    // GetTempPathW 返回的路径自带末尾反斜杠；先套进统一的 Yexp 根目录，再拼指纹名
-    return std::wstring(tempPath) + kTempRootName + L"\\" + hashText + L"_" +
+    return root + hashText + L"_" +
            std::to_wstring(containerBytes) + L"_" + timeText + L"_" + containerName;
+}
+
+// 解压真的往某个临时目录里写过东西之后，把这个目录自己的修改时间刷成"现在"
+//
+// 为什么要做：7 天保留判的是缓存目录的修改时间，而 Windows 只在"直接子项增删"时
+// 才更新目录时间。如果包里是一个顶层文件夹，之后往里解别的文件只更新子文件夹，
+// 外层缓存目录的时间会停在第一次解压那天 —— 明明这几天一直在写，7 天后却被当成
+// "很久没写过"整个删掉。
+// 只在"真的解压（写入）"之后调用；命中缓存是纯读取，不刷新（保留口径仍然是写入时间）。
+void RefreshTempDirectoryTime(const std::wstring& directory)
+{
+    if (directory.empty())
+    {
+        return;
+    }
+
+    HANDLE dir = ::CreateFileW(LongPath(directory).c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr,
+                               OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+
+    if (dir == INVALID_HANDLE_VALUE)
+    {
+        return;   // 目录刚被清掉之类：不影响本次使用
+    }
+
+    SYSTEMTIME nowSystem = {};
+    ::GetSystemTime(&nowSystem);
+
+    FILETIME now = {};
+    ::SystemTimeToFileTime(&nowSystem, &now);
+
+    ::SetFileTime(dir, nullptr, nullptr, &now);
+    ::CloseHandle(dir);
 }
 
 // 这个路径是不是落在本程序的临时根目录（%TEMP%\Yexp\）下面。
@@ -342,7 +506,7 @@ void CleanupTempCache()
     }
 
     // 根目录还没建过（从没解过压、也没走过兜底）就直接返回
-    if (::GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES)
+    if (::GetFileAttributesW(LongPath(root).c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         return;
     }
@@ -363,8 +527,23 @@ void CleanupTempCache()
     cutoff.dwLowDateTime  = now.LowPart;
     cutoff.dwHighDateTime = now.HighPart;
 
+    CleanupBudget budget;
+    budget.startTick = ::GetTickCount64();
+
     Logger::Info(L"临时缓存清理：扫描 " + root);
-    CleanupTempTree(root, 0, cutoff);
+    CleanupTempTree(root, 0, cutoff, budget);
+
+    if (budget.exhausted)
+    {
+        // 缓存很大：本次只清到预算为止，剩下的下次启动继续（不会越积越多）
+        Logger::Warn(L"临时缓存清理：本次达到扫描上限（已看 " +
+                     std::to_wstring(budget.scannedEntries) + L" 项），剩余留到下次启动");
+    }
+    else
+    {
+        Logger::Info(L"临时缓存清理：完成（共看 " +
+                     std::to_wstring(budget.scannedEntries) + L" 项）");
+    }
 }
 
 // ============================================================================
@@ -383,7 +562,7 @@ bool CacheIsUsable(const std::wstring& outputPath,
     }
 
     WIN32_FILE_ATTRIBUTE_DATA fileData = {};
-    if (!::GetFileAttributesExW(outputPath.c_str(), ::GetFileExInfoStandard, &fileData))
+    if (!::GetFileAttributesExW(LongPath(outputPath).c_str(), ::GetFileExInfoStandard, &fileData))
     {
         return false;   // 不在 → 没有缓存
     }
@@ -405,7 +584,7 @@ bool CacheIsUsable(const std::wstring& outputPath,
             const std::wstring candidate = outputPath + L"\\" + childRelativePaths[child];
 
             WIN32_FILE_ATTRIBUTE_DATA childData = {};
-            if (!::GetFileAttributesExW(candidate.c_str(), ::GetFileExInfoStandard, &childData))
+            if (!::GetFileAttributesExW(LongPath(candidate).c_str(), ::GetFileExInfoStandard, &childData))
             {
                 return false;   // 少了其中一个文件
             }
@@ -436,15 +615,18 @@ bool CacheIsUsable(const std::wstring& outputPath,
         (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
         static_cast<unsigned long long>(fileData.nFileSizeLow);
 
-    if (actualSize == 0)
-    {
-        return false;   // 0 字节一律不算有效缓存（解压中断最常留下的就是这种）
-    }
-
-    // 包给了大小就必须对上：内容是顺序写到写满为止，写一半必然小于声明值
+    // 包声明了大小 → 必须一字节不差：内容是顺序写到写满为止，写一半必然小于声明值
     if (declaredSize > 0 && actualSize != declaredSize)
     {
         return false;
+    }
+
+    // 实际 0 字节：包明确声明 0（= 空文件）才算有效缓存，靠下面的时间戳再验一次。
+    // 包没给大小（声明 0 也可能是"没读到"）时不敢认——解压中断最常见的就是留下 0 字节文件。
+    if (actualSize == 0 && declaredSize == 0)
+    {
+        // 时间对得上 = 是我们发布后盖过时间戳的那一份；对不上按不可用处理
+        return (::CompareFileTime(&fileData.ftLastWriteTime, &expectedTime) == 0);
     }
 
     // 时间必须等于"包内那一项的修改时间"：
@@ -461,13 +643,14 @@ void StampFileTime(const std::wstring& path, const FILETIME& time)
 
     // 解出来的文件默认是只读的（保护原件不被改坏），而 SetFileTime 对只读文件会失败，
     // 所以先临时放开只读，盖完时间戳再恢复。
-    const DWORD attributes = ::GetFileAttributesW(path.c_str());
-    const bool  wasReadOnly = (attributes != INVALID_FILE_ATTRIBUTES) &&
-                              ((attributes & FILE_ATTRIBUTE_READONLY) != 0);
+    const std::wstring longPath   = LongPath(path);
+    const DWORD        attributes = ::GetFileAttributesW(longPath.c_str());
+    const bool         wasReadOnly = (attributes != INVALID_FILE_ATTRIBUTES) &&
+                                     ((attributes & FILE_ATTRIBUTE_READONLY) != 0);
 
     if (wasReadOnly)
     {
-        ::SetFileAttributesW(path.c_str(), attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
+        ::SetFileAttributesW(longPath.c_str(), attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
     }
 
     // 目录和文件的打开方式不一样：打开目录必须带 FILE_FLAG_BACKUP_SEMANTICS，
@@ -479,7 +662,7 @@ void StampFileTime(const std::wstring& path, const FILETIME& time)
         openFlags |= FILE_FLAG_BACKUP_SEMANTICS;
     }
 
-    HANDLE file = ::CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr,
+    HANDLE file = ::CreateFileW(longPath.c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr,
                                 OPEN_EXISTING, openFlags, nullptr);
 
     bool stamped = false;
@@ -492,7 +675,7 @@ void StampFileTime(const std::wstring& path, const FILETIME& time)
 
     if (wasReadOnly)
     {
-        ::SetFileAttributesW(path.c_str(), attributes);   // 恢复原来的只读
+        ::SetFileAttributesW(longPath.c_str(), attributes);   // 恢复原来的只读
     }
 
     if (!stamped)
@@ -582,14 +765,16 @@ bool BuildItems(const std::vector<std::wstring>& paths,
         item.partialPath = item.outputPath + L".yexp-partial." + tag;
 
         const size_t lastSeparator = item.outputPath.find_last_of(L'\\');
-        const std::wstring outputDirectory =
-            (lastSeparator == std::wstring::npos) ? item.outputPath
-                                                  : item.outputPath.substr(0, lastSeparator);
         const std::wstring outputName =
             (lastSeparator == std::wstring::npos) ? item.outputPath
                                                   : item.outputPath.substr(lastSeparator + 1);
 
-        item.stagingPath = outputDirectory + L"\\_yexp_landing_" + tag;
+        // 落地目录放在"缓存根"上，而不是 outputPath 的父目录：
+        // rar/7z 那条通道走 Shell.Application 的 CopyHere，它用的是 Shell 解析名，
+        // 不认 \\?\ 前缀 —— 落地目录越深越容易顶到 260 而直接打不开。
+        // 放到缓存根就只有 "临时根 + 指纹目录" 那一层，留给包内路径的余量最大化。
+        // 每个 tag 一个专属目录，两个并发解压不会互相踩。
+        item.stagingPath = item.tempDirectory + L"\\_yexp_landing_" + tag;
         item.landingPath = item.stagingPath + L"\\" + outputName;
 
         // ---- 该有多大、该是什么时间（缓存判据也靠这两个）----
@@ -660,10 +845,11 @@ bool RunExtraction(const std::vector<ContainerExtractItem>& items,
             Logger::Info(L"解压：命中缓存，直接复用：" + item.virtualPath);
 
             // 命中的项统一维持只读：打开时保护原件；拖拽那边在拖动前会临时改成普通
-            const DWORD cacheAttributes = ::GetFileAttributesW(item.outputPath.c_str());
+            const std::wstring longOutputPath = LongPath(item.outputPath);
+            const DWORD cacheAttributes = ::GetFileAttributesW(longOutputPath.c_str());
             if (cacheAttributes != INVALID_FILE_ATTRIBUTES)
             {
-                ::SetFileAttributesW(item.outputPath.c_str(),
+                ::SetFileAttributesW(longOutputPath.c_str(),
                                      cacheAttributes | FILE_ATTRIBUTE_READONLY);
             }
 
@@ -753,6 +939,10 @@ bool RunExtraction(const std::vector<ContainerExtractItem>& items,
                     StampFileTime(job->realPath + L"\\" + item.childRelativePaths[child],
                                   item.childTimes[child]);
                 }
+
+                // 往这个缓存目录里真的写过东西了：把目录自己的修改时间刷成"现在"，
+                // 让 7 天保留期从"最后一次写入"开始算（见 RefreshTempDirectoryTime 说明）
+                RefreshTempDirectoryTime(item.tempDirectory);
             }
 
             if (SUCCEEDED(comResult))
@@ -789,7 +979,8 @@ bool RunExtraction(const std::vector<ContainerExtractItem>& items,
                 {
                     WIN32_FILE_ATTRIBUTE_DATA fileData = {};
 
-                    if (::GetFileAttributesExW(candidate->c_str(), ::GetFileExInfoStandard, &fileData))
+                    if (::GetFileAttributesExW(LongPath(*candidate).c_str(),
+                                               ::GetFileExInfoStandard, &fileData))
                     {
                         const unsigned long long bytes =
                             (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
@@ -824,13 +1015,15 @@ bool RunExtraction(const std::vector<ContainerExtractItem>& items,
 
                     WIN32_FILE_ATTRIBUTE_DATA fileData = {};
 
-                    if (::GetFileAttributesExW(landingCandidate.c_str(), ::GetFileExInfoStandard, &fileData))
+                    if (::GetFileAttributesExW(LongPath(landingCandidate).c_str(),
+                                               ::GetFileExInfoStandard, &fileData))
                     {
                         bytes = (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |
                                 static_cast<unsigned long long>(fileData.nFileSizeLow);
                     }
 
-                    if (::GetFileAttributesExW(finalCandidate.c_str(), ::GetFileExInfoStandard, &fileData))
+                    if (::GetFileAttributesExW(LongPath(finalCandidate).c_str(),
+                                               ::GetFileExInfoStandard, &fileData))
                     {
                         const unsigned long long finalBytes =
                             (static_cast<unsigned long long>(fileData.nFileSizeHigh) << 32) |

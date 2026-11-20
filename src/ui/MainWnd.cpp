@@ -31,6 +31,7 @@
 #include <unordered_set>
 #include <thread>     // 拖出压缩包里的项：解压丢后台线程，主线程刷进度
 #include <atomic>     // 后台线程解压完成标志
+#include <mutex>      // std::once_flag：临时缓存清理整个进程只跑一次
 #include <memory>     // shared_ptr（把解压结果从后台线程递回主线程）
 
 #pragma comment(lib, "propsys.lib")
@@ -1631,8 +1632,16 @@ void MainWindow::OnCreate()
     StartBackgroundMenuData();
 
     // 临时缓存清理也丢后台线程：枚举、判时间、删除都不挡启动界面；
-    // 一次性任务，detach 即可，退出时没删完的留到下次启动再清
-    std::thread([]{ shell::CleanupTempCache(); }).detach();
+    // 一次性任务，detach 即可，退出时没删完的留到下次启动再清。
+    //
+    // 整个进程只跑一次：这个函数是"每个窗口建出来"都会走的，多开几个窗口就会
+    // 起好几条清理线程同时扫同一批目录（重复 I/O + 互相抢着删 + 日志刷屏），
+    // 所以用 call_once 兜住。首次调用者起线程，后面的窗口直接跳过。
+    static std::once_flag s_tempCleanupOnce;
+    std::call_once(s_tempCleanupOnce, []
+    {
+        std::thread([]{ shell::CleanupTempCache(); }).detach();
+    });
 
     LayoutChildren();
 
