@@ -330,6 +330,127 @@ bool IsLocalAbsolutePath(const std::wstring& arg)
     return false;
 }
 
+// 把 file:///C:/... 或 file://server/share/... 转回 Windows 路径。
+//
+// 为什么需要：Chromium / Electron 系程序（比如 DeepSeek Harness 的“显示文件位置”）
+// 调 explorer.exe 时传的是 file URL，不是本地路径：
+//     explorer.exe "/select," "file:///C:/git/explorer"
+// 以前这里只认 C:\... 和 \\server\share，URL 会被当成“看不懂”直通系统资源管理器。
+std::wstring FileUrlToPath(const std::wstring& url)
+{
+    if (_wcsnicmp(url.c_str(), L"file:", 5) != 0)
+    {
+        return url;
+    }
+
+    std::wstring rest = url.substr(5);
+
+    // 去掉 file:// 这一层
+    if (rest.size() >= 2 && rest[0] == L'/' && rest[1] == L'/')
+    {
+        rest.erase(0, 2);
+    }
+
+    // 现在可能是：
+    //   /C:/path        （file:///C:/path，三个斜杠留下一个前导 /）
+    //   C:/path         （file:C:/path，少见但合法）
+    //   server/share    （file://server/share，UNC）
+    bool unc = false;
+    if (!rest.empty() && rest[0] == L'/')
+    {
+        rest.erase(0, 1);
+    }
+    else if (rest.size() >= 2 && rest[1] == L':')
+    {
+        // 盘符路径，无需额外处理
+    }
+    else
+    {
+        unc = true;
+    }
+
+    // 百分号解码：URL 里的 %20 是空格、%2C 是逗号（DSH 会把路径里的 , 和 = 编码），
+    // 非 ASCII 字符也按 UTF-8 逐字节还原。
+    std::string bytes;
+    bytes.reserve(rest.size());
+
+    auto hexValue = [](wchar_t c) -> int
+    {
+        if (c >= L'0' && c <= L'9')
+        {
+            return c - L'0';
+        }
+        if (c >= L'a' && c <= L'f')
+        {
+            return c - L'a' + 10;
+        }
+        if (c >= L'A' && c <= L'F')
+        {
+            return c - L'A' + 10;
+        }
+        return -1;
+    };
+
+    for (size_t i = 0; i < rest.size(); ++i)
+    {
+        if (rest[i] == L'%' && i + 2 < rest.size())
+        {
+            const int hi = hexValue(rest[i + 1]);
+            const int lo = hexValue(rest[i + 2]);
+            if (hi >= 0 && lo >= 0)
+            {
+                bytes.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+
+        const wchar_t c = rest[i];
+        if (c < 0x80)
+        {
+            bytes.push_back(static_cast<char>(c));
+        }
+        else
+        {
+            char utf8[4]{};
+            const int n = ::WideCharToMultiByte(CP_UTF8, 0, &c, 1, utf8, 4, nullptr, nullptr);
+            if (n > 0)
+            {
+                bytes.append(utf8, static_cast<size_t>(n));
+            }
+        }
+    }
+
+    std::wstring path;
+    if (!bytes.empty())
+    {
+        const int len = ::MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(),
+                                              static_cast<int>(bytes.size()), nullptr, 0);
+        if (len > 0)
+        {
+            path.resize(static_cast<size_t>(len));
+            ::MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), static_cast<int>(bytes.size()),
+                                  path.data(), len);
+        }
+    }
+
+    // URL 用正斜杠，转回 Windows 的反斜杠
+    for (wchar_t& c : path)
+    {
+        if (c == L'/')
+        {
+            c = L'\\';
+        }
+    }
+
+    if (unc)
+    {
+        path = L"\\\\" + path;
+    }
+
+    return path;
+}
+
 // 启动一个进程（不等待它结束）。目标路径一律传完整路径，防止再次命中自己。
 bool Spawn(const std::wstring& exe, const std::wstring& args, DWORD* outPid)
 {
@@ -407,11 +528,29 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
                 }
                 hasPath = true;
             }
+            else if (arg.size() == 8 && arg[7] == L',')
+            {
+                // Chromium / Electron 系（DeepSeek Harness 等）的写法：
+                // 第一个参数就是 "/select,"（逗号后为空），路径在下一个参数里
+                if (i + 1 < argc)
+                {
+                    targetPath = argv[i + 1];
+                    hasPath = true;
+                }
+            }
             else if (arg.size() == 7 && i + 1 < argc) // 罕见的写法：/select 与路径分两个参数
             {
                 targetPath = argv[i + 1];
                 hasPath = true;
             }
+            break;
+        }
+
+        // 形式一·补：直接传 file:///C:/... URL（没带 /select，少见但合法）
+        if (_wcsnicmp(arg.c_str(), L"file:", 5) == 0)
+        {
+            targetPath = arg;
+            hasPath = true;
             break;
         }
 
@@ -437,6 +576,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     if (hasPath)
     {
         targetPath = TrimPathQuotes(targetPath);
+    }
+
+    // file:///C:/... 这种 URL 转回本地路径（Electron / Chromium 系程序传的就是这个）
+    if (hasPath && _wcsnicmp(targetPath.c_str(), L"file:", 5) == 0)
+    {
+        targetPath = FileUrlToPath(targetPath);
     }
 
     // ---- 第二步：决定交给谁 ----
