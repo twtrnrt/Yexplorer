@@ -118,6 +118,10 @@ msbuild Explorer.sln /t:Build /p:Configuration=Release /p:Platform=x64
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\check-version.ps1
 ```
 
+完整的开发 / 发布规则见 [`CONTRIBUTING.md`](CONTRIBUTING.md)：发版必须按
+「改版本号 → 全量构建 → 打包 → 冒烟 → 提交 → 打附注 tag → push」一次做完，
+tag 要显式推送（不要 `git push --tags`）。
+
 > 刻意命名为 `FileExplorer.exe` 而非 `Explorer.exe`，避免和系统进程同名造成混淆。
 
 ## 快捷键
