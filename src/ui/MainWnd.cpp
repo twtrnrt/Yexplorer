@@ -3824,17 +3824,13 @@ bool MainWindow::ActivateItemInNewWindow(size_t index)
 // ---------------------------------------------------------------------------
 void MainWindow::ActivateFromRelay(const std::wstring& selectFile)
 {
-    if (::IsIconic(m_hWnd))
-    {
-        ::ShowWindow(m_hWnd, SW_RESTORE);
-    }
-
-    ::SetForegroundWindow(m_hWnd);
-    ::BringWindowToTop(m_hWnd);
+    // 前台锁会让普通的 SetForegroundWindow 静默失效，统一走这个更稳的版本
+    const bool foreground = ui::ForceForegroundWindow(m_hWnd);
 
     if (selectFile.empty())
     {
-        Logger::Info(L"收到其它窗口的请求，已拉到前台");
+        Logger::Info(std::wstring(L"收到其它窗口的请求，已尝试置前（成功=") +
+                     (foreground ? L"是" : L"否") + L"）");
         return;
     }
 

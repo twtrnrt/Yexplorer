@@ -113,6 +113,48 @@ bool IsSameFolder(const std::wstring& left, const std::wstring& right)
     return ::_wcsicmp(normalizedLeft.c_str(), normalizedRight.c_str()) == 0;
 }
 
+bool ForceForegroundWindow(HWND window)
+{
+    if (window == nullptr)
+    {
+        return false;
+    }
+
+    if (::IsIconic(window))
+    {
+        ::ShowWindow(window, SW_RESTORE);
+    }
+
+    if (::GetForegroundWindow() == window)
+    {
+        ::BringWindowToTop(window);
+        return true;
+    }
+
+    // 临时挂到前台线程上：不这样做的话，后台进程的 SetForegroundWindow
+    // 会被前台锁直接忽略（表现为任务栏闪一下、窗口不出现）。
+    const HWND foreground = ::GetForegroundWindow();
+    const DWORD foregroundThread =
+        (foreground != nullptr) ? ::GetWindowThreadProcessId(foreground, nullptr) : 0;
+    const DWORD currentThread = ::GetCurrentThreadId();
+
+    bool attached = false;
+    if (foregroundThread != 0 && foregroundThread != currentThread)
+    {
+        attached = ::AttachThreadInput(currentThread, foregroundThread, TRUE) != FALSE;
+    }
+
+    ::SetForegroundWindow(window);
+    ::BringWindowToTop(window);
+
+    if (attached)
+    {
+        ::AttachThreadInput(currentThread, foregroundThread, FALSE);
+    }
+
+    return ::GetForegroundWindow() == window;
+}
+
 bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
                                      const std::wstring& selectFile,
                                      HWND selfWindow)
@@ -149,9 +191,10 @@ bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
     {
         // 对方要自己置前，先给它"允许抢前台"的授权（否则 Windows 会把
         // 后台进程的 SetForegroundWindow 直接忽略掉，表现为任务栏闪一下没反应）。
+        BOOL granted = FALSE;
         if (candidate.processId != selfProcessId)
         {
-            ::AllowSetForegroundWindow(candidate.processId);
+            granted = ::AllowSetForegroundWindow(candidate.processId);
         }
 
         DWORD_PTR reply = 0;
@@ -164,7 +207,13 @@ bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
 
         if (sent != 0 && reply != 0)
         {
-            Logger::Info(L"目录已有窗口，已交给它：" + folder);
+            // 接收方在 WM_COPYDATA 里也会置前；这里再补一次，并且由"被前台
+            // 程序启动的转发进程"来调用，成功率比接收方自己调用更高。
+            const bool foreground = ForceForegroundWindow(candidate.hwnd);
+
+            Logger::Info(L"目录已有窗口，已交给它：" + folder +
+                         L"（抢前台授权=" + (granted ? L"有" : L"无") +
+                         L"，最终前台=" + (foreground ? L"是" : L"否") + L"）");
             return true;
         }
     }

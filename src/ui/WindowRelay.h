@@ -50,4 +50,12 @@ bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
                                      const std::wstring& selectFile,
                                      HWND selfWindow);
 
+// 把窗口拉到前台。
+//
+// 为什么不直接 SetForegroundWindow：Windows 的前台锁会让后台进程的调用
+// 静默失败（任务栏闪一下、窗口不动）。这里先看是不是最小化、再临时
+// AttachThreadInput 到当前前台线程，再设置；这是资源管理器/第三方工具
+// 常用的绕过办法。返回最终是否真的成了前台。
+bool ForceForegroundWindow(HWND window);
+
 }   // namespace ui
