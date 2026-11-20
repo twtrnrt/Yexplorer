@@ -164,6 +164,7 @@
     <ClCompile Include="src\ui\FileListView.cpp" />
     <ClCompile Include="src\ui\FlatButton.cpp" />
     <ClCompile Include="src\ui\MainWnd.cpp" />
+    <ClCompile Include="src\ui\ShellWindowHost.cpp" />
     <ClCompile Include="src\ui\MainWndMenus.cpp" />
     <ClCompile Include="src\ui\NavigationPane.cpp" />
     <ClCompile Include="src\ui\OpenWithDialog.cpp" />
@@ -211,6 +212,7 @@
     <ClInclude Include="src\ui\CustomWindow.h" />
     <ClInclude Include="src\ui\FlatDraw.h" />
     <ClInclude Include="src\ui\MenuIcons.h" />
+    <ClInclude Include="src\ui\ShellWindowHost.h" />
     <ClInclude Include="src\ui\WindowPlacement.h" />
     <ClInclude Include="src\ui\WindowRelay.h" />
   </ItemGroup>

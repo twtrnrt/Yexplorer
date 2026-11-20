@@ -197,6 +197,14 @@ public:
     // 再按上面的两个开关逐项过滤。两个都关时走老路径，一个隐藏项都不枚举，零额外开销。
     bool NeedHiddenItems() const { return m_showHiddenFiles || m_showSystemFiles; }
 
+    // ---------------- Shell 窗口集成（实验性，默认关） ----------------
+    // 打开后把主窗口注册进 IShellWindows：
+    //   - Chrome/Edge/WPS 的「打开文件夹并选中」能把文件选中；
+    //   - Listary 这类工具能读到当前打开的目录。
+    // 关闭 = 完全不注册，行为和以前一模一样（零副作用）。
+    bool ShellWindowIntegration() const { return m_shellWindowIntegration; }
+    void SetShellWindowIntegration(bool enabled) { m_shellWindowIntegration = enabled; }
+
     // ---------------- 「打开方式」账本 ----------------
     const std::vector<OpenWithEntry>& OpenWithEntries() const { return m_openWith; }
 
@@ -238,6 +246,7 @@ private:
     // 显示隐藏文件 / 系统文件（默认都关，和资源管理器的默认一致）
     bool          m_showHiddenFiles = false;
     bool          m_showSystemFiles = false;
+    bool          m_shellWindowIntegration = false;   // 实验性：注册成 Shell 窗口
 
     // 「打开方式」账本（按扩展名分组）
     std::vector<OpenWithEntry> m_openWith;

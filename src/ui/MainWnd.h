@@ -37,6 +37,8 @@
 #include "core/NavigationHistory.h"
 #include "core/UndoStack.h"
 #include "shell/ShellFolder.h"
+
+namespace ui { class ShellWindowHost; }
 #include "shell/ShellIcon.h"
 #include "shell/ShellOpenWith.h"
 #include "ui/AddressBar.h"
@@ -449,6 +451,12 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     // 后台枚举完成
     void OnEnumerationDone();
 
+    // Shell 窗口集成（实验性，默认关）：按设置注册/注销
+    void SyncShellWindowRegistration();
+
+    // 处理其它程序发来的"打开文件夹并选中"（WM_COPYDATA 0xE32EE32E）
+    void HandleShellSelectRequest(const void* data, DWORD size);
+
     // 枚举失败且路径在 %TEMP%\Yexp\ 下：临时解压缓存被清理了，
     // 退回最近一个还存在的上级目录，并且只提示一次。
     void HandleTempRootEnumerationFailure(const std::wstring& missingPath);
@@ -518,6 +526,9 @@ private:
     // 启动时命令行传进来的是文件 → 这里是那个文件的完整路径。
     // 首次枚举完成后选中它并滚到可见，选完立刻清空（以后刷新不再抢选中）。
     std::wstring m_startupSelectFile;
+
+    // Shell 窗口集成（实验性）：注册进 IShellWindows，让其它程序能定位到当前目录/文件
+    std::unique_ptr<ui::ShellWindowHost> m_shellWindowHost;
 
     // ---- 多选打开 / 临时目录失败 ----
     // 多选打开时先收集失败的项，最后合并成一条提示（不再逐项弹框）

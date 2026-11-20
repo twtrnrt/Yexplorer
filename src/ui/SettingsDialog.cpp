@@ -28,7 +28,7 @@ const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 // 客户区大小（不含标题栏与边框）
 const int kClientWidth  = 420;
-const int kClientHeight = 430;
+const int kClientHeight = 474;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -36,6 +36,7 @@ const int kControlIdMenuIcons  = 4001;
 const int kControlIdClose      = 4002;
 const int kControlIdShowHidden = 4003;   // 显示隐藏的文件和文件夹
 const int kControlIdShowSystem = 4004;   // 显示受保护的操作系统文件
+const int kControlIdShellWindow = 4005;  // 实验性：注册成 Shell 窗口
 
 // 颜色
 const COLORREF kBackgroundColor = RGB(255, 255, 255);
@@ -53,6 +54,7 @@ const wchar_t* kHintText2 = L"不勾选就是纯文字菜单（默认，弹出�
 const wchar_t* kHiddenCheckText = L"显示隐藏的文件和文件夹";
 const wchar_t* kSystemCheckText = L"显示受保护的操作系统文件";
 const wchar_t* kHiddenHintText  = L"隐藏项用浅灰文字标示。改动立即生效，不用重启程序。";
+const wchar_t* kShellWindowCheckText = L"允许其它程序定位到我打开的文件（实验性）";
 
 // 「默认文件管理器」按钮的两套文案
 const wchar_t* kActionTextRegister  = L"注册为默认文件管理器";
@@ -231,6 +233,20 @@ bool SettingsDialog::CreateDialogWindow()
                        core::Settings::Instance().ShowSystemFiles() ? BST_CHECKED : BST_UNCHECKED, 0);
     }
 
+    // ---- 实验性：注册成 Shell 窗口（默认不勾）----
+    m_hCheckShellWindow = ::CreateWindowExW(0, L"BUTTON", kShellWindowCheckText,
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                            0, 0, 0, 0, m_hWnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdShellWindow)),
+                                            ::GetModuleHandleW(nullptr), nullptr);
+
+    if (m_hCheckShellWindow != nullptr)
+    {
+        ::SendMessageW(m_hCheckShellWindow, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SendMessageW(m_hCheckShellWindow, BM_SETCHECK,
+                       core::Settings::Instance().ShellWindowIntegration() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
     // 「默认文件管理器」按钮的初始文案：问一次注册表，看当前 exe 是不是已经注册过
     m_defaultManagerRegistered = shell::IsDefaultFileManager();
 
@@ -270,13 +286,21 @@ void SettingsDialog::Layout()
                      TRUE);
     }
 
+    if (m_hCheckShellWindow != nullptr)
+    {
+        ::MoveWindow(m_hCheckShellWindow,
+                     padding, padding + Scale(236),
+                     clientRect.right - padding * 2, Scale(24),
+                     TRUE);
+    }
+
     // 「注册 / 恢复默认文件管理器」按钮：分隔线下面，靠左
     // （宽度按最长那句文案「恢复系统默认文件管理器」留的）
     const int actionWidth  = Scale(236);
     const int actionHeight = Scale(32);
 
     m_actionRect.left   = padding;
-    m_actionRect.top    = padding + Scale(228);
+    m_actionRect.top    = padding + Scale(280);
     m_actionRect.right  = m_actionRect.left + actionWidth;
     m_actionRect.bottom = m_actionRect.top + actionHeight;
 
@@ -309,17 +333,23 @@ void SettingsDialog::ApplyCheckState()
         (m_hCheckSystem != nullptr) &&
         (::SendMessageW(m_hCheckSystem, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
+    const bool shellWindow =
+        (m_hCheckShellWindow != nullptr) &&
+        (::SendMessageW(m_hCheckShellWindow, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
     core::Settings& settings = core::Settings::Instance();
     settings.SetMenuIcons(showIcons);
     settings.SetShowHiddenFiles(showHidden);
     settings.SetShowSystemFiles(showSystem);
+    settings.SetShellWindowIntegration(shellWindow);
 
     // 一改就写盘，不做"确定/取消"
     settings.Save();
 
     Logger::Info(std::wstring(L"设置：右键菜单显示图标 = ") + (showIcons ? L"开" : L"关") +
                  L"，显示隐藏文件 = " + (showHidden ? L"开" : L"关") +
-                 L"，显示系统文件 = " + (showSystem ? L"开" : L"关"));
+                 L"，显示系统文件 = " + (showSystem ? L"开" : L"关") +
+                 L"，Shell 窗口集成 = " + (shellWindow ? L"开" : L"关"));
 }
 
 void SettingsDialog::ToggleDefaultManager()
@@ -392,7 +422,7 @@ void SettingsDialog::Draw(HDC dc)
     ::DrawTextW(dc, kHiddenHintText, -1, &hiddenHintRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
     // ---- 分隔线（1px，浅灰）----
-    const int dividerY = Scale(kPadding) + Scale(212);
+    const int dividerY = Scale(kPadding) + Scale(264);
 
     HPEN dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
     HGDIOBJ oldPen  = ::SelectObject(dc, dividerPen);
@@ -460,7 +490,8 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         // 三个复选框任何一个是用户点的，都按当前三个控件的状态整体存一次
         if ((controlId == kControlIdMenuIcons ||
              controlId == kControlIdShowHidden ||
-             controlId == kControlIdShowSystem) &&
+             controlId == kControlIdShowSystem ||
+             controlId == kControlIdShellWindow) &&
             notifyCode == BN_CLICKED)
         {
             ApplyCheckState();

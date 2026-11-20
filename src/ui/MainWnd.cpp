@@ -9,6 +9,7 @@
  // ============================================================================
 
 #include "MainWnd.h"
+#include "ui/ShellWindowHost.h"
 #include "ui/WindowPlacement.h"
 #include "ui/WindowRelay.h"
 #include "ui/BatchRenameDialog.h"
@@ -28,6 +29,7 @@
 #include <propsys.h>    // PSGetPropertyKeyFromName（按属性名取回收站的 DeletedFrom 键）
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <unordered_set>
 #include <thread>     // 拖出压缩包里的项：解压丢后台线程，主线程刷进度
 #include <atomic>     // 后台线程解压完成标志
@@ -760,6 +762,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         const COPYDATASTRUCT* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
 
+        // SHOpenFolderAndSelectItems 的私有协议：0xE32EE32E
+        // 内容依次是「子项数量 + flags + 一串子项 PIDL」。
+        // 只解析 + 选中，立刻返回，别让调用方的 UI 线程等我们。
+        if (m_shellWindowHost && m_shellWindowHost->IsRegistered() &&
+            data != nullptr && data->dwData == 0xE32EE32E &&
+            data->lpData != nullptr && data->cbData >= 2 * sizeof(ULONG))
+        {
+            HandleShellSelectRequest(data->lpData, data->cbData);
+            return TRUE;
+        }
+
         if (data != nullptr && data->dwData == ui::kRelayRequestMagic &&
             data->lpData != nullptr && data->cbData >= sizeof(ui::RelayRequest))
         {
@@ -1037,6 +1050,26 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     // --------------------------------------------------------------
+    // Shell 窗口自动化对象调过来的导航 / 刷新请求
+    //
+    // 注意：自动化对象那边只 PostMessage，真正的导航/枚举在这里做，
+    // 避免挡住调用方（Chrome 的 UI 线程）。
+    // --------------------------------------------------------------
+    case ui::kShellWindowNavigateMessage:
+    {
+        std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lParam));
+        if (path && !path->empty())
+        {
+            NavigateToPath(*path);
+        }
+        return 0;
+    }
+
+    case ui::kShellWindowRefreshMessage:
+        RefreshCurrentFolder();
+        return 0;
+
+    // --------------------------------------------------------------
     // 后台「新建」项枚举完成：结果已经进 m_shellNewItems，这里去预取图标
     // --------------------------------------------------------------
     case WM_APP_SHELLNEW_READY:
@@ -1131,6 +1164,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // 销毁
     // --------------------------------------------------------------
     case WM_DESTROY:
+        if (m_shellWindowHost)
+        {
+            m_shellWindowHost->Revoke();   // 注销 Shell 窗口，别留失效条目
+        }
         UnregisterDropTargets();
         m_watcher.Stop();          // 停掉目录监视，否则线程会一直等在那里
         ::KillTimer(m_hWnd, kFolderChangeTimerId);
@@ -1552,6 +1589,9 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
             SettingsDialog dialog;
             dialog.ShowModal(m_hWnd);
 
+            // Shell 窗口集成开关可能变了：按新设置注册/注销
+            SyncShellWindowRegistration();
+
             if (wasHidden != settings.ShowHiddenFiles() ||
                 wasSystem != settings.ShowSystemFiles())
             {
@@ -1677,6 +1717,124 @@ void MainWindow::OnCreate()
 
     m_history.Reset(startPath);
     StartEnumeration(startPath);
+
+    // Shell 窗口集成：开关打开时把主窗口注册进 IShellWindows（默认关，零影响）
+    SyncShellWindowRegistration();
+}
+
+// ----------------------------------------------------------------------------
+// Shell 窗口集成：按设置注册 / 注销
+//
+// 注册本身是纯运行时的（不写注册表）：开关一关就 Revoke，行为回到以前。
+// ----------------------------------------------------------------------------
+void MainWindow::SyncShellWindowRegistration()
+{
+    const bool enabled = core::Settings::Instance().ShellWindowIntegration();
+
+    if (!enabled)
+    {
+        if (m_shellWindowHost)
+        {
+            m_shellWindowHost->Revoke();
+            m_shellWindowHost.reset();
+            Logger::Info(L"Shell 窗口集成：已关闭");
+        }
+        return;
+    }
+
+    if (!m_shellWindowHost)
+    {
+        m_shellWindowHost = std::make_unique<ui::ShellWindowHost>();
+    }
+
+    if (!m_shellWindowHost->IsRegistered())
+    {
+        m_shellWindowHost->Register(m_hWnd, m_history.Current());
+    }
+    else
+    {
+        m_shellWindowHost->UpdateFolder(m_history.Current());
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 其它程序发来的"打开文件夹并选中"（WM_COPYDATA 0xE32EE32E）
+//
+// 数据格式：ULONG count; ULONG flags; 然后 count 个子项 PIDL（相对当前目录）。
+// 只做解析 + 选中，不做导航/枚举——调用方在同步等我们返回。
+// ----------------------------------------------------------------------------
+void MainWindow::HandleShellSelectRequest(const void* data, DWORD size)
+{
+    if (data == nullptr || size < 2 * sizeof(ULONG))
+    {
+        return;
+    }
+
+    const BYTE* p = static_cast<const BYTE*>(data);
+    const BYTE* const end = p + size;
+
+    ULONG count = 0;
+    ULONG flags = 0;
+    std::memcpy(&count, p, sizeof(count));
+    p += sizeof(count);
+    std::memcpy(&flags, p, sizeof(flags));
+    p += sizeof(flags);
+    (void)flags;
+
+    if (count == 0 || count > 64)
+    {
+        return;
+    }
+
+    const std::wstring folder = m_history.Current();
+
+    PIDLIST_ABSOLUTE folderPidl = nullptr;
+    if (FAILED(::SHParseDisplayName(folder.c_str(), nullptr, &folderPidl, 0, nullptr)) ||
+        folderPidl == nullptr)
+    {
+        Logger::Info(L"Shell 窗口：定位请求的目录解析失败：" + folder);
+        return;
+    }
+
+    std::vector<std::wstring> files;
+
+    for (ULONG i = 0; i < count && p + sizeof(USHORT) <= end; ++i)
+    {
+        const ITEMID_CHILD* child = reinterpret_cast<const ITEMID_CHILD*>(p);
+        const UINT childSize = ::ILGetSize(child);
+
+        if (childSize < sizeof(USHORT) || p + childSize > end)
+        {
+            break;
+        }
+
+        PIDLIST_ABSOLUTE full = ::ILCombine(folderPidl, child);
+        wchar_t path[MAX_PATH * 2] = {};
+
+        if (full != nullptr && ::SHGetPathFromIDListW(full, path) && path[0] != L'\0')
+        {
+            files.emplace_back(path);
+        }
+        if (full != nullptr)
+        {
+            ::ILFree(full);
+        }
+
+        p += childSize;
+    }
+
+    ::ILFree(folderPidl);
+
+    if (files.empty())
+    {
+        Logger::Info(L"Shell 窗口：收到定位请求，但没有解析出文件路径");
+        return;
+    }
+
+    m_fileListView.SelectPaths(files);
+    m_fileListView.EnsureVisiblePath(files.front());
+
+    Logger::Info(L"Shell 窗口：已定位并选中 " + std::to_wstring(files.size()) + L" 项");
 }
 
 // ============================================================================
@@ -5837,6 +5995,12 @@ void MainWindow::OnEnumerationDone()
         m_fileListView.EnsureVisiblePath(selectPath);
 
         Logger::Info(L"启动时选中传入的文件：" + selectPath);
+    }
+
+    // Shell 窗口集成：把当前目录报给 IShellWindows（Listary 等工具读这个）
+    if (m_shellWindowHost)
+    {
+        m_shellWindowHost->UpdateFolder(result->path);
     }
 
     // 标题也只在内容真的变了才重设（道理同 UpdateTitle：避免任务栏闪）

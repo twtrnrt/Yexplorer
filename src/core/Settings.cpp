@@ -293,6 +293,9 @@ bool Settings::Load()
         m_showHiddenFiles = json.value("showHiddenFiles", false);
         m_showSystemFiles = json.value("showSystemFiles", false);
 
+        // Shell 窗口集成（实验性）：默认关
+        m_shellWindowIntegration = json.value("shellWindowIntegration", false);
+
         // ---------------- 「打开方式」账本 ----------------
         // 结构：{ ".txt": { "default": "…", "items": [ {...}, … ] }, … }
         if (json.contains("openWith") && json["openWith"].is_object())
@@ -532,6 +535,10 @@ bool Settings::Save()
     if (m_showSystemFiles)
     {
         json["showSystemFiles"] = true;
+    }
+    if (m_shellWindowIntegration)
+    {
+        json["shellWindowIntegration"] = true;
     }
 
     // ---------------- 「打开方式」账本 ----------------
