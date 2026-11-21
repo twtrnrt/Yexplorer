@@ -666,15 +666,7 @@ private:
     void UpdateWindowResize();
     void DrawWindowButtons(HDC dc);
     int  HitTestWindowButton(POINT pt) const;
-    int  TabBarHeight() const
-    {
-        // 普通窗口顶部多 6px 自绘 padding；最大化时没有原生上边框，不需要
-        if (m_hWnd != nullptr && ::IsZoomed(m_hWnd))
-        {
-            return Scale(40);
-        }
-        return Scale(46);
-    }
+    int  TabBarHeight() const { return Scale(40); }
 
     // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----
     MenuIconCache      m_menuIcons;

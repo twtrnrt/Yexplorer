@@ -916,7 +916,6 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 params->rgrc[0].left   += border;
                 params->rgrc[0].right  -= border;
                 params->rgrc[0].bottom -= border;
-                params->rgrc[0].top    += Scale(2);
             }
             return 0;
         }
@@ -953,14 +952,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         const bool maximized = ::IsZoomed(m_hWnd) != FALSE;
         const int border = Scale(7);
-        const int topBorder = Scale(1);
 
         // 四边/四角先给缩放命中（最大化时不缩放）
         if (!maximized)
         {
             const bool left   = pt.x < border;
             const bool right  = pt.x >= clientRect.right - border;
-            const bool top    = pt.y < topBorder;
+            const bool top    = pt.y < border;
             const bool bottom = pt.y >= clientRect.bottom - border;
 
             if (top && left)      { return HTTOPLEFT; }
@@ -2726,14 +2724,12 @@ void MainWindow::UpdateWindowResize()
 void MainWindow::LayoutWindowButtons(const RECT& clientRect)
 {
     const int width = Scale(46);
-    const int titleHeight = TabBarHeight();
-    const int padding = (titleHeight > Scale(40)) ? Scale(6) : 0;
-    const int height = Scale(40);
+    const int height = TabBarHeight();
     const int right = clientRect.right;
 
-    m_closeButtonRect = { right - width, padding, right, padding + height };
-    m_maxButtonRect   = { right - width * 2, padding, right - width, padding + height };
-    m_minButtonRect   = { right - width * 3, padding, right - width * 2, padding + height };
+    m_closeButtonRect = { right - width, 0, right, height };
+    m_maxButtonRect   = { right - width * 2, 0, right - width, height };
+    m_minButtonRect   = { right - width * 3, 0, right - width * 2, height };
 }
 
 int MainWindow::HitTestWindowButton(POINT pt) const
@@ -2826,15 +2822,6 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
     HBRUSH stripBrush = ::CreateSolidBrush(RGB(240, 242, 245));
     ::FillRect(dc, &strip, stripBrush);
     ::DeleteObject(stripBrush);
-
-    const int topPadding = (tabHeight > Scale(40)) ? Scale(6) : 0;
-    if (topPadding > 0)
-    {
-        RECT padRect = { 0, 0, clientRect.right, topPadding };
-        HBRUSH padBrush = ::CreateSolidBrush(RGB(244, 247, 252));
-        ::FillRect(dc, &padRect, padBrush);
-        ::DeleteObject(padBrush);
-    }
 
     m_tabRects.assign(m_tabs.size(), RECT{});
     m_tabCloseRects.assign(m_tabs.size(), RECT{});
