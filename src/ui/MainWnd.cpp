@@ -2603,13 +2603,13 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
             ::DeleteObject(closeHoverPen);
         }
 
-        // 直接画两条对角线：宽高严格相等，只加大不加粗
-        const int cross = Scale(10);
+        // 直接画两条对角线：8px 见方，2px 线宽
+        const int cross = Scale(8);
         const int centerX = (closeRect.left + closeRect.right) / 2;
         const int centerY = (closeRect.top + closeRect.bottom) / 2;
         const int half = cross / 2;
 
-        HPEN closePen = ::CreatePen(PS_SOLID, Scale(1), closeColor);
+        HPEN closePen = ::CreatePen(PS_SOLID, Scale(2), closeColor);
         HGDIOBJ oldPen = ::SelectObject(dc, closePen);
         ::MoveToEx(dc, centerX - half, centerY - half, nullptr);
         ::LineTo(dc, centerX + half + 1, centerY + half + 1);
