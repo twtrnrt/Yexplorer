@@ -2787,8 +2787,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
     LayoutWindowButtons(clientRect);
 
-    const int tabStripBottom = tabHeight + Scale(4);
-    RECT strip = { 0, 0, clientRect.right, tabStripBottom };
+    RECT strip = { 0, 0, clientRect.right, tabHeight };
     HBRUSH stripBrush = ::CreateSolidBrush(RGB(240, 242, 245));
     ::FillRect(dc, &strip, stripBrush);
     ::DeleteObject(stripBrush);
@@ -2820,8 +2819,8 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         return;
     }
 
-    const int top = tabStripBottom - Scale(30);
-    const int bottom = tabStripBottom;
+    const int top = tabHeight - Scale(30);
+    const int bottom = tabHeight;
     const int gap = Scale(2);
     const int plusWidth = Scale(30);
     const int arrowWidth = Scale(22);
@@ -7759,7 +7758,7 @@ void MainWindow::LayoutChildren()
     };
 
     // ---- 导航按钮 ----
-    int buttonY = tabBarHeight + (navHeight - buttonHeight) / 2;
+    int buttonY = tabBarHeight;
     int cursorX = margin;
 
     placeWindow(m_homeButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
@@ -7778,7 +7777,7 @@ void MainWindow::LayoutChildren()
     cursorX += buttonWidth + Scale(8);   // 按钮组和地址栏之间留宽一点
 
     // ---- 计算机图标（地址栏左端，和路径共用白色底）----
-    int addressY = tabBarHeight + (navHeight - addressHeight) / 2;
+    int addressY = tabBarHeight + (buttonHeight - addressHeight) / 2;
     int computerWidth = Scale(28);
     placeWindow(m_thisPcButton.Handle(), cursorX, addressY, computerWidth, addressHeight);
     cursorX += computerWidth;
