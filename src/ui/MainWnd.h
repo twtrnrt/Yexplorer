@@ -607,6 +607,7 @@ private:
 
     HWND         m_hStatusBar     = nullptr;
     HFONT        m_hUiFont        = nullptr;   // 普通控件字体
+    HFONT        m_tabCloseFont   = nullptr;   // 标签关闭按钮的 ×（比正文大一点）
     HACCEL       m_hAccelerator   = nullptr;   // 键盘快捷键表
 
     // ---- 内部剪贴板（复制/剪切用）----
@@ -629,6 +630,15 @@ private:
     std::vector<RECT>     m_tabRects;
     std::vector<RECT>     m_tabCloseRects;
     RECT                  m_tabPlusRect = {};
+    RECT                  m_tabLeftRect = {};
+    RECT                  m_tabRightRect = {};
+    int                   m_tabScrollOffset = 0;
+    int                   m_tabHover = -1;
+    bool                  m_tabHoverClose = false;
+    bool                  m_tabTracking = false;
+    int                   m_tabDragIndex = -1;
+    int                   m_tabDragStartX = 0;
+    bool                  m_tabDragging = false;
     std::vector<std::wstring> m_pendingSelection;
     std::wstring              m_pendingTopItem;
     std::shared_ptr<shell::EnumerateResult> m_pendingCachedResult;
@@ -640,6 +650,9 @@ private:
     void TrimTabCache();
     void DrawTabBar(HDC dc, const RECT& clientRect);
     int  HitTestTab(POINT pt, bool& closeButton) const;
+    void UpdateTabHover(POINT pt);
+    void UpdateTabDrag(POINT pt);
+    void ScrollTabs(int delta);
     int  TabBarHeight() const;
 
     // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----

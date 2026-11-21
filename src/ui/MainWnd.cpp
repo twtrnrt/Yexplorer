@@ -30,6 +30,7 @@
 #include <shobjidl.h>   // IFileOperation / IShellItem2（撤销删除时要还原回收站里的项）
 #include <propsys.h>    // PSGetPropertyKeyFromName（按属性名取回收站的 DeletedFrom 键）
 #include <algorithm>
+#include <climits>
 #include <chrono>
 #include <cstring>
 #include <unordered_set>
@@ -350,6 +351,12 @@ MainWindow::~MainWindow()
         m_hUiFont = nullptr;
     }
 
+    if (m_tabCloseFont != nullptr)
+    {
+        ::DeleteObject(m_tabCloseFont);
+        m_tabCloseFont = nullptr;
+    }
+
     // 进度条：摘掉状态栏子类化 + 还回任务栏接口
     m_pasteBar.Detach();
 }
@@ -574,6 +581,17 @@ void MainWindow::CreateChildControls()
     if (m_hUiFont == nullptr)
     {
         m_hUiFont = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+    }
+
+    // 标签关闭按钮的 × 比正文大一点，命中区域也更大
+    {
+        LOGFONTW closeFont = {};
+        if (::GetObjectW(m_hUiFont, sizeof(closeFont), &closeFont) != 0)
+        {
+            closeFont.lfHeight = ::MulDiv(closeFont.lfHeight, 130, 100);
+            closeFont.lfWeight = FW_SEMIBOLD;
+            m_tabCloseFont = ::CreateFontIndirectW(&closeFont);
+        }
     }
 
     // ---------------- 2. 文件列表 ----------------
@@ -942,6 +960,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (pt.y < TabBarHeight())
         {
+            if (::PtInRect(&m_tabLeftRect, pt))
+            {
+                ScrollTabs(-Scale(120));
+                return 0;
+            }
+            if (::PtInRect(&m_tabRightRect, pt))
+            {
+                ScrollTabs(Scale(120));
+                return 0;
+            }
+
             bool closeButton = false;
             const int tabIndex = HitTestTab(pt, closeButton);
             if (tabIndex >= 0)
@@ -949,11 +978,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 if (closeButton)
                 {
                     CloseTab(static_cast<size_t>(tabIndex));
+                    return 0;
                 }
-                else
-                {
-                    ActivateTab(static_cast<size_t>(tabIndex));
-                }
+
+                m_tabDragIndex = tabIndex;
+                m_tabDragStartX = pt.x;
+                m_tabDragging = false;
+                ::SetCapture(m_hWnd);
                 return 0;
             }
 
@@ -992,9 +1023,45 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_MOUSEMOVE:
     {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        if (m_tabDragIndex >= 0)
+        {
+            UpdateTabDrag(pt);
+            return 0;
+        }
+
         if (m_draggingSplitter)
         {
             UpdatePaneWidth(static_cast<short>(LOWORD(lParam)));
+            return 0;
+        }
+
+        UpdateTabHover(pt);
+        break;
+    }
+
+    case WM_MOUSELEAVE:
+        m_tabTracking = false;
+        if (m_tabHover >= 0 || m_tabHoverClose)
+        {
+            m_tabHover = -1;
+            m_tabHoverClose = false;
+            RECT strip = {};
+            ::GetClientRect(m_hWnd, &strip);
+            strip.bottom = TabBarHeight();
+            ::InvalidateRect(m_hWnd, &strip, FALSE);
+        }
+        break;
+
+    case WM_MOUSEWHEEL:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ::ScreenToClient(m_hWnd, &pt);
+        if (pt.y < TabBarHeight())
+        {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            ScrollTabs(delta > 0 ? -Scale(80) : Scale(80));
             return 0;
         }
         break;
@@ -1002,6 +1069,27 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_LBUTTONUP:
     {
+        if (m_tabDragIndex >= 0)
+        {
+            const int index = m_tabDragIndex;
+            const bool wasDragging = m_tabDragging;
+
+            m_tabDragIndex = -1;
+            m_tabDragging = false;
+            ::ReleaseCapture();
+
+            if (!wasDragging)
+            {
+                ActivateTab(static_cast<size_t>(index));
+            }
+
+            RECT strip = {};
+            ::GetClientRect(m_hWnd, &strip);
+            strip.bottom = TabBarHeight();
+            ::InvalidateRect(m_hWnd, &strip, FALSE);
+            return 0;
+        }
+
         if (m_draggingSplitter)
         {
             m_draggingSplitter = false;
@@ -1017,6 +1105,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CAPTURECHANGED:
         // 鼠标被别的东西抢走了（比如弹出菜单），就当拖动结束
         m_draggingSplitter = false;
+        m_tabDragIndex = -1;
+        m_tabDragging = false;
         break;
 
     // --------------------------------------------------------------
@@ -2354,6 +2444,8 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
     m_tabRects.assign(m_tabs.size(), RECT{});
     m_tabCloseRects.assign(m_tabs.size(), RECT{});
+    ::SetRectEmpty(&m_tabLeftRect);
+    ::SetRectEmpty(&m_tabRightRect);
 
     HGDIOBJ oldFont = ::SelectObject(dc, m_hUiFont != nullptr ? m_hUiFont
                                                              : ::GetStockObject(DEFAULT_GUI_FONT));
@@ -2363,13 +2455,12 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
     const int bottom = tabHeight - Scale(1);
     const int gap = Scale(2);
     const int plusWidth = Scale(30);
-    const int plusGap = Scale(8);
-    const int rightLimit = clientRect.right - Scale(8) - plusWidth - plusGap;
-    const int available = (rightLimit > Scale(80)) ? (rightLimit - Scale(8)) : Scale(80);
+    const int arrowWidth = Scale(22);
+    const int margin = Scale(8);
 
-    // 先算每个标签的自然宽度；放不下就按比例压缩，最小 64px
+    // 自然宽度
     std::vector<int> widths(m_tabs.size(), Scale(110));
-    int total = 0;
+    int contentWidth = 0;
     for (size_t i = 0; i < m_tabs.size(); ++i)
     {
         const std::wstring& title = m_tabs[i].title.empty() ? m_tabs[i].path
@@ -2377,81 +2468,172 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         SIZE textSize = {};
         ::GetTextExtentPoint32W(dc, title.c_str(), static_cast<int>(title.size()), &textSize);
 
-        int width = textSize.cx + Scale(48);
+        int width = textSize.cx + Scale(52);
         if (width < Scale(110)) { width = Scale(110); }
         if (width > Scale(220)) { width = Scale(220); }
         widths[i] = width;
-        total += width + gap;
+        contentWidth += width + (i + 1 < m_tabs.size() ? gap : 0);
     }
 
-    if (total > available && total > 0)
+    int baseLeft = margin;
+    int baseRight = clientRect.right - margin;
+    int plusLeft = baseRight - plusWidth;
+
+    // 先按"不显示箭头"算视口；放不下才启用左右箭头
+    int viewportLeft = baseLeft;
+    int viewportRight = plusLeft - gap;
+    int available = viewportRight - viewportLeft;
+    bool overflow = contentWidth > available;
+
+    if (overflow)
     {
-        const int minWidth = Scale(64);
-        for (size_t i = 0; i < widths.size(); ++i)
+        viewportLeft += arrowWidth + gap;
+        viewportRight -= arrowWidth + gap;
+        available = viewportRight - viewportLeft;
+
+        // 先压缩到最小 64px；压完还放不下就靠滚动
+        if (contentWidth > available && contentWidth > 0)
         {
-            int scaled = static_cast<int>(static_cast<long long>(widths[i]) * available / total);
-            if (scaled < minWidth) { scaled = minWidth; }
-            widths[i] = scaled;
+            int compressed = 0;
+            for (size_t i = 0; i < widths.size(); ++i)
+            {
+                int scaled = static_cast<int>(static_cast<long long>(widths[i]) * available / contentWidth);
+                if (scaled < Scale(64)) { scaled = Scale(64); }
+                widths[i] = scaled;
+                compressed += scaled + (i + 1 < m_tabs.size() ? gap : 0);
+            }
+            contentWidth = compressed;
         }
+
+        const int contentWithPlus = contentWidth + gap + plusWidth;
+        const int maxOffset = (contentWithPlus > available) ? (contentWithPlus - available) : 0;
+        if (maxOffset == 0)
+        {
+            // 压缩后已经放得下：不需要箭头，视口还给整条
+            overflow = false;
+            viewportLeft = baseLeft;
+            viewportRight = plusLeft - gap;
+            available = viewportRight - viewportLeft;
+        }
+
+        if (m_tabScrollOffset < 0) { m_tabScrollOffset = 0; }
+        if (m_tabScrollOffset > maxOffset) { m_tabScrollOffset = maxOffset; }
+    }
+    else
+    {
+        m_tabScrollOffset = 0;
     }
 
-    int x = Scale(8);
+    // 鼠标命中区限制在视口内
+    const int savedDc = ::SaveDC(dc);
+    ::IntersectClipRect(dc, viewportLeft, 0, viewportRight, tabHeight);
+
+    int x = viewportLeft - m_tabScrollOffset;
     for (size_t i = 0; i < m_tabs.size(); ++i)
     {
-        if (x >= rightLimit)
+        const int width = widths[i];
+        if (x + width < viewportLeft)
+        {
+            x += width + gap;
+            continue;
+        }
+        if (x >= viewportRight)
         {
             break;
         }
 
-        int width = widths[i];
-        if (x + width > rightLimit)
-        {
-            width = rightLimit - x;
-        }
-        if (width < Scale(40))
-        {
-            break;
-        }
-
-        const std::wstring& title = m_tabs[i].title.empty() ? m_tabs[i].path
-                                                            : m_tabs[i].title;
         RECT tabRect = { x, top, x + width, bottom };
         const bool active = (i == m_activeTab);
+        const bool hovered = (static_cast<int>(i) == m_tabHover);
 
-        HBRUSH tabBrush = ::CreateSolidBrush(active ? RGB(255, 255, 255)
-                                                    : RGB(246, 247, 249));
+        COLORREF fill = active ? RGB(255, 255, 255)
+                               : (hovered ? RGB(244, 246, 249) : RGB(246, 247, 249));
+        HBRUSH tabBrush = ::CreateSolidBrush(fill);
         ::FillRect(dc, &tabRect, tabBrush);
         ::DeleteObject(tabBrush);
 
         RECT textRect = { tabRect.left + Scale(8), tabRect.top,
-                          tabRect.right - Scale(22), tabRect.bottom };
+                          tabRect.right - Scale(28), tabRect.bottom };
         ::SetTextColor(dc, active ? RGB(32, 32, 32) : RGB(96, 103, 111));
+        const std::wstring& title = m_tabs[i].title.empty() ? m_tabs[i].path
+                                                            : m_tabs[i].title;
         ::DrawTextW(dc, title.c_str(), -1, &textRect,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        RECT closeRect = { tabRect.right - Scale(20), tabRect.top + Scale(2),
-                           tabRect.right - Scale(4), tabRect.bottom - Scale(2) };
-        ::SetTextColor(dc, RGB(96, 103, 111));
+        // 关闭按钮：命中区 24px，× 用大一号的字体
+        RECT closeRect = { tabRect.right - Scale(26), tabRect.top + Scale(2),
+                           tabRect.right - Scale(2), tabRect.bottom - Scale(2) };
+        if (hovered && m_tabHoverClose)
+        {
+            HBRUSH closeBrush = ::CreateSolidBrush(RGB(253, 231, 233));
+            ::FillRect(dc, &closeRect, closeBrush);
+            ::DeleteObject(closeBrush);
+        }
+
+        HGDIOBJ oldCloseFont = ::SelectObject(dc, m_tabCloseFont != nullptr
+                                                       ? m_tabCloseFont
+                                                       : m_hUiFont);
+        ::SetTextColor(dc, (hovered && m_tabHoverClose) ? RGB(196, 43, 28)
+                                                        : RGB(96, 103, 111));
         ::DrawTextW(dc, L"×", -1, &closeRect,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        ::SelectObject(dc, oldCloseFont);
 
-        m_tabRects[i] = tabRect;
-        m_tabCloseRects[i] = closeRect;
+        // 命中区裁到视口内，滚出去的部分点不到
+        RECT hit = tabRect;
+        hit.left = (hit.left < viewportLeft) ? viewportLeft : hit.left;
+        hit.right = (hit.right > viewportRight) ? viewportRight : hit.right;
+        RECT closeHit = closeRect;
+        closeHit.left = (closeHit.left < viewportLeft) ? viewportLeft : closeHit.left;
+        closeHit.right = (closeHit.right > viewportRight) ? viewportRight : closeHit.right;
 
-        x = tabRect.right + gap;
+        m_tabRects[i] = hit;
+        m_tabCloseRects[i] = closeHit;
+
+        x += width + gap;
     }
 
-    // 「+」跟在最后一个标签后面
+    // 「+」在最后一个标签后面
     m_tabPlusRect = { x, top, x + plusWidth, bottom };
-    if (m_tabPlusRect.right > clientRect.right - Scale(4))
+    if (m_tabPlusRect.left < viewportRight)
     {
-        const int shift = m_tabPlusRect.right - (clientRect.right - Scale(4));
-        m_tabPlusRect.left -= shift;
-        m_tabPlusRect.right -= shift;
+        ::SetTextColor(dc, RGB(80, 88, 96));
+        ::DrawTextW(dc, L"+", -1, &m_tabPlusRect,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    ::SetTextColor(dc, RGB(80, 88, 96));
-    ::DrawTextW(dc, L"+", -1, &m_tabPlusRect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    else
+    {
+        ::SetRectEmpty(&m_tabPlusRect);
+    }
+
+    ::RestoreDC(dc, savedDc);
+
+    // 左右箭头（只在溢出时出现）
+    if (overflow)
+    {
+        m_tabLeftRect = { baseLeft, top, baseLeft + arrowWidth, bottom };
+        m_tabRightRect = { baseRight - arrowWidth, top, baseRight, bottom };
+
+        const int contentWithPlus = contentWidth + gap + plusWidth;
+        const int maxOffset = (contentWithPlus > available) ? (contentWithPlus - available) : 0;
+
+        HBRUSH arrowBrush = ::CreateSolidBrush(RGB(246, 247, 249));
+        ::FillRect(dc, &m_tabLeftRect, arrowBrush);
+        ::FillRect(dc, &m_tabRightRect, arrowBrush);
+        ::DeleteObject(arrowBrush);
+
+        HGDIOBJ oldArrowFont = ::SelectObject(dc, m_tabCloseFont != nullptr
+                                                       ? m_tabCloseFont
+                                                       : m_hUiFont);
+
+        ::SetTextColor(dc, (m_tabScrollOffset > 0) ? RGB(60, 68, 76) : RGB(190, 195, 200));
+        ::DrawTextW(dc, L"‹", -1, &m_tabLeftRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        ::SetTextColor(dc, (m_tabScrollOffset < maxOffset) ? RGB(60, 68, 76) : RGB(190, 195, 200));
+        ::DrawTextW(dc, L"›", -1, &m_tabRightRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        ::SelectObject(dc, oldArrowFont);
+    }
 
     ::SelectObject(dc, oldFont);
 }
@@ -2473,6 +2655,132 @@ int MainWindow::HitTestTab(POINT pt, bool& closeButton) const
         }
     }
     return -1;
+}
+
+void MainWindow::UpdateTabHover(POINT pt)
+{
+    int hover = -1;
+    bool hoverClose = false;
+
+    if (pt.y < TabBarHeight())
+    {
+        bool closeButton = false;
+        const int index = HitTestTab(pt, closeButton);
+        if (index >= 0)
+        {
+            hover = index;
+            hoverClose = closeButton;
+        }
+    }
+
+    if (hover != m_tabHover || hoverClose != m_tabHoverClose)
+    {
+        m_tabHover = hover;
+        m_tabHoverClose = hoverClose;
+
+        RECT strip = {};
+        ::GetClientRect(m_hWnd, &strip);
+        strip.bottom = TabBarHeight();
+        ::InvalidateRect(m_hWnd, &strip, FALSE);
+    }
+
+    if (!m_tabTracking && pt.y < TabBarHeight())
+    {
+        TRACKMOUSEEVENT track = {};
+        track.cbSize = sizeof(track);
+        track.dwFlags = TME_LEAVE;
+        track.hwndTrack = m_hWnd;
+        ::TrackMouseEvent(&track);
+        m_tabTracking = true;
+    }
+}
+
+void MainWindow::ScrollTabs(int delta)
+{
+    if (m_tabs.empty() || TabBarHeight() <= 0)
+    {
+        return;
+    }
+
+    m_tabScrollOffset += delta;
+    if (m_tabScrollOffset < 0)
+    {
+        m_tabScrollOffset = 0;
+    }
+
+    RECT strip = {};
+    ::GetClientRect(m_hWnd, &strip);
+    strip.bottom = TabBarHeight();
+    ::InvalidateRect(m_hWnd, &strip, FALSE);
+}
+
+void MainWindow::UpdateTabDrag(POINT pt)
+{
+    if (m_tabDragIndex < 0)
+    {
+        return;
+    }
+
+    if (!m_tabDragging && ::abs(pt.x - m_tabDragStartX) > Scale(4))
+    {
+        m_tabDragging = true;
+    }
+    if (!m_tabDragging)
+    {
+        return;
+    }
+
+    int target = m_tabDragIndex;
+    int bestDistance = INT_MAX;
+
+    for (size_t i = 0; i < m_tabRects.size(); ++i)
+    {
+        const RECT& rect = m_tabRects[i];
+        if (::IsRectEmpty(&rect))
+        {
+            continue;
+        }
+
+        const int center = (rect.left + rect.right) / 2;
+        const int distance = ::abs(center - pt.x);
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            target = static_cast<int>(i);
+        }
+    }
+
+    if (target == m_tabDragIndex)
+    {
+        return;
+    }
+
+    TabState moved = std::move(m_tabs[m_tabDragIndex]);
+    m_tabs.erase(m_tabs.begin() + m_tabDragIndex);
+    m_tabs.insert(m_tabs.begin() + target, std::move(moved));
+
+    if (m_activeTab == static_cast<size_t>(m_tabDragIndex))
+    {
+        m_activeTab = static_cast<size_t>(target);
+    }
+    else if (m_tabDragIndex < static_cast<int>(m_activeTab) &&
+             target >= static_cast<int>(m_activeTab))
+    {
+        --m_activeTab;
+    }
+    else if (m_tabDragIndex > static_cast<int>(m_activeTab) &&
+             target <= static_cast<int>(m_activeTab))
+    {
+        ++m_activeTab;
+    }
+
+    m_tabDragIndex = target;
+    m_tabDragStartX = pt.x;
+
+    RECT strip = {};
+    ::GetClientRect(m_hWnd, &strip);
+    strip.bottom = TabBarHeight();
+    ::InvalidateRect(m_hWnd, &strip, FALSE);
 }
 
 // ----------------------------------------------------------------------------
