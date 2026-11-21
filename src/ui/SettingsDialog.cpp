@@ -13,8 +13,11 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <shobjidl.h>
+#include <uxtheme.h>
 
 #include "ui/SettingsDialog.h"
+
+#pragma comment(lib, "uxtheme.lib")
 
 #include "core/Logger.h"
 #include "core/Settings.h"
@@ -30,8 +33,8 @@ namespace
 
 const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
-const int kClientWidth  = 420;
-const int kClientHeight = 780;
+const int kClientWidth  = 460;
+const int kClientHeight = 900;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -43,10 +46,7 @@ const int kControlIdShellWindow    = 4005;
 const int kControlIdDefaultManager = 4006;
 const int kControlIdProxy          = 4007;
 const int kControlIdListary        = 4008;
-const int kControlIdRadioThisPc    = 4010;
-const int kControlIdRadioHome      = 4011;
-const int kControlIdRadioCustom    = 4012;
-const int kControlIdRadioLast      = 4013;
+const int kControlIdStartupCombo   = 4018;
 const int kControlIdBackground     = 4014;
 const int kControlIdWinE           = 4015;
 const int kControlIdTabs           = 4016;
@@ -67,11 +67,14 @@ const wchar_t* kHiddenCheckText = L"显示隐藏的文件和文件夹";
 const wchar_t* kSystemCheckText = L"显示受保护的操作系统文件";
 const wchar_t* kHiddenHintText  = L"隐藏项用浅灰文字标示。改动立即生效，不用重启程序。";
 
-const wchar_t* kStartupTitle = L"启动位置（无参数启动 / Win+E 都用它）";
+const wchar_t* kStartupTitle = L"启动位置";
 const wchar_t* kRadioThisPcText = L"此电脑";
 const wchar_t* kRadioHomeText   = L"主文件夹";
 const wchar_t* kRadioCustomText = L"自定义文件夹";
 const wchar_t* kRadioLastText   = L"最后一次打开的文件夹";
+const wchar_t* kStartupOptions[] = {
+    kRadioLastText, kRadioHomeText, kRadioThisPcText, kRadioCustomText
+};
 const wchar_t* kStartupHintText = L"自定义目录不存在时回退到主文件夹；显式带路径启动不受影响。";
 
 const wchar_t* kQuickTitle = L"快速启动";
@@ -84,7 +87,11 @@ const wchar_t* kWindowTitle = L"窗口模式";
 const wchar_t* kTabsCheckText = L"多标签模式（关掉就是一个窗口一个目录）";
 const wchar_t* kSingleInstanceCheckText = L"只允许一个实例（所有打开都进现有窗口）";
 
-const wchar_t* kSectionTitle = L"注册与集成（可分别勾选，互不影响）";
+const wchar_t* kSectionTitle = L"注册与集成";
+const wchar_t* kViewTitle = L"查看";
+const wchar_t* kQuickTitleShort = L"快速启动";
+const wchar_t* kWindowTitleShort = L"窗口";
+const wchar_t* kSubtitleText = L"外观、启动与系统集成";
 
 const wchar_t* kDefaultCheckText = L"注册为默认文件管理器（文件夹和磁盘）";
 const wchar_t* kDefaultHintText  = L"只改当前用户注册表；双击文件夹/磁盘用本程序打开。";
@@ -101,6 +108,100 @@ const wchar_t* kShellWindowHintText  = L"注册为 Shell 窗口；Listary 等工
 
 const wchar_t* kActionFailedText = L"上次操作失败，详情见日志文件。";
 
+// 自绘复选框：保留 BS_AUTOCHECKBOX 的点击/状态行为，只替换外观。
+LRESULT CALLBACK SettingsCheckboxSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                              LPARAM lParam, UINT_PTR idSubclass,
+                                              DWORD_PTR refData)
+{
+    (void)idSubclass;
+    (void)refData;
+
+    if (msg == WM_ERASEBKGND)
+    {
+        return 1;
+    }
+
+    if (msg == WM_PAINT)
+    {
+        PAINTSTRUCT ps = {};
+        HDC dc = ::BeginPaint(hwnd, &ps);
+
+        RECT rc = {};
+        ::GetClientRect(hwnd, &rc);
+
+        HBRUSH background = ::CreateSolidBrush(RGB(255, 255, 255));
+        ::FillRect(dc, &rc, background);
+        ::DeleteObject(background);
+
+        const int dpi = ::GetDpiForWindow(hwnd);
+        const int boxSize = ::MulDiv(16, dpi > 0 ? dpi : 96, 96);
+        const int boxLeft = ::MulDiv(4, dpi > 0 ? dpi : 96, 96);
+        const int boxTop = (rc.bottom - boxSize) / 2;
+
+        RECT box = { boxLeft, boxTop, boxLeft + boxSize, boxTop + boxSize };
+        const bool checked = (::SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        const bool enabled = ::IsWindowEnabled(hwnd) != FALSE;
+
+        const COLORREF accent = enabled ? RGB(0, 103, 192) : RGB(190, 195, 201);
+        const COLORREF boxFill = checked ? accent : RGB(255, 255, 255);
+        const COLORREF boxBorder = checked ? accent
+                                           : (enabled ? RGB(185, 190, 197) : RGB(214, 217, 222));
+
+        HBRUSH fillBrush = ::CreateSolidBrush(boxFill);
+        HPEN borderPen = ::CreatePen(PS_SOLID, 1, boxBorder);
+        HGDIOBJ oldBrush = ::SelectObject(dc, fillBrush);
+        HGDIOBJ oldPen = ::SelectObject(dc, borderPen);
+        ::RoundRect(dc, box.left, box.top, box.right, box.bottom,
+                    ::MulDiv(4, dpi > 0 ? dpi : 96, 96),
+                    ::MulDiv(4, dpi > 0 ? dpi : 96, 96));
+        ::SelectObject(dc, oldBrush);
+        ::SelectObject(dc, oldPen);
+        ::DeleteObject(fillBrush);
+        ::DeleteObject(borderPen);
+
+        if (checked)
+        {
+            HPEN checkPen = ::CreatePen(PS_SOLID, ::MulDiv(2, dpi > 0 ? dpi : 96, 96),
+                                        RGB(255, 255, 255));
+            HGDIOBJ old = ::SelectObject(dc, checkPen);
+            ::MoveToEx(dc, box.left + boxSize / 4, box.top + boxSize / 2, nullptr);
+            ::LineTo(dc, box.left + boxSize / 2 - ::MulDiv(1, dpi > 0 ? dpi : 96, 96),
+                     box.bottom - boxSize / 4);
+            ::LineTo(dc, box.right - boxSize / 4, box.top + boxSize / 4);
+            ::SelectObject(dc, old);
+            ::DeleteObject(checkPen);
+        }
+
+        wchar_t text[512] = {};
+        ::GetWindowTextW(hwnd, text, ARRAYSIZE(text));
+
+        RECT textRect = rc;
+        textRect.left = box.right + ::MulDiv(8, dpi > 0 ? dpi : 96, 96);
+        textRect.right -= ::MulDiv(4, dpi > 0 ? dpi : 96, 96);
+
+        HFONT font = reinterpret_cast<HFONT>(::SendMessageW(hwnd, WM_GETFONT, 0, 0));
+        HGDIOBJ oldFont = ::SelectObject(dc, font != nullptr ? font
+                                                             : ::GetStockObject(DEFAULT_GUI_FONT));
+        ::SetBkMode(dc, TRANSPARENT);
+        ::SetTextColor(dc, enabled ? RGB(42, 46, 52) : RGB(160, 164, 170));
+        ::DrawTextW(dc, text, -1, &textRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        ::SelectObject(dc, oldFont);
+
+        ::EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    if (msg == WM_ENABLE || msg == WM_SETFOCUS || msg == WM_KILLFOCUS)
+    {
+        ::InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    return ::DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+
+
 } // 匿名命名空间
 
 SettingsDialog::~SettingsDialog()
@@ -112,6 +213,10 @@ SettingsDialog::~SettingsDialog()
     if (m_fontTitle != nullptr)
     {
         ::DeleteObject(m_fontTitle);
+    }
+    if (m_fontSection != nullptr)
+    {
+        ::DeleteObject(m_fontSection);
     }
 }
 
@@ -164,6 +269,10 @@ bool SettingsDialog::CreateDialogWindow()
         titleFont.lfWeight = FW_SEMIBOLD;
         titleFont.lfHeight = static_cast<LONG>(titleFont.lfHeight * 1.25);
         m_fontTitle = ::CreateFontIndirectW(&titleFont);
+
+        LOGFONTW sectionFont = metrics.lfMessageFont;
+        sectionFont.lfWeight = FW_SEMIBOLD;
+        m_fontSection = ::CreateFontIndirectW(&sectionFont);
     }
 
     if (m_font == nullptr)
@@ -248,6 +357,7 @@ bool SettingsDialog::CreateDialogWindow()
         if (check != nullptr)
         {
             ::SendMessageW(check, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
+            ::SetWindowSubclass(check, &SettingsCheckboxSubclassProc, 1, 0);
         }
         return check;
     };
@@ -261,12 +371,26 @@ bool SettingsDialog::CreateDialogWindow()
     SetChecked(m_hCheckHidden, core::Settings::Instance().ShowHiddenFiles());
     SetChecked(m_hCheckSystem, core::Settings::Instance().ShowSystemFiles());
 
-    // ---- 启动位置：4 个互斥单选 ----
-    m_hRadioThisPc = createCheck(kRadioThisPcText, kControlIdRadioThisPc,
-                                 BS_AUTORADIOBUTTON | WS_GROUP);
-    m_hRadioHome   = createCheck(kRadioHomeText, kControlIdRadioHome, BS_AUTORADIOBUTTON);
-    m_hRadioCustom = createCheck(kRadioCustomText, kControlIdRadioCustom, BS_AUTORADIOBUTTON);
-    m_hRadioLast   = createCheck(kRadioLastText, kControlIdRadioLast, BS_AUTORADIOBUTTON);
+    // ---- 启动位置：下拉框 ----
+    m_hStartupCombo = ::CreateWindowExW(
+        0, L"COMBOBOX", nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        0, 0, 0, 0, m_hWnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdStartupCombo)),
+        ::GetModuleHandleW(nullptr), nullptr);
+
+    if (m_hStartupCombo != nullptr)
+    {
+        ::SendMessageW(m_hStartupCombo, WM_SETFONT,
+                       reinterpret_cast<WPARAM>(m_font), TRUE);
+        ::SetWindowTheme(m_hStartupCombo, L"Explorer", nullptr);
+
+        for (const wchar_t* option : kStartupOptions)
+        {
+            ::SendMessageW(m_hStartupCombo, CB_ADDSTRING, 0,
+                           reinterpret_cast<LPARAM>(option));
+        }
+    }
 
     // ---- 快速启动 ----
     m_hCheckBackground = createCheck(kBackgroundCheckText, kControlIdBackground, BS_AUTOCHECKBOX);
@@ -296,66 +420,65 @@ void SettingsDialog::Layout()
     ::GetClientRect(m_hWnd, &clientRect);
 
     const int padding = Scale(kPadding);
-    const int width   = clientRect.right - padding * 2;
-    const int height  = Scale(24);
+    const int width = clientRect.right - padding * 2;
+    const int rowHeight = Scale(24);
 
     auto place = [&](HWND control, int y)
     {
         if (control != nullptr)
         {
-            ::MoveWindow(control, padding, padding + Scale(y), width, height, TRUE);
+            ::MoveWindow(control, padding, Scale(y),
+                         width, rowHeight, TRUE);
         }
     };
 
-    // 查看选项
-    place(m_hCheck,       44);
-    place(m_hCheckHidden, 118);
-    place(m_hCheckSystem, 146);
+    // 查看
+    place(m_hCheck,       112);
+    place(m_hCheckHidden, 146);
+    place(m_hCheckSystem, 180);
 
-    // 启动位置：2x2 摆放
-    const int halfWidth = (width - Scale(12)) / 2;
-    auto placeAt = [&](HWND control, int x, int y, int w)
+    // 启动位置下拉框（给下拉列表留足高度）
+    if (m_hStartupCombo != nullptr)
     {
-        if (control != nullptr)
-        {
-            ::MoveWindow(control, padding + Scale(x), padding + Scale(y),
-                         w, height, TRUE);
-        }
-    };
+        ::MoveWindow(m_hStartupCombo, padding, Scale(292),
+                     width, Scale(200), TRUE);
+    }
 
-    placeAt(m_hRadioThisPc, 0,   224, halfWidth);
-    placeAt(m_hRadioHome,   190, 224, halfWidth);
-    placeAt(m_hRadioCustom, 0,   248, halfWidth);
-    placeAt(m_hRadioLast,   190, 248, halfWidth);
-
-    // 「浏览...」按钮
-    const int browseWidth  = Scale(80);
+    // 自定义路径 + 浏览
+    const int browseWidth = Scale(80);
     const int browseHeight = Scale(28);
-    m_browseRect.left   = clientRect.right - padding - browseWidth;
-    m_browseRect.top    = padding + Scale(266);
-    m_browseRect.right  = m_browseRect.left + browseWidth;
+    const int pathY = Scale(330);
+
+    m_browseRect.left = clientRect.right - padding - browseWidth;
+    m_browseRect.top = pathY;
+    m_browseRect.right = m_browseRect.left + browseWidth;
     m_browseRect.bottom = m_browseRect.top + browseHeight;
 
-    // 快速启动
-    place(m_hCheckBackground, 334);
-    place(m_hCheckWinE,       374);
+    m_pathRect.left = padding;
+    m_pathRect.top = pathY;
+    m_pathRect.right = m_browseRect.left - Scale(8);
+    m_pathRect.bottom = m_browseRect.bottom;
 
-    // 窗口模式
-    place(m_hCheckTabs,           424);
-    place(m_hCheckSingleInstance, 458);
+    // 快速启动
+    place(m_hCheckBackground, 448);
+    place(m_hCheckWinE,       482);
+
+    // 窗口
+    place(m_hCheckTabs,           590);
+    place(m_hCheckSingleInstance, 624);
 
     // 注册与集成
-    place(m_hCheckDefaultManager, 516);
-    place(m_hCheckProxy,          560);
-    place(m_hCheckListary,        604);
-    place(m_hCheckShellWindow,    648);
+    place(m_hCheckDefaultManager, 690);
+    place(m_hCheckProxy,          720);
+    place(m_hCheckListary,        750);
+    place(m_hCheckShellWindow,    780);
 
     // 关闭按钮
-    const int buttonWidth  = Scale(88);
+    const int buttonWidth = Scale(88);
     const int buttonHeight = Scale(30);
-    m_closeRect.left   = clientRect.right - padding - buttonWidth;
-    m_closeRect.top    = clientRect.bottom - padding - buttonHeight;
-    m_closeRect.right  = m_closeRect.left + buttonWidth;
+    m_closeRect.left = clientRect.right - padding - buttonWidth;
+    m_closeRect.top = clientRect.bottom - padding - buttonHeight;
+    m_closeRect.right = m_closeRect.left + buttonWidth;
     m_closeRect.bottom = m_closeRect.top + buttonHeight;
 }
 
@@ -399,39 +522,54 @@ void SettingsDialog::ApplyCheckState()
 
 void SettingsDialog::ApplyStartupLocation()
 {
+    if (m_hStartupCombo == nullptr)
+    {
+        return;
+    }
+
+    const int sel = static_cast<int>(::SendMessageW(m_hStartupCombo, CB_GETCURSEL, 0, 0));
+    const core::StartupLocation order[] = {
+        core::StartupLocation::LastFolder,
+        core::StartupLocation::Home,
+        core::StartupLocation::ThisPc,
+        core::StartupLocation::Custom,
+    };
+
+    if (sel < 0 || sel >= static_cast<int>(sizeof(order) / sizeof(order[0])))
+    {
+        return;
+    }
+
     core::Settings& settings = core::Settings::Instance();
-
-    if (IsChecked(m_hRadioThisPc))
-    {
-        settings.SetStartup(core::StartupLocation::ThisPc);
-    }
-    else if (IsChecked(m_hRadioHome))
-    {
-        settings.SetStartup(core::StartupLocation::Home);
-    }
-    else if (IsChecked(m_hRadioCustom))
-    {
-        settings.SetStartup(core::StartupLocation::Custom);
-    }
-    else
-    {
-        settings.SetStartup(core::StartupLocation::LastFolder);
-    }
-
+    settings.SetStartup(order[sel]);
     settings.Save();
     ui::ReloadBackgroundHost();
 
     Logger::Info(L"设置：启动位置 = " + std::to_wstring(static_cast<int>(settings.Startup())));
+    RefreshStartupControls();
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
 }
 
 void SettingsDialog::RefreshStartupControls()
 {
+    if (m_hStartupCombo == nullptr)
+    {
+        return;
+    }
+
     const core::StartupLocation location = core::Settings::Instance().Startup();
-    SetChecked(m_hRadioThisPc, location == core::StartupLocation::ThisPc);
-    SetChecked(m_hRadioHome,   location == core::StartupLocation::Home);
-    SetChecked(m_hRadioCustom, location == core::StartupLocation::Custom);
-    SetChecked(m_hRadioLast,   location == core::StartupLocation::LastFolder);
+    int sel = 0;
+    switch (location)
+    {
+    case core::StartupLocation::Home:   sel = 1; break;
+    case core::StartupLocation::ThisPc: sel = 2; break;
+    case core::StartupLocation::Custom: sel = 3; break;
+    default:                            sel = 0; break;
+    }
+
+    ::SendMessageW(m_hStartupCombo, CB_SETCURSEL, sel, 0);
+    m_customPathActive = (location == core::StartupLocation::Custom);
+    ::InvalidateRect(m_hWnd, nullptr, TRUE);
 }
 
 void SettingsDialog::BrowseCustomFolder()
@@ -599,47 +737,59 @@ void SettingsDialog::Draw(HDC dc)
     ::FillRect(dc, &clientRect, background);
     ::DeleteObject(background);
 
-    ::SetBkMode(dc, TRANSPARENT);
+    auto drawCard = [&](int top, int bottom, const wchar_t* title)
+    {
+        RECT card = { Scale(12), Scale(top), clientRect.right - Scale(12), Scale(bottom) };
+
+        HPEN borderPen = ::CreatePen(PS_SOLID, 1, RGB(226, 229, 234));
+        HGDIOBJ oldPen = ::SelectObject(dc, borderPen);
+        HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+        ::RoundRect(dc, card.left, card.top, card.right, card.bottom,
+                    Scale(10), Scale(10));
+        ::SelectObject(dc, oldPen);
+        ::SelectObject(dc, oldBrush);
+        ::DeleteObject(borderPen);
+
+        RECT titleRect = { card.left + Scale(16), card.top + Scale(8),
+                           card.right - Scale(16), card.top + Scale(30) };
+        HGDIOBJ oldFont = ::SelectObject(dc, m_fontSection != nullptr ? m_fontSection : m_font);
+        ::SetTextColor(dc, kTitleColor);
+        ::SetBkMode(dc, TRANSPARENT);
+        ::DrawTextW(dc, title, -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        ::SelectObject(dc, oldFont);
+    };
 
     // ---- 标题 ----
-    RECT titleRect = { Scale(kPadding), Scale(kPadding), clientRect.right - Scale(kPadding),
-                       Scale(kPadding) + Scale(30) };
-
     HGDIOBJ oldFont = ::SelectObject(dc, m_fontTitle);
+    ::SetBkMode(dc, TRANSPARENT);
     ::SetTextColor(dc, kTitleColor);
+
+    RECT titleRect = { Scale(kPadding), Scale(22),
+                       clientRect.right - Scale(kPadding), Scale(54) };
     ::DrawTextW(dc, kTitleText, -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // ---- 查看选项说明 ----
     ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kHintColor);
+    RECT subtitleRect = { Scale(kPadding), Scale(56),
+                          clientRect.right - Scale(kPadding), Scale(76) };
+    ::DrawTextW(dc, kSubtitleText, -1, &subtitleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT hintRect = { Scale(kPadding), Scale(kPadding) + Scale(66),
-                      clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(110) };
+    // ---- 分组卡片 ----
+    drawCard(82, 242, kViewTitle);
+    drawCard(254, 402, kStartupTitle);
+    drawCard(414, 542, kQuickTitleShort);
+    drawCard(554, 650, kWindowTitleShort);
+    drawCard(662, 840, kSectionTitle);
 
-    ::DrawTextW(dc, kHintText1, -1, &hintRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
-    hintRect.top += Scale(18);
-    ::DrawTextW(dc, kHintText2, -1, &hintRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    // 查看提示
+    ::SelectObject(dc, m_font);
+    ::SetTextColor(dc, kHintColor);
+    RECT viewHint = { Scale(kPadding), Scale(212),
+                      clientRect.right - Scale(kPadding), Scale(232) };
+    ::DrawTextW(dc, L"隐藏/系统项用浅灰显示；改动立即生效。", -1, &viewHint,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT hiddenHintRect = { Scale(kPadding), Scale(kPadding) + Scale(170),
-                            clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(190) };
-    ::DrawTextW(dc, kHiddenHintText, -1, &hiddenHintRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
-
-    // 分隔线 1
-    const int divider1 = Scale(kPadding) + Scale(192);
-    HPEN dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
-    HGDIOBJ oldPen  = ::SelectObject(dc, dividerPen);
-    ::MoveToEx(dc, Scale(kPadding), divider1, nullptr);
-    ::LineTo(dc, clientRect.right - Scale(kPadding), divider1);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(dividerPen);
-
-    // ---- 启动位置 ----
-    ::SetTextColor(dc, kTitleColor);
-    RECT startupTitle = { Scale(kPadding), Scale(kPadding) + Scale(198),
-                          clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(220) };
-    ::DrawTextW(dc, kStartupTitle, -1, &startupTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
-
-    // 自定义路径
+    // ---- 启动位置：自定义路径 ----
     const core::Settings& settings = core::Settings::Instance();
     std::wstring path = settings.CustomStartupFolder();
     if (path.empty())
@@ -647,83 +797,70 @@ void SettingsDialog::Draw(HDC dc)
         path = L"（未选择）";
     }
 
-    RECT pathRect = { Scale(kPadding) + Scale(24), m_browseRect.top + Scale(2),
-                      m_browseRect.left - Scale(8), m_browseRect.bottom };
-    ::SetTextColor(dc, path == L"（未选择）" ? kHintColor : kTitleColor);
-    ::DrawTextW(dc, path.c_str(), -1, &pathRect,
+    const bool customActive = m_customPathActive;
+    HBRUSH pathBackground = ::CreateSolidBrush(customActive ? RGB(250, 251, 253)
+                                                           : RGB(247, 248, 250));
+    ::FillRect(dc, &m_pathRect, pathBackground);
+    ::DeleteObject(pathBackground);
+
+    HPEN pathPen = ::CreatePen(PS_SOLID, 1, RGB(224, 227, 232));
+    HGDIOBJ oldPathPen = ::SelectObject(dc, pathPen);
+    HGDIOBJ oldPathBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+    ::RoundRect(dc, m_pathRect.left, m_pathRect.top, m_pathRect.right, m_pathRect.bottom,
+                Scale(6), Scale(6));
+    ::SelectObject(dc, oldPathPen);
+    ::SelectObject(dc, oldPathBrush);
+    ::DeleteObject(pathPen);
+
+    RECT pathText = m_pathRect;
+    pathText.left += Scale(10);
+    pathText.right -= Scale(8);
+    ::SetTextColor(dc, customActive ? kTitleColor : RGB(160, 164, 170));
+    ::DrawTextW(dc, path.c_str(), -1, &pathText,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
 
-    DrawButton(dc, m_browseRect, L"浏览...", m_hotBrowse, m_pressedBrowse);
+    DrawButton(dc, m_browseRect, L"浏览...", m_hotBrowse && customActive,
+               m_pressedBrowse && customActive, customActive);
 
-    // 分隔线 2
-    const int divider2 = Scale(kPadding) + Scale(302);
-    dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
-    oldPen  = ::SelectObject(dc, dividerPen);
-    ::MoveToEx(dc, Scale(kPadding), divider2, nullptr);
-    ::LineTo(dc, clientRect.right - Scale(kPadding), divider2);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(dividerPen);
-
-    // ---- 快速启动 ----
-    ::SetTextColor(dc, kTitleColor);
-    RECT quickTitle = { Scale(kPadding), Scale(kPadding) + Scale(310),
-                        clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(332) };
-    ::DrawTextW(dc, kQuickTitle, -1, &quickTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
-
-    // 分隔线 3（快速启动 / 窗口模式）
-    const int divider3 = Scale(kPadding) + Scale(402);
-    dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
-    oldPen  = ::SelectObject(dc, dividerPen);
-    ::MoveToEx(dc, Scale(kPadding), divider3, nullptr);
-    ::LineTo(dc, clientRect.right - Scale(kPadding), divider3);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(dividerPen);
-
-    // ---- 窗口模式 ----
-    ::SetTextColor(dc, kTitleColor);
-    RECT windowTitle = { Scale(kPadding), Scale(kPadding) + Scale(408),
-                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(428) };
-    ::DrawTextW(dc, kWindowTitle, -1, &windowTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
-
-    // 分隔线 4（窗口模式 / 注册与集成）
-    const int divider4 = Scale(kPadding) + Scale(484);
-    dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
-    oldPen  = ::SelectObject(dc, dividerPen);
-    ::MoveToEx(dc, Scale(kPadding), divider4, nullptr);
-    ::LineTo(dc, clientRect.right - Scale(kPadding), divider4);
-    ::SelectObject(dc, oldPen);
-    ::DeleteObject(dividerPen);
-
-    // ---- 注册与集成 ----
-    ::SetTextColor(dc, kTitleColor);
-    RECT sectionRect = { Scale(kPadding), Scale(kPadding) + Scale(492),
-                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(514) };
-    ::DrawTextW(dc, kSectionTitle, -1, &sectionRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
-
+    RECT startupHint = { Scale(kPadding), Scale(370),
+                         clientRect.right - Scale(kPadding), Scale(390) };
     ::SetTextColor(dc, kHintColor);
-    RECT regHint = { Scale(kPadding), Scale(kPadding) + Scale(672),
-                     clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(692) };
-    ::DrawTextW(dc, L"代理和 Listary 插件需要管理员权限；失败详情见日志文件。", -1, &regHint,
-                DT_LEFT | DT_TOP | DT_SINGLELINE);
+    ::DrawTextW(dc, L"自定义目录不存在时回退到主文件夹。", -1, &startupHint,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
+    // 快速启动提示
+    RECT quickHint = { Scale(kPadding), Scale(512),
+                       clientRect.right - Scale(kPadding), Scale(532) };
+    ::DrawTextW(dc, L"勾选 Win+E 会自动开启后台启动。", -1, &quickHint,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // 注册提示 / 错误（同一行，错误时替换提示）
+    RECT regHint = { Scale(kPadding), Scale(814),
+                     clientRect.right - Scale(kPadding), Scale(834) };
     if (m_lastActionFailed)
     {
-        RECT errorRect = { Scale(kPadding), Scale(kPadding) + Scale(696),
-                           clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(716) };
         ::SetTextColor(dc, kErrorColor);
-        ::DrawTextW(dc, kActionFailedText, -1, &errorRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
+        ::DrawTextW(dc, kActionFailedText, -1, &regHint,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    else
+    {
+        ::SetTextColor(dc, kHintColor);
+        ::DrawTextW(dc, L"代理/Listary 需要管理员权限；失败详见日志。", -1, &regHint,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     ::SelectObject(dc, oldFont);
-    DrawButton(dc, m_closeRect, L"关闭", m_hotClose, m_pressedClose);
+    DrawButton(dc, m_closeRect, L"关闭", m_hotClose, m_pressedClose, true);
 }
 
 void SettingsDialog::DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
-                                bool hot, bool pressed)
+                                bool hot, bool pressed, bool enabled)
 {
     ui::FlatButtonVisual visual;
     visual.hot     = hot;
     visual.pressed = pressed;
+    visual.enabled = enabled;
 
     ui::DrawFlatButton(dc, rect, text, m_font, visual);
 }
@@ -737,6 +874,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         const int controlId = LOWORD(wParam);
         const int notifyCode = HIWORD(wParam);
 
+        if (controlId == kControlIdStartupCombo && notifyCode == CBN_SELCHANGE)
+        {
+            ApplyStartupLocation();
+            return 0;
+        }
+
         if (notifyCode != BN_CLICKED)
         {
             break;
@@ -748,15 +891,6 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             controlId == kControlIdShellWindow)
         {
             ApplyCheckState();
-            return 0;
-        }
-
-        if (controlId == kControlIdRadioThisPc ||
-            controlId == kControlIdRadioHome ||
-            controlId == kControlIdRadioCustom ||
-            controlId == kControlIdRadioLast)
-        {
-            ApplyStartupLocation();
             return 0;
         }
 
@@ -810,12 +944,17 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_ERASEBKGND:
         return 1;
 
+    case WM_CTLCOLORBTN:
+        ::SetBkColor(reinterpret_cast<HDC>(wParam), kBackgroundColor);
+        ::SetTextColor(reinterpret_cast<HDC>(wParam), kTitleColor);
+        return reinterpret_cast<LRESULT>(::GetStockObject(WHITE_BRUSH));
+
     case WM_MOUSEMOVE:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
         const bool hotClose  = (::PtInRect(&m_closeRect, pt) != FALSE);
-        const bool hotBrowse = (::PtInRect(&m_browseRect, pt) != FALSE);
+        const bool hotBrowse = m_customPathActive && (::PtInRect(&m_browseRect, pt) != FALSE);
 
         if (hotClose != m_hotClose)
         {
@@ -868,7 +1007,7 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
             return 0;
         }
-        if (::PtInRect(&m_browseRect, pt))
+        if (m_customPathActive && ::PtInRect(&m_browseRect, pt))
         {
             m_pressedBrowse = true;
             ::SetCapture(hWnd);
@@ -925,10 +1064,7 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         m_hCheck = nullptr;
         m_hCheckHidden = nullptr;
         m_hCheckSystem = nullptr;
-        m_hRadioThisPc = nullptr;
-        m_hRadioHome = nullptr;
-        m_hRadioCustom = nullptr;
-        m_hRadioLast = nullptr;
+        m_hStartupCombo = nullptr;
         m_hCheckBackground = nullptr;
         m_hCheckWinE = nullptr;
         m_hCheckTabs = nullptr;

@@ -45,7 +45,7 @@ private:
 
     void Draw(HDC dc);
     void DrawButton(HDC dc, const RECT& rect, const wchar_t* text,
-                    bool hot, bool pressed);
+                    bool hot, bool pressed, bool enabled = true);
 
     // 查看类复选框 → 写配置
     void ApplyCheckState();
@@ -75,12 +75,11 @@ private:
     HWND  m_hCheckHidden = nullptr;
     HWND  m_hCheckSystem = nullptr;
 
-    // 启动位置
-    HWND  m_hRadioThisPc = nullptr;
-    HWND  m_hRadioHome = nullptr;
-    HWND  m_hRadioCustom = nullptr;
-    HWND  m_hRadioLast = nullptr;
+    // 启动位置（下拉框）
+    HWND  m_hStartupCombo = nullptr;
+    RECT  m_pathRect = {};
     RECT  m_browseRect = {};
+    bool  m_customPathActive = false;
     bool  m_hotBrowse = false;
     bool  m_pressedBrowse = false;
 
@@ -98,8 +97,9 @@ private:
     HWND  m_hCheckListary = nullptr;
     HWND  m_hCheckShellWindow = nullptr;
 
-    HFONT m_font      = nullptr;
-    HFONT m_fontTitle = nullptr;
+    HFONT m_font        = nullptr;
+    HFONT m_fontTitle   = nullptr;
+    HFONT m_fontSection = nullptr;
 
     RECT  m_closeRect  = {};
     bool  m_hotClose   = false;
