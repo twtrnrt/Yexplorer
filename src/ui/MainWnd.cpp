@@ -892,6 +892,34 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
 
+    case WM_NCCALCSIZE:
+        if (wParam != FALSE)
+        {
+            // 去掉顶部那圈 7px 原生边框：客户区从窗口最上方开始；
+            // 左/右/下保留边框，顶部缩放仍由 WM_NCHITTEST 处理。
+            NCCALCSIZE_PARAMS* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+            if (::IsZoomed(m_hWnd))
+            {
+                MONITORINFO monitor = {};
+                monitor.cbSize = sizeof(monitor);
+                if (::GetMonitorInfoW(::MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST),
+                                      &monitor))
+                {
+                    params->rgrc[0] = monitor.rcWork;
+                }
+            }
+            else
+            {
+                const int border = ::GetSystemMetrics(SM_CXSIZEFRAME) +
+                                   ::GetSystemMetrics(SM_CXPADDEDBORDER);
+                params->rgrc[0].left   += border;
+                params->rgrc[0].right  -= border;
+                params->rgrc[0].bottom -= border;
+            }
+            return 0;
+        }
+        break;
+
     case WM_GETMINMAXINFO:
     {
         // WS_POPUP 默认最大化会铺满整个屏幕（盖住任务栏），这里改成工作区。
