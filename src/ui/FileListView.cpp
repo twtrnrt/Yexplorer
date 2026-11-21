@@ -1333,6 +1333,21 @@ std::wstring FileListView::CurrentPath() const
     return (m_result != nullptr) ? m_result->path : std::wstring();
 }
 
+std::wstring FileListView::GetTopItemPath() const
+{
+    if (m_hWnd == nullptr || m_result == nullptr)
+    {
+        return std::wstring();
+    }
+
+    const int topIndex = ListView_GetTopIndex(m_hWnd);
+    if (topIndex >= 0 && topIndex < static_cast<int>(m_result->entries.size()))
+    {
+        return m_result->entries[static_cast<size_t>(topIndex)].fullPath;
+    }
+    return std::wstring();
+}
+
 std::vector<std::wstring> FileListView::AllPaths() const
 {
     std::vector<std::wstring> paths;

@@ -122,6 +122,9 @@ public:
     // 当前列表显示的是哪个目录（还没数据时返回空串）
     std::wstring CurrentPath() const;
 
+    // 当前列表顶部那一项的完整路径（切标签时恢复滚动位置）
+    std::wstring GetTopItemPath() const;
+
     // 当前列表里所有项的完整路径（用来对比"刷新后多了哪些"）
     std::vector<std::wstring> AllPaths() const;
 

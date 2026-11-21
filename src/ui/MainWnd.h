@@ -121,6 +121,9 @@ static const int kCommandAutoFitColumns  = 3220;  // Ctrl+加号：列宽自适�
 
 // 右键「在终端中打开」（文件夹、文件夹空白处、盘符根都给）
 static const int kCommandOpenTerminal   = 3221;
+static const int kCommandNewTab         = 3222;  // Ctrl+T：新标签（主文件夹）
+static const int kCommandNextTab        = 3223;  // Ctrl+Tab
+static const int kCommandPrevTab        = 3224;  // Ctrl+Shift+Tab
 
 class MainWindow
 {
@@ -182,6 +185,22 @@ private:
         std::wstring parentPath;    // 向上按钮要去的地方（如「主文件夹」）
     };
 
+    // 一个标签的完整状态。窗口只有一个 FileListView，切标签时把这份状态
+    // 套回去（路径/历史/视图/排序/选中/滚动/来源名各自独立）。
+    struct TabState
+    {
+        std::wstring path;
+        std::wstring title;
+        NavigationHistory history;
+        FileListView::ViewMode viewMode = FileListView::ViewMode::Details;
+        bool viewModeManual = false;
+        std::vector<std::wstring> selectedPaths;
+        std::wstring topItemPath;
+        int sortColumn = 0;
+        bool sortAscending = true;
+        std::map<std::wstring, NavigationOrigin> origins;
+    };
+
     // parentPath 留空表示"上一级就是进来之前待着的那个目录"（列表双击走这条）；
     // 传了具体路径就用它（左栏"常用位置"那几项固定回「主文件夹」）。
     void RecordNavigationOrigin(const std::wstring& path,
@@ -195,6 +214,11 @@ private:
     void GoBack();
     void GoForward();
     void GoUp();
+
+    // ---- 标签 ----
+    void NewTab(const std::wstring& path);
+    void CloseTab(size_t index);
+    void ActivateTab(size_t index);
 
     // 启动后台枚举（只负责枚举与界面刷新，不改历史）
     void StartEnumeration(const std::wstring& path);
@@ -589,6 +613,22 @@ private:
     // ---- 数据 ----
     shell::IconCache   m_iconCache;
     NavigationHistory  m_history;
+
+    // ---- 标签 ----
+    std::vector<TabState> m_tabs;
+    size_t                m_activeTab = 0;
+    std::vector<RECT>     m_tabRects;
+    std::vector<RECT>     m_tabCloseRects;
+    RECT                  m_tabPlusRect = {};
+    std::vector<std::wstring> m_pendingSelection;
+    std::wstring              m_pendingTopItem;
+
+    void SaveActiveTab();
+    void RestoreTab(size_t index);
+    void UpdateActiveTabFromCurrent();
+    void DrawTabBar(HDC dc, const RECT& clientRect);
+    int  HitTestTab(POINT pt, bool& closeButton) const;
+    int  TabBarHeight() const { return m_tabs.empty() ? 0 : Scale(32); }
 
     // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----
     MenuIconCache      m_menuIcons;

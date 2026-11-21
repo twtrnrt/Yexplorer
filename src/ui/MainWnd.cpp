@@ -8,6 +8,8 @@
 // 交互：地址栏回车跳转、按钮导航、双击进目录、双击文件打开
  // ============================================================================
 
+#include <windows.h>
+#include <windowsx.h>
 #include "MainWnd.h"
 #include "ui/ShellWindowHost.h"
 #include "ui/WindowPlacement.h"
@@ -155,6 +157,29 @@ static std::wstring DisplayNameForPath(const std::wstring& path)
 //
 // 普通磁盘目录：看目录还在不在（可能被用户删了、U 盘拔了），不在了就回默认目录；
 // 虚拟项（「::」开头、「shell:」开头）：问 Shell 能不能解析出来。
+// 标签标题：优先用来源名/系统显示名；普通目录只用最后一段（explorer，而不是整条路径）
+static std::wstring TabTitleForPath(const std::wstring& path)
+{
+    std::wstring name = DisplayNameForPath(path);
+    if (name != path)
+    {
+        return name;
+    }
+
+    std::wstring trimmed = path;
+    while (trimmed.size() > 3 && (trimmed.back() == L'\\' || trimmed.back() == L'/'))
+    {
+        trimmed.pop_back();
+    }
+
+    const size_t slash = trimmed.find_last_of(L"\\/");
+    if (slash == std::wstring::npos || slash + 1 >= trimmed.size())
+    {
+        return trimmed;
+    }
+    return trimmed.substr(slash + 1);
+}
+
 static bool IsStartPathUsable(const std::wstring& path)
 {
     if (path.empty())
@@ -697,8 +722,10 @@ void MainWindow::CreateChildControls()
         // 说明：这几个都是"窗口级"快捷键，只在焦点不在输入框时生效
         //       （消息循环里已经判断过，焦点在 Edit 时整张表都会跳过）。
         { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'N', kCommandNewWindow },    // 新窗口
-        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'T', kCommandHomeWindow },   // 主文件夹窗口
-        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'W', kCommandCloseWindow },  // 关闭当前窗口
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'T', kCommandNewTab },       // 新标签（主文件夹）
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), 'W', kCommandCloseWindow },  // 关闭当前标签
+        { static_cast<BYTE>(FCONTROL | FSHIFT | FVIRTKEY), VK_TAB, kCommandPrevTab },
+        { static_cast<BYTE>(FCONTROL | FVIRTKEY), VK_TAB, kCommandNextTab },
         { static_cast<BYTE>(FALT | FVIRTKEY), VK_LEFT,  kCommandGoBackKey },   // Alt+← 后退
         { static_cast<BYTE>(FALT | FVIRTKEY), VK_RIGHT, kCommandGoForwardKey },// Alt+→ 前进
         { static_cast<BYTE>(FALT | FVIRTKEY), VK_UP,    kCommandGoUp },        // Alt+↑ 上一级
@@ -846,6 +873,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             ::DeleteObject(topBrush);
         }
 
+        // 顶部标签栏
+        DrawTabBar(hdc, clientRect);
+
         // 地址栏下面那条横线（把上面的路径和下面的文件区分开）
         if (!::IsRectEmpty(&m_addressDividerRect))
         {
@@ -884,12 +914,54 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_LBUTTONDOWN:
     {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+        if (pt.y < TabBarHeight())
+        {
+            bool closeButton = false;
+            const int tabIndex = HitTestTab(pt, closeButton);
+            if (tabIndex >= 0)
+            {
+                if (closeButton)
+                {
+                    CloseTab(static_cast<size_t>(tabIndex));
+                }
+                else
+                {
+                    ActivateTab(static_cast<size_t>(tabIndex));
+                }
+                return 0;
+            }
+
+            if (::PtInRect(&m_tabPlusRect, pt))
+            {
+                NewTab(shell::kHomeFolderPath);
+            }
+            return 0;
+        }
+
         int x = static_cast<short>(LOWORD(lParam));
         if (IsOnPaneDivider(x))
         {
             m_draggingSplitter = true;
             ::SetCapture(m_hWnd);   // 抓住鼠标，拖出窗口范围也能继续跟手
             return 0;
+        }
+        break;
+    }
+
+    case WM_MBUTTONDOWN:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (pt.y < TabBarHeight())
+        {
+            bool closeButton = false;
+            const int tabIndex = HitTestTab(pt, closeButton);
+            if (tabIndex >= 0)
+            {
+                CloseTab(static_cast<size_t>(tabIndex));
+                return 0;
+            }
         }
         break;
     }
@@ -1526,13 +1598,27 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
         return true;
     }
     case kCommandHomeWindow:
-        // Ctrl+T：开一个停在「主文件夹」的新窗口（同样跳过"已有窗口就拉前台"）
+        // Ctrl+T 已改为新标签；这个命令保留给菜单里的「新窗口打开主文件夹」
         OpenFolderInNewWindow(shell::kTopDesktopPath, true);
         return true;
+    case kCommandNewTab:
+        NewTab(shell::kHomeFolderPath);
+        return true;
+    case kCommandNextTab:
+        if (m_tabs.size() > 1)
+        {
+            ActivateTab((m_activeTab + 1) % m_tabs.size());
+        }
+        return true;
+    case kCommandPrevTab:
+        if (m_tabs.size() > 1)
+        {
+            ActivateTab(m_activeTab == 0 ? m_tabs.size() - 1 : m_activeTab - 1);
+        }
+        return true;
     case kCommandCloseWindow:
-        // Ctrl+W：关掉当前窗口。用 PostMessage 而不是直接销毁，
-        // 让关闭走正常流程（会把窗口大小/位置存进配置）
-        ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
+        // Ctrl+W：关当前标签；最后一个按后台/退出规则处理
+        CloseTab(m_activeTab);
         return true;
     case kCommandGoBackKey:
         GoBack();
@@ -1722,7 +1808,23 @@ void MainWindow::OnCreate()
 
     Logger::Info(L"启动目录：" + startPath);
 
+    // 第一个标签
+    m_tabs.clear();
+    {
+        TabState first;
+        first.path = startPath;
+        first.title = TabTitleForPath(startPath);
+        first.history.Reset(startPath);
+        first.viewMode = m_viewMode;
+        first.viewModeManual = m_viewModeManual;
+        first.sortColumn = m_sortColumn;
+        first.sortAscending = m_sortAscending;
+        m_tabs.push_back(std::move(first));
+        m_activeTab = 0;
+    }
+
     m_history.Reset(startPath);
+    LayoutChildren();
     StartEnumeration(startPath);
 
     // Shell 窗口集成：开关打开时把主窗口注册进 IShellWindows（默认关，零影响）
@@ -1858,6 +1960,247 @@ void MainWindow::NavigateToPath(const std::wstring& path)
     Logger::Info(L"导航到：" + path);
     m_history.NavigateTo(path);
     StartEnumeration(path);
+}
+
+// ============================================================================
+// 标签：快照 / 恢复 / 新建 / 关闭
+// ============================================================================
+
+void MainWindow::SaveActiveTab()
+{
+    if (m_tabs.empty() || m_activeTab >= m_tabs.size())
+    {
+        return;
+    }
+
+    TabState& tab = m_tabs[m_activeTab];
+    tab.path            = m_history.Current();
+    tab.title           = TabTitleForPath(tab.path);
+    tab.history         = m_history;
+    tab.viewMode        = m_viewMode;
+    tab.viewModeManual  = m_viewModeManual;
+    tab.sortColumn      = m_sortColumn;
+    tab.sortAscending   = m_sortAscending;
+    tab.selectedPaths   = m_fileListView.GetSelectedPaths();
+    tab.topItemPath     = m_fileListView.GetTopItemPath();
+    tab.origins         = m_navOrigins;
+}
+
+void MainWindow::RestoreTab(size_t index)
+{
+    if (index >= m_tabs.size())
+    {
+        return;
+    }
+
+    m_activeTab = index;
+
+    const TabState& tab = m_tabs[index];
+    m_history              = tab.history;
+    m_viewMode             = tab.viewMode;
+    m_viewModeManual       = tab.viewModeManual;
+    m_sortColumn           = tab.sortColumn;
+    m_sortAscending        = tab.sortAscending;
+    m_navOrigins           = tab.origins;
+    m_pendingSelection     = tab.selectedPaths;
+    m_pendingTopItem       = tab.topItemPath;
+
+    const int tabHeight = TabBarHeight();
+    RECT strip = { 0, 0, 0, tabHeight };
+    ::GetClientRect(m_hWnd, &strip);
+    strip.bottom = tabHeight;
+    ::InvalidateRect(m_hWnd, &strip, FALSE);
+
+    StartEnumeration(tab.path);
+}
+
+void MainWindow::ActivateTab(size_t index)
+{
+    if (index >= m_tabs.size() || index == m_activeTab)
+    {
+        return;
+    }
+
+    SaveActiveTab();
+    RestoreTab(index);
+}
+
+void MainWindow::NewTab(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    SaveActiveTab();
+
+    TabState tab;
+    tab.path            = path;
+    tab.title           = TabTitleForPath(path);
+    tab.history.Reset(path);
+    tab.viewMode        = m_viewMode;
+    tab.viewModeManual  = false;
+    tab.sortColumn      = m_sortColumn;
+    tab.sortAscending   = m_sortAscending;
+
+    const size_t insertAt = (m_tabs.empty() ? 0 : m_activeTab + 1);
+    m_tabs.insert(m_tabs.begin() + static_cast<ptrdiff_t>(insertAt), std::move(tab));
+
+    RestoreTab(insertAt);
+}
+
+void MainWindow::CloseTab(size_t index)
+{
+    if (m_tabs.empty() || index >= m_tabs.size())
+    {
+        return;
+    }
+
+    // 最后一个：后台模式隐藏到托盘，否则正常关窗口
+    if (m_tabs.size() == 1)
+    {
+        if (m_hideOnClose)
+        {
+            ::ShowWindow(m_hWnd, SW_HIDE);
+        }
+        else
+        {
+            ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
+        }
+        return;
+    }
+
+    SaveActiveTab();
+    m_tabs.erase(m_tabs.begin() + static_cast<ptrdiff_t>(index));
+
+    size_t next = m_activeTab;
+    if (index < m_activeTab)
+    {
+        next = m_activeTab - 1;
+    }
+    else if (index == m_activeTab)
+    {
+        next = (index < m_tabs.size()) ? index : m_tabs.size() - 1;
+    }
+
+    RestoreTab(next);
+}
+
+void MainWindow::UpdateActiveTabFromCurrent()
+{
+    if (m_tabs.empty() || m_activeTab >= m_tabs.size())
+    {
+        return;
+    }
+
+    TabState& tab = m_tabs[m_activeTab];
+    tab.path           = m_history.Current();
+    tab.title          = TabTitleForPath(tab.path);
+    tab.history        = m_history;
+    tab.viewMode       = m_viewMode;
+    tab.viewModeManual = m_viewModeManual;
+    tab.sortColumn     = m_sortColumn;
+    tab.sortAscending  = m_sortAscending;
+    tab.selectedPaths  = m_fileListView.GetSelectedPaths();
+    tab.topItemPath    = m_fileListView.GetTopItemPath();
+    tab.origins        = m_navOrigins;
+
+    const int tabHeight = TabBarHeight();
+    RECT strip = { 0, 0, 0, tabHeight };
+    ::GetClientRect(m_hWnd, &strip);
+    strip.bottom = tabHeight;
+    ::InvalidateRect(m_hWnd, &strip, FALSE);
+}
+
+void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
+{
+    const int tabHeight = TabBarHeight();
+    if (tabHeight <= 0 || m_tabs.empty())
+    {
+        return;
+    }
+
+    RECT strip = { 0, 0, clientRect.right, tabHeight };
+    HBRUSH stripBrush = ::CreateSolidBrush(RGB(236, 238, 242));
+    ::FillRect(dc, &strip, stripBrush);
+    ::DeleteObject(stripBrush);
+
+    m_tabRects.assign(m_tabs.size(), RECT{});
+    m_tabCloseRects.assign(m_tabs.size(), RECT{});
+
+    HGDIOBJ oldFont = ::SelectObject(dc, m_hUiFont != nullptr ? m_hUiFont
+                                                             : ::GetStockObject(DEFAULT_GUI_FONT));
+    ::SetBkMode(dc, TRANSPARENT);
+
+    const int top = Scale(3);
+    const int bottom = tabHeight - Scale(1);
+    int x = Scale(8);
+
+    for (size_t i = 0; i < m_tabs.size(); ++i)
+    {
+        const std::wstring& title = m_tabs[i].title.empty()
+                                  ? m_tabs[i].path
+                                  : m_tabs[i].title;
+
+        SIZE textSize = {};
+        ::GetTextExtentPoint32W(dc, title.c_str(), static_cast<int>(title.size()), &textSize);
+
+        int tabWidth = textSize.cx + Scale(48);
+        if (tabWidth < Scale(110)) { tabWidth = Scale(110); }
+        if (tabWidth > Scale(220)) { tabWidth = Scale(220); }
+
+        RECT tabRect = { x, top, x + tabWidth, bottom };
+        const bool active = (i == m_activeTab);
+
+        HBRUSH tabBrush = ::CreateSolidBrush(active ? RGB(255, 255, 255)
+                                                    : RGB(246, 247, 249));
+        ::FillRect(dc, &tabRect, tabBrush);
+        ::DeleteObject(tabBrush);
+
+        RECT textRect = { tabRect.left + Scale(10), tabRect.top,
+                          tabRect.right - Scale(26), tabRect.bottom };
+        ::SetTextColor(dc, active ? RGB(32, 32, 32) : RGB(96, 103, 111));
+        ::DrawTextW(dc, title.c_str(), -1, &textRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        RECT closeRect = { tabRect.right - Scale(22), tabRect.top + Scale(2),
+                           tabRect.right - Scale(4), tabRect.bottom - Scale(2) };
+        ::SetTextColor(dc, RGB(96, 103, 111));
+        ::DrawTextW(dc, L"×", -1, &closeRect,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        m_tabRects[i] = tabRect;
+        m_tabCloseRects[i] = closeRect;
+
+        x = tabRect.right + Scale(2);
+    }
+
+    // 末尾的「+」：新标签（主文件夹）
+    m_tabPlusRect = { x, top, x + Scale(30), bottom };
+    ::SetTextColor(dc, RGB(80, 88, 96));
+    ::DrawTextW(dc, L"+", -1, &m_tabPlusRect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    ::SelectObject(dc, oldFont);
+}
+
+int MainWindow::HitTestTab(POINT pt, bool& closeButton) const
+{
+    closeButton = false;
+
+    for (size_t i = 0; i < m_tabRects.size(); ++i)
+    {
+        if (::PtInRect(&m_tabCloseRects[i], pt))
+        {
+            closeButton = true;
+            return static_cast<int>(i);
+        }
+        if (::PtInRect(&m_tabRects[i], pt))
+        {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 // ----------------------------------------------------------------------------
@@ -5963,6 +6306,18 @@ void MainWindow::OnEnumerationDone()
 
     m_fileListView.MergeResult(result);   // 最小范围更新，只重绘变化的部分
 
+    // 切标签带过来的选中/滚动位置：等结果到了再恢复
+    if (!m_pendingSelection.empty())
+    {
+        m_fileListView.SelectPaths(m_pendingSelection);
+        m_pendingSelection.clear();
+    }
+    if (!m_pendingTopItem.empty())
+    {
+        m_fileListView.EnsureVisiblePath(m_pendingTopItem);
+        m_pendingTopItem.clear();
+    }
+
     if (selectNew && !pathsBefore.empty())
     {
         std::vector<std::wstring> addedPaths;
@@ -5999,6 +6354,9 @@ void MainWindow::OnEnumerationDone()
 
         Logger::Info(L"启动时选中传入的文件：" + selectPath);
     }
+
+    // 当前标签的路径/标题/历史/视图/选中同步回快照
+    UpdateActiveTabFromCurrent();
 
     // Shell 窗口集成：把当前目录报给 IShellWindows（Listary 等工具读这个）
     if (m_shellWindowHost)
@@ -6330,6 +6688,7 @@ void MainWindow::LayoutChildren()
     int gap        = Scale(4);
     int navHeight  = Scale(40);
     int addressHeight = Scale(30);
+    const int tabBarHeight = TabBarHeight();
 
     // 状态栏自己会贴到底部，先让它调整，再取高度
     ::SendMessageW(m_hStatusBar, WM_SIZE, 0, 0);
@@ -6376,7 +6735,7 @@ void MainWindow::LayoutChildren()
     };
 
     // ---- 导航按钮 ----
-    int buttonY = (navHeight - buttonHeight) / 2;
+    int buttonY = tabBarHeight + (navHeight - buttonHeight) / 2;
     int cursorX = margin;
 
     placeWindow(m_homeButton.Handle(), cursorX, buttonY, buttonWidth, buttonHeight);
@@ -6395,7 +6754,7 @@ void MainWindow::LayoutChildren()
     cursorX += buttonWidth + Scale(8);   // 按钮组和地址栏之间留宽一点
 
     // ---- 计算机图标（地址栏左端，和路径共用白色底）----
-    int addressY = (navHeight - addressHeight) / 2;
+    int addressY = tabBarHeight + (navHeight - addressHeight) / 2;
     int computerWidth = Scale(28);
     placeWindow(m_thisPcButton.Handle(), cursorX, addressY, computerWidth, addressHeight);
     cursorX += computerWidth;
@@ -6414,20 +6773,20 @@ void MainWindow::LayoutChildren()
 
     // ---- 地址栏下面那条横线 ----
     // 整条窗口宽，把上方"路径 + 按钮"的工具条和下面的内容区隔开
-    int bodyHeight = clientHeight - navHeight - statusHeight;
+    int bodyHeight = clientHeight - tabBarHeight - navHeight - statusHeight;
     if (bodyHeight < 0)
     {
         bodyHeight = 0;
     }
 
     m_addressDividerRect.left   = 0;
-    m_addressDividerRect.top    = navHeight;
+    m_addressDividerRect.top    = tabBarHeight + navHeight;
     m_addressDividerRect.right  = clientWidth;
-    m_addressDividerRect.bottom = navHeight + 1;
+    m_addressDividerRect.bottom = tabBarHeight + navHeight + 1;
 
     // ---- 左侧导航栏 + 文件列表 ----
     // 内容区从横线下面 1 像素开始
-    int contentY      = navHeight + 1;
+    int contentY      = tabBarHeight + navHeight + 1;
     int contentHeight = bodyHeight - 1;
     if (contentHeight < 0)
     {
