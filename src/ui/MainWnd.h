@@ -627,6 +627,7 @@ private:
     std::vector<TabState> m_tabs;
     size_t                m_activeTab = 0;
     bool                  m_restoreTabsOnStartup = false;
+    bool                  m_cacheHiddenOnly = false;   // 窗口隐藏时只保留当前标签缓存
     std::vector<RECT>     m_tabRects;
     std::vector<RECT>     m_tabCloseRects;
     RECT                  m_tabPlusRect = {};

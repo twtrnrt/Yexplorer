@@ -1087,6 +1087,24 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------
     // 尺寸变化
     // --------------------------------------------------------------
+    case WM_SHOWWINDOW:
+        if (!m_tabs.empty())
+        {
+            if (wParam == FALSE)
+            {
+                // 隐藏到托盘前：把当前结果存进活动标签，再只保留这一份缓存
+                m_cacheHiddenOnly = true;
+                SaveActiveTab();
+            }
+            else
+            {
+                // 重新显示后：访问过的标签尽量都保留（总条目仍有上限）
+                m_cacheHiddenOnly = false;
+                TrimTabCache();
+            }
+        }
+        return 0;
+
     case WM_SIZE:
         LayoutChildren();
 
@@ -2640,8 +2658,9 @@ void MainWindow::TrimTabCache()
         return m_tabs[left].lastUsed > m_tabs[right].lastUsed;
     });
 
-    // 当前 + 最近 2 个标签；总条目再兜一个上限，防止几个大目录把内存撑爆
-    constexpr size_t kMaxCachedTabs = 3;
+    // 隐藏时只留当前标签；显示时保留所有访问过的标签，
+    // 但总条目仍有上限，防止几个大目录把内存撑爆
+    const size_t maxCachedTabs = m_cacheHiddenOnly ? 1 : m_tabs.size();
     constexpr size_t kMaxCachedEntries = 60000;
     size_t totalEntries = 0;
 
@@ -2650,7 +2669,7 @@ void MainWindow::TrimTabCache()
         TabState& tab = m_tabs[cached[rank]];
         const size_t entries = tab.cachedResult->entries.size();
 
-        if (rank >= kMaxCachedTabs || totalEntries + entries > kMaxCachedEntries)
+        if (rank >= maxCachedTabs || totalEntries + entries > kMaxCachedEntries)
         {
             tab.cachedResult.reset();
         }
