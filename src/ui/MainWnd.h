@@ -199,6 +199,10 @@ private:
         int sortColumn = 0;
         bool sortAscending = true;
         std::map<std::wstring, NavigationOrigin> origins;
+
+        // 目录结果缓存：只保留当前 + 最近 2 个标签，切回来不用重新枚举
+        std::shared_ptr<shell::EnumerateResult> cachedResult;
+        unsigned long long lastUsed = 0;
     };
 
     // parentPath 留空表示"上一级就是进来之前待着的那个目录"（列表双击走这条）；
@@ -622,10 +626,13 @@ private:
     RECT                  m_tabPlusRect = {};
     std::vector<std::wstring> m_pendingSelection;
     std::wstring              m_pendingTopItem;
+    std::shared_ptr<shell::EnumerateResult> m_pendingCachedResult;
+    unsigned long long        m_tabUseCounter = 0;
 
     void SaveActiveTab();
     void RestoreTab(size_t index);
     void UpdateActiveTabFromCurrent();
+    void TrimTabCache();
     void DrawTabBar(HDC dc, const RECT& clientRect);
     int  HitTestTab(POINT pt, bool& closeButton) const;
     int  TabBarHeight() const { return m_tabs.empty() ? 0 : Scale(32); }

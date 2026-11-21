@@ -1984,6 +1984,13 @@ void MainWindow::SaveActiveTab()
     tab.selectedPaths   = m_fileListView.GetSelectedPaths();
     tab.topItemPath     = m_fileListView.GetTopItemPath();
     tab.origins         = m_navOrigins;
+
+    if (auto current = CurrentResult())
+    {
+        tab.cachedResult = std::move(current);
+    }
+    tab.lastUsed = ++m_tabUseCounter;
+    TrimTabCache();
 }
 
 void MainWindow::RestoreTab(size_t index)
@@ -2004,6 +2011,7 @@ void MainWindow::RestoreTab(size_t index)
     m_navOrigins           = tab.origins;
     m_pendingSelection     = tab.selectedPaths;
     m_pendingTopItem       = tab.topItemPath;
+    m_pendingCachedResult  = tab.cachedResult;
 
     const int tabHeight = TabBarHeight();
     RECT strip = { 0, 0, 0, tabHeight };
@@ -2105,11 +2113,55 @@ void MainWindow::UpdateActiveTabFromCurrent()
     tab.topItemPath    = m_fileListView.GetTopItemPath();
     tab.origins        = m_navOrigins;
 
+    if (auto current = CurrentResult())
+    {
+        tab.cachedResult = std::move(current);
+    }
+    tab.lastUsed = ++m_tabUseCounter;
+    TrimTabCache();
+
     const int tabHeight = TabBarHeight();
     RECT strip = { 0, 0, 0, tabHeight };
     ::GetClientRect(m_hWnd, &strip);
     strip.bottom = tabHeight;
     ::InvalidateRect(m_hWnd, &strip, FALSE);
+}
+
+void MainWindow::TrimTabCache()
+{
+    std::vector<size_t> cached;
+    for (size_t i = 0; i < m_tabs.size(); ++i)
+    {
+        if (m_tabs[i].cachedResult != nullptr)
+        {
+            cached.push_back(i);
+        }
+    }
+
+    std::sort(cached.begin(), cached.end(), [this](size_t left, size_t right)
+    {
+        return m_tabs[left].lastUsed > m_tabs[right].lastUsed;
+    });
+
+    // 当前 + 最近 2 个标签；总条目再兜一个上限，防止几个大目录把内存撑爆
+    constexpr size_t kMaxCachedTabs = 3;
+    constexpr size_t kMaxCachedEntries = 60000;
+    size_t totalEntries = 0;
+
+    for (size_t rank = 0; rank < cached.size(); ++rank)
+    {
+        TabState& tab = m_tabs[cached[rank]];
+        const size_t entries = tab.cachedResult->entries.size();
+
+        if (rank >= kMaxCachedTabs || totalEntries + entries > kMaxCachedEntries)
+        {
+            tab.cachedResult.reset();
+        }
+        else
+        {
+            totalEntries += entries;
+        }
+    }
 }
 
 void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
@@ -2134,22 +2186,61 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
     const int top = Scale(3);
     const int bottom = tabHeight - Scale(1);
-    int x = Scale(8);
+    const int gap = Scale(2);
+    const int plusWidth = Scale(30);
+    const int plusGap = Scale(8);
+    const int rightLimit = clientRect.right - Scale(8) - plusWidth - plusGap;
+    const int available = (rightLimit > Scale(80)) ? (rightLimit - Scale(8)) : Scale(80);
 
+    // 先算每个标签的自然宽度；放不下就按比例压缩，最小 64px
+    std::vector<int> widths(m_tabs.size(), Scale(110));
+    int total = 0;
     for (size_t i = 0; i < m_tabs.size(); ++i)
     {
-        const std::wstring& title = m_tabs[i].title.empty()
-                                  ? m_tabs[i].path
-                                  : m_tabs[i].title;
-
+        const std::wstring& title = m_tabs[i].title.empty() ? m_tabs[i].path
+                                                            : m_tabs[i].title;
         SIZE textSize = {};
         ::GetTextExtentPoint32W(dc, title.c_str(), static_cast<int>(title.size()), &textSize);
 
-        int tabWidth = textSize.cx + Scale(48);
-        if (tabWidth < Scale(110)) { tabWidth = Scale(110); }
-        if (tabWidth > Scale(220)) { tabWidth = Scale(220); }
+        int width = textSize.cx + Scale(48);
+        if (width < Scale(110)) { width = Scale(110); }
+        if (width > Scale(220)) { width = Scale(220); }
+        widths[i] = width;
+        total += width + gap;
+    }
 
-        RECT tabRect = { x, top, x + tabWidth, bottom };
+    if (total > available && total > 0)
+    {
+        const int minWidth = Scale(64);
+        for (size_t i = 0; i < widths.size(); ++i)
+        {
+            int scaled = static_cast<int>(static_cast<long long>(widths[i]) * available / total);
+            if (scaled < minWidth) { scaled = minWidth; }
+            widths[i] = scaled;
+        }
+    }
+
+    int x = Scale(8);
+    for (size_t i = 0; i < m_tabs.size(); ++i)
+    {
+        if (x >= rightLimit)
+        {
+            break;
+        }
+
+        int width = widths[i];
+        if (x + width > rightLimit)
+        {
+            width = rightLimit - x;
+        }
+        if (width < Scale(40))
+        {
+            break;
+        }
+
+        const std::wstring& title = m_tabs[i].title.empty() ? m_tabs[i].path
+                                                            : m_tabs[i].title;
+        RECT tabRect = { x, top, x + width, bottom };
         const bool active = (i == m_activeTab);
 
         HBRUSH tabBrush = ::CreateSolidBrush(active ? RGB(255, 255, 255)
@@ -2157,13 +2248,13 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         ::FillRect(dc, &tabRect, tabBrush);
         ::DeleteObject(tabBrush);
 
-        RECT textRect = { tabRect.left + Scale(10), tabRect.top,
-                          tabRect.right - Scale(26), tabRect.bottom };
+        RECT textRect = { tabRect.left + Scale(8), tabRect.top,
+                          tabRect.right - Scale(22), tabRect.bottom };
         ::SetTextColor(dc, active ? RGB(32, 32, 32) : RGB(96, 103, 111));
         ::DrawTextW(dc, title.c_str(), -1, &textRect,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        RECT closeRect = { tabRect.right - Scale(22), tabRect.top + Scale(2),
+        RECT closeRect = { tabRect.right - Scale(20), tabRect.top + Scale(2),
                            tabRect.right - Scale(4), tabRect.bottom - Scale(2) };
         ::SetTextColor(dc, RGB(96, 103, 111));
         ::DrawTextW(dc, L"×", -1, &closeRect,
@@ -2172,11 +2263,12 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         m_tabRects[i] = tabRect;
         m_tabCloseRects[i] = closeRect;
 
-        x = tabRect.right + Scale(2);
+        x = tabRect.right + gap;
     }
 
-    // 末尾的「+」：新标签（主文件夹）
-    m_tabPlusRect = { x, top, x + Scale(30), bottom };
+    // 「+」固定在右侧，不跟着标签跑出屏幕
+    m_tabPlusRect = { clientRect.right - Scale(8) - plusWidth, top,
+                      clientRect.right - Scale(8), bottom };
     ::SetTextColor(dc, RGB(80, 88, 96));
     ::DrawTextW(dc, L"+", -1, &m_tabPlusRect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -2398,6 +2490,23 @@ void MainWindow::StartEnumeration(const std::wstring& path)
             m_addressBar.SetPathWithLabel(path, displayPath, false);
         }
     }
+
+    // 切标签时如果这个目录有缓存，直接复用，不再起枚举线程。
+    if (m_pendingCachedResult != nullptr &&
+        _wcsicmp(m_pendingCachedResult->path.c_str(), path.c_str()) == 0)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_resultMutex);
+            m_result      = m_pendingCachedResult;
+            m_resultReady = true;
+            m_elapsedMs   = 0.0;
+            m_enumPath    = path;
+        }
+        m_pendingCachedResult.reset();
+        ::PostMessageW(m_hWnd, WM_APP_ENUM_DONE, 0, 0);
+        return;
+    }
+    m_pendingCachedResult.reset();
 
     // 标题只在"真的换了目录"时改一次，而且这一次先不带项数：
     //   换目录 → 「文件管理器 - C:\」，等结果回来再补成「（14 项）」
