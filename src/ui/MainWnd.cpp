@@ -2611,10 +2611,17 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
         HPEN closePen = ::CreatePen(PS_SOLID, Scale(2), closeColor);
         HGDIOBJ oldPen = ::SelectObject(dc, closePen);
-        ::MoveToEx(dc, centerX - half, centerY - half, nullptr);
-        ::LineTo(dc, centerX + half + 1, centerY + half + 1);
-        ::MoveToEx(dc, centerX - half, centerY + half, nullptr);
-        ::LineTo(dc, centerX + half + 1, centerY - half - 1);
+
+        // 四条臂都从中心画到角上：左右两边的端点类型一致，避免"左边短、右边长"
+        ::MoveToEx(dc, centerX, centerY, nullptr);
+        ::LineTo(dc, centerX - half, centerY - half);
+        ::MoveToEx(dc, centerX, centerY, nullptr);
+        ::LineTo(dc, centerX + half, centerY - half);
+        ::MoveToEx(dc, centerX, centerY, nullptr);
+        ::LineTo(dc, centerX - half, centerY + half);
+        ::MoveToEx(dc, centerX, centerY, nullptr);
+        ::LineTo(dc, centerX + half, centerY + half);
+
         ::SelectObject(dc, oldPen);
         ::DeleteObject(closePen);
 
