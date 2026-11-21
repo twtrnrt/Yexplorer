@@ -663,6 +663,7 @@ private:
     void UpdateTabDrag(POINT pt);
     void ScrollTabs(int delta);
     void LayoutWindowButtons(const RECT& clientRect);
+    void UpdateWindowResize();
     void DrawWindowButtons(HDC dc);
     int  HitTestWindowButton(POINT pt) const;
     int  TabBarHeight() const { return Scale(40); }

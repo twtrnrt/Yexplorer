@@ -167,6 +167,36 @@ static std::wstring TabTitleForPath(const std::wstring& path)
         return name;
     }
 
+    // 普通目录也问一下 Shell：桌面/下载/文档这些已知文件夹要显示中文名，
+    // 不能直接用最后一段路径（Desktop/Downloads/Documents）。
+    const bool isShellNamespace = (path.compare(0, 2, L"::") == 0) ||
+                                  (path.compare(0, 6, L"shell:") == 0);
+    if (!isShellNamespace)
+    {
+        IShellItem* folderItem = nullptr;
+        if (SUCCEEDED(::SHCreateItemFromParsingName(path.c_str(), nullptr,
+                                                   IID_PPV_ARGS(&folderItem))) &&
+            folderItem != nullptr)
+        {
+            PWSTR displayName = nullptr;
+            if (SUCCEEDED(folderItem->GetDisplayName(SIGDN_NORMALDISPLAY, &displayName)) &&
+                displayName != nullptr)
+            {
+                std::wstring localized(displayName);
+                ::CoTaskMemFree(displayName);
+                folderItem->Release();
+                if (!localized.empty())
+                {
+                    return localized;
+                }
+            }
+            else
+            {
+                folderItem->Release();
+            }
+        }
+    }
+
     std::wstring trimmed = path;
     while (trimmed.size() > 3 && (trimmed.back() == L'\\' || trimmed.back() == L'/'))
     {
@@ -471,10 +501,11 @@ bool MainWindow::Create(HINSTANCE hInstance,
     }
 
     m_hWnd = ::CreateWindowExW(
-        0,
+        WS_EX_APPWINDOW,
         kWindowClassName,
         kWindowTitleBase,
-        WS_OVERLAPPEDWINDOW,
+        WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
+            WS_SYSMENU | WS_CLIPCHILDREN,
         posX, posY, windowWidth, windowHeight,
         nullptr, nullptr, hInstance,
         this);
@@ -860,34 +891,26 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
-    // --------------------------------------------------------------
-    // 自定义标题栏：去掉原生 caption，客户区铺满整个窗口
-    // --------------------------------------------------------------
-    case WM_NCCALCSIZE:
-        if (wParam != FALSE)
+
+    case WM_GETMINMAXINFO:
+    {
+        // WS_POPUP 默认最大化会铺满整个屏幕（盖住任务栏），这里改成工作区。
+        // 窗口矩形往外扩一圈边框，客户区正好等于工作区。
+        MINMAXINFO* info = reinterpret_cast<MINMAXINFO*>(lParam);
+        MONITORINFO monitor = {};
+        monitor.cbSize = sizeof(monitor);
+        if (info != nullptr &&
+            ::GetMonitorInfoW(::MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST), &monitor))
         {
-            // 最大化时窗口矩形会比工作区大一圈边框；把客户区收回来，
-            // 否则标题栏和底部会伸到屏幕/任务栏外面。
-            if (::IsZoomed(m_hWnd))
-            {
-                NCCALCSIZE_PARAMS* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
-                const int border = ::GetSystemMetrics(SM_CXSIZEFRAME) +
-                                   ::GetSystemMetrics(SM_CXPADDEDBORDER);
-                params->rgrc[0].left   += border;
-                params->rgrc[0].top    += border;
-                params->rgrc[0].right  -= border;
-                params->rgrc[0].bottom -= border;
-            }
-            return 0;
+            const int frame = ::GetSystemMetrics(SM_CXSIZEFRAME) +
+                              ::GetSystemMetrics(SM_CXPADDEDBORDER) - 1;
+            info->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left - frame;
+            info->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top - frame;
+            info->ptMaxSize.x = (monitor.rcWork.right - monitor.rcWork.left) + frame * 2;
+            info->ptMaxSize.y = (monitor.rcWork.bottom - monitor.rcWork.top) + frame * 2;
         }
         break;
-
-    case WM_NCPAINT:
-        return 0;
-
-    case WM_NCACTIVATE:
-        // 不让系统再画原生标题栏
-        return TRUE;
+    }
 
     case WM_NCHITTEST:
     {
@@ -977,6 +1000,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_NCMOUSEMOVE:
     {
+        if (m_resizingWindow)
+        {
+            UpdateWindowResize();
+            return 0;
+        }
+
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ::ScreenToClient(m_hWnd, &pt);
 
@@ -1002,6 +1031,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
     }
+
+    case WM_NCLBUTTONUP:
+        if (m_resizingWindow)
+        {
+            m_resizingWindow = false;
+            ::ReleaseCapture();
+            return 0;
+        }
+        break;
 
     case WM_NCMOUSELEAVE:
         m_windowButtonTracking = false;
@@ -1202,39 +1240,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (m_resizingWindow)
         {
-            POINT cursor = {};
-            ::GetCursorPos(&cursor);
-            const int dx = cursor.x - m_resizeStartCursor.x;
-            const int dy = cursor.y - m_resizeStartCursor.y;
-
-            RECT rect = m_resizeStartRect;
-            const int minWidth = Scale(480);
-            const int minHeight = Scale(320);
-
-            if (m_resizeHit == HTLEFT || m_resizeHit == HTTOPLEFT || m_resizeHit == HTBOTTOMLEFT)
-            {
-                rect.left += dx;
-                if (rect.right - rect.left < minWidth) { rect.left = rect.right - minWidth; }
-            }
-            if (m_resizeHit == HTRIGHT || m_resizeHit == HTTOPRIGHT || m_resizeHit == HTBOTTOMRIGHT)
-            {
-                rect.right += dx;
-                if (rect.right - rect.left < minWidth) { rect.right = rect.left + minWidth; }
-            }
-            if (m_resizeHit == HTTOP || m_resizeHit == HTTOPLEFT || m_resizeHit == HTTOPRIGHT)
-            {
-                rect.top += dy;
-                if (rect.bottom - rect.top < minHeight) { rect.top = rect.bottom - minHeight; }
-            }
-            if (m_resizeHit == HTBOTTOM || m_resizeHit == HTBOTTOMLEFT || m_resizeHit == HTBOTTOMRIGHT)
-            {
-                rect.bottom += dy;
-                if (rect.bottom - rect.top < minHeight) { rect.bottom = rect.top + minHeight; }
-            }
-
-            ::SetWindowPos(m_hWnd, nullptr, rect.left, rect.top,
-                           rect.right - rect.left, rect.bottom - rect.top,
-                           SWP_NOZORDER | SWP_NOACTIVATE);
+            UpdateWindowResize();
             return 0;
         }
 
@@ -2641,6 +2647,49 @@ void MainWindow::ApplyWindowModeFromSettings()
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
 }
 
+void MainWindow::UpdateWindowResize()
+{
+    if (!m_resizingWindow)
+    {
+        return;
+    }
+
+    POINT cursor = {};
+    ::GetCursorPos(&cursor);
+
+    const int dx = cursor.x - m_resizeStartCursor.x;
+    const int dy = cursor.y - m_resizeStartCursor.y;
+
+    RECT rect = m_resizeStartRect;
+    const int minWidth = Scale(480);
+    const int minHeight = Scale(320);
+
+    if (m_resizeHit == HTLEFT || m_resizeHit == HTTOPLEFT || m_resizeHit == HTBOTTOMLEFT)
+    {
+        rect.left += dx;
+        if (rect.right - rect.left < minWidth) { rect.left = rect.right - minWidth; }
+    }
+    if (m_resizeHit == HTRIGHT || m_resizeHit == HTTOPRIGHT || m_resizeHit == HTBOTTOMRIGHT)
+    {
+        rect.right += dx;
+        if (rect.right - rect.left < minWidth) { rect.right = rect.left + minWidth; }
+    }
+    if (m_resizeHit == HTTOP || m_resizeHit == HTTOPLEFT || m_resizeHit == HTTOPRIGHT)
+    {
+        rect.top += dy;
+        if (rect.bottom - rect.top < minHeight) { rect.top = rect.bottom - minHeight; }
+    }
+    if (m_resizeHit == HTBOTTOM || m_resizeHit == HTBOTTOMLEFT || m_resizeHit == HTBOTTOMRIGHT)
+    {
+        rect.bottom += dy;
+        if (rect.bottom - rect.top < minHeight) { rect.bottom = rect.top + minHeight; }
+    }
+
+    ::SetWindowPos(m_hWnd, nullptr, rect.left, rect.top,
+                   rect.right - rect.left, rect.bottom - rect.top,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 void MainWindow::LayoutWindowButtons(const RECT& clientRect)
 {
     const int width = Scale(46);
@@ -2928,7 +2977,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         const int centerY = (closeRect.top + closeRect.bottom) / 2;
         const int half = cross / 2;
 
-        HPEN closePen = ::CreatePen(PS_SOLID, Scale(2), closeColor);
+        HPEN closePen = ::CreatePen(PS_SOLID, Scale(1), closeColor);
         HGDIOBJ oldPen = ::SelectObject(dc, closePen);
 
         // 四条臂都从中心画到角上：左右两边的端点类型一致，避免"左边短、右边长"
