@@ -30,6 +30,45 @@ constexpr UINT kTrayId = 1;
 constexpr UINT kMenuOpen = 1;
 constexpr UINT kMenuExit = 2;
 
+struct FindWindowForPid
+{
+    DWORD pid = 0;
+    HWND  hwnd = nullptr;
+};
+
+BOOL CALLBACK EnumFindMainWindow(HWND hWnd, LPARAM lParam)
+{
+    FindWindowForPid* data = reinterpret_cast<FindWindowForPid*>(lParam);
+    if (data == nullptr)
+    {
+        return FALSE;
+    }
+
+    DWORD pid = 0;
+    ::GetWindowThreadProcessId(hWnd, &pid);
+    if (pid != data->pid)
+    {
+        return TRUE;
+    }
+
+    wchar_t className[64] = {};
+    ::GetClassNameW(hWnd, className, ARRAYSIZE(className));
+    if (::_wcsicmp(className, L"FileExplorerMainWindow") == 0 && ::IsWindowVisible(hWnd))
+    {
+        data->hwnd = hWnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND FindMainWindowForPid(DWORD pid)
+{
+    FindWindowForPid data;
+    data.pid = pid;
+    ::EnumWindows(&EnumFindMainWindow, reinterpret_cast<LPARAM>(&data));
+    return data.hwnd;
+}
+
 std::wstring OwnExePath()
 {
     wchar_t buffer[MAX_PATH * 2] = {};
@@ -267,6 +306,29 @@ private:
                              nullptr, nullptr, &startup, &info))
         {
             ::CloseHandle(info.hThread);
+
+            // 新进程是后台进程拉起的，Windows 不一定会把它的窗口放到最前。
+            // 等它的主窗口出现后，宿主再补一次强制置前（置顶再取消置顶 + 抢焦点）。
+            HWND newWindow = nullptr;
+            for (int i = 0; i < 60; ++i)
+            {
+                newWindow = FindMainWindowForPid(info.dwProcessId);
+                if (newWindow != nullptr)
+                {
+                    break;
+                }
+                ::Sleep(50);
+            }
+
+            if (newWindow != nullptr)
+            {
+                ui::ForceForegroundWindow(newWindow);
+            }
+            else
+            {
+                Logger::Warn(L"Win+E：新窗口已启动，但没等到它的窗口出现");
+            }
+
             ::CloseHandle(info.hProcess);
             Logger::Info(L"Win+E：新开窗口，位置=" + path);
         }

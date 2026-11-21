@@ -352,6 +352,14 @@ int WINAPI wWinMain(HINSTANCE hInstance,
             if (mainWindow.Create(hInstance, startupPath, startupSelectFile))
             {
                 mainWindow.Show(SW_SHOW);
+
+                // Ctrl+N / Win+E 这类"强制新开"的窗口：自己再抢一次前台，
+                // 否则被前台锁压住，只能看到任务栏闪一下。
+                if (forceNewWindow)
+                {
+                    ui::ForceForegroundWindow(mainWindow.Handle());
+                }
+
                 exitCode = mainWindow.RunMessageLoop();
             }
             else
