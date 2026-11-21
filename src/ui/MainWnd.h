@@ -220,6 +220,7 @@ private:
     void GoUp();
 
     // ---- 标签 ----
+    void ApplyWindowModeFromSettings();
     void NewTab(const std::wstring& path);
     void CloseTab(size_t index);
     void ActivateTab(size_t index);
@@ -635,7 +636,7 @@ private:
     void TrimTabCache();
     void DrawTabBar(HDC dc, const RECT& clientRect);
     int  HitTestTab(POINT pt, bool& closeButton) const;
-    int  TabBarHeight() const { return m_tabs.empty() ? 0 : Scale(32); }
+    int  TabBarHeight() const;
 
     // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----
     MenuIconCache      m_menuIcons;

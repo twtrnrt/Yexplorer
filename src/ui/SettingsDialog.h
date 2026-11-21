@@ -59,6 +59,9 @@ private:
     void OnQuickStartToggle(int controlId);
     void RefreshQuickStart();
 
+    // 窗口模式
+    void RefreshWindowModeChecks();
+
     // 注册类复选框
     void OnRegistrationToggle(int controlId);
     void RefreshRegistrationChecks();
@@ -84,6 +87,10 @@ private:
     // 快速启动
     HWND  m_hCheckBackground = nullptr;
     HWND  m_hCheckWinE = nullptr;
+
+    // 窗口模式
+    HWND  m_hCheckTabs = nullptr;
+    HWND  m_hCheckSingleInstance = nullptr;
 
     // 注册与集成
     HWND  m_hCheckDefaultManager = nullptr;

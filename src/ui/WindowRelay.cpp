@@ -163,6 +163,136 @@ bool ForceForegroundWindow(HWND window)
     return ::IsWindowVisible(window) != FALSE;
 }
 
+namespace
+{
+
+struct AllMainWindow
+{
+    HWND hwnd = nullptr;
+    DWORD processId = 0;
+};
+
+BOOL CALLBACK CollectAllMainWindows(HWND hwnd, LPARAM lParam)
+{
+    auto* out = reinterpret_cast<std::vector<AllMainWindow>*>(lParam);
+    wchar_t className[64] = {};
+    ::GetClassNameW(hwnd, className, ARRAYSIZE(className));
+    if (::_wcsicmp(className, kMainWindowClassName) != 0)
+    {
+        return TRUE;
+    }
+
+    DWORD pid = 0;
+    ::GetWindowThreadProcessId(hwnd, &pid);
+    out->push_back(AllMainWindow{ hwnd, pid });
+    return TRUE;
+}
+
+std::vector<AllMainWindow> AllMainWindows()
+{
+    std::vector<AllMainWindow> windows;
+    ::EnumWindows(&CollectAllMainWindows, reinterpret_cast<LPARAM>(&windows));
+    return windows;
+}
+
+}   // namespace
+
+bool RelayOpenInExistingWindow(const std::wstring& folder,
+                               const std::wstring& selectFile,
+                               HWND selfWindow)
+{
+    if (folder.empty() || folder.size() >= 520 || selectFile.size() >= 520)
+    {
+        return false;
+    }
+
+    RelayRequest request = {};
+    CopyToFixedBuffer(NormalizeFolderForCompare(folder), request.folder, ARRAYSIZE(request.folder));
+    CopyToFixedBuffer(selectFile, request.selectFile, ARRAYSIZE(request.selectFile));
+
+    COPYDATASTRUCT data = {};
+    data.dwData = kRelayOpenTabMagic;
+    data.cbData = sizeof(request);
+    data.lpData = &request;
+
+    DWORD selfProcessId = 0;
+    if (selfWindow != nullptr)
+    {
+        ::GetWindowThreadProcessId(selfWindow, &selfProcessId);
+    }
+
+    for (const AllMainWindow& candidate : AllMainWindows())
+    {
+        BOOL granted = FALSE;
+        if (candidate.processId != selfProcessId)
+        {
+            granted = ::AllowSetForegroundWindow(candidate.processId);
+        }
+        (void)granted;
+
+        DWORD_PTR reply = 0;
+        const LRESULT sent = ::SendMessageTimeoutW(candidate.hwnd, WM_COPYDATA,
+                                                   reinterpret_cast<WPARAM>(selfWindow),
+                                                   reinterpret_cast<LPARAM>(&data),
+                                                   SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                                                   2000, &reply);
+        if (sent != 0 && reply != 0)
+        {
+            ::ShowWindow(candidate.hwnd, SW_SHOW);
+            ForceForegroundWindow(candidate.hwnd);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ActivateExistingWindow(HWND selfWindow)
+{
+    const std::vector<AllMainWindow> windows = AllMainWindows();
+    if (windows.empty())
+    {
+        return false;
+    }
+
+    HWND fallback = nullptr;
+    for (const AllMainWindow& candidate : windows)
+    {
+        if (candidate.hwnd == selfWindow)
+        {
+            continue;
+        }
+        if (::IsWindowVisible(candidate.hwnd) && ::GetForegroundWindow() == candidate.hwnd)
+        {
+            return ForceForegroundWindow(candidate.hwnd);
+        }
+        if (::IsWindowVisible(candidate.hwnd) && fallback == nullptr)
+        {
+            fallback = candidate.hwnd;
+        }
+    }
+
+    HWND target = fallback;
+    if (target == nullptr)
+    {
+        for (const AllMainWindow& candidate : windows)
+        {
+            if (candidate.hwnd != selfWindow)
+            {
+                target = candidate.hwnd;
+                break;
+            }
+        }
+    }
+
+    if (target == nullptr)
+    {
+        return false;
+    }
+
+    ::ShowWindow(target, SW_SHOW);
+    return ForceForegroundWindow(target);
+}
+
 bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
                                      const std::wstring& selectFile,
                                      HWND selfWindow)

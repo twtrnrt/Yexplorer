@@ -26,6 +26,7 @@ extern const wchar_t kMainWindowClassName[];
 
 // WM_COPYDATA 的 dwData 标记，用来认出"这是本程序的接力请求"
 constexpr DWORD kRelayRequestMagic = 0x59457831;   // 'YEx1'
+constexpr DWORD kRelayOpenTabMagic = 0x59457832;   // 'YEx2'：单实例模式下"在现有窗口新开标签"
 
 // 跨进程传递的请求体。字段用定长数组而不是指针：WM_COPYDATA 会把这段内存
 // 拷到对方进程，指针过去就失效了。
@@ -49,6 +50,15 @@ bool IsSameFolder(const std::wstring& left, const std::wstring& right);
 bool RelayOpenFolderToExistingWindow(const std::wstring& folder,
                                      const std::wstring& selectFile,
                                      HWND selfWindow);
+
+// 单实例模式：把路径交给现有窗口，在它里面新开一个标签（不要求目录相同）。
+// 会连隐藏的宿主热窗口一起问；接下的窗口负责显示自己。
+bool RelayOpenInExistingWindow(const std::wstring& folder,
+                               const std::wstring& selectFile,
+                               HWND selfWindow);
+
+// 单实例模式：无参数启动时，把现有窗口（包括隐藏的热窗口）显示并置前。
+bool ActivateExistingWindow(HWND selfWindow);
 
 // 把窗口拉到前台。
 //

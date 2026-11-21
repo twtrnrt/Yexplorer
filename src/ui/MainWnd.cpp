@@ -815,6 +815,28 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
 
+        // 单实例模式：在现有窗口里新开一个标签（不要求目录相同）
+        if (data != nullptr && data->dwData == ui::kRelayOpenTabMagic &&
+            data->lpData != nullptr && data->cbData >= sizeof(ui::RelayRequest))
+        {
+            const ui::RelayRequest* request = static_cast<const ui::RelayRequest*>(data->lpData);
+            const std::wstring folder = request->folder;
+            const std::wstring selectFile =
+                (request->selectFile[0] != 0) ? std::wstring(request->selectFile) : std::wstring();
+
+            if (!folder.empty())
+            {
+                NewTab(folder);
+                if (!selectFile.empty())
+                {
+                    m_pendingSelection = { selectFile };
+                }
+                ::ShowWindow(m_hWnd, SW_SHOW);
+                ui::ForceForegroundWindow(m_hWnd);
+            }
+            return 1;
+        }
+
         return 0;
     }
 
@@ -1602,7 +1624,14 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
         OpenFolderInNewWindow(shell::kTopDesktopPath, true);
         return true;
     case kCommandNewTab:
-        NewTab(shell::kHomeFolderPath);
+        if (core::Settings::Instance().TabsEnabled())
+        {
+            NewTab(shell::kHomeFolderPath);
+        }
+        else
+        {
+            OpenFolderInNewWindow(shell::kTopDesktopPath, true);
+        }
         return true;
     case kCommandNextTab:
         if (m_tabs.size() > 1)
@@ -1617,8 +1646,15 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
         }
         return true;
     case kCommandCloseWindow:
-        // Ctrl+W：关当前标签；最后一个按后台/退出规则处理
-        CloseTab(m_activeTab);
+        // Ctrl+W：多标签关标签；单标签/最后一个按窗口规则处理
+        if (core::Settings::Instance().TabsEnabled())
+        {
+            CloseTab(m_activeTab);
+        }
+        else
+        {
+            ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
+        }
         return true;
     case kCommandGoBackKey:
         GoBack();
@@ -1684,6 +1720,7 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
 
             // Shell 窗口集成开关可能变了：按新设置注册/注销
             SyncShellWindowRegistration();
+            ApplyWindowModeFromSettings();
 
             if (wasHidden != settings.ShowHiddenFiles() ||
                 wasSystem != settings.ShowSystemFiles())
@@ -2040,6 +2077,12 @@ void MainWindow::NewTab(const std::wstring& path)
         return;
     }
 
+    if (!core::Settings::Instance().TabsEnabled())
+    {
+        OpenFolderInNewWindow(path, true);
+        return;
+    }
+
     SaveActiveTab();
 
     TabState tab;
@@ -2061,6 +2104,12 @@ void MainWindow::CloseTab(size_t index)
 {
     if (m_tabs.empty() || index >= m_tabs.size())
     {
+        return;
+    }
+
+    if (!core::Settings::Instance().TabsEnabled())
+    {
+        ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
         return;
     }
 
@@ -2162,6 +2211,31 @@ void MainWindow::TrimTabCache()
             totalEntries += entries;
         }
     }
+}
+
+int MainWindow::TabBarHeight() const
+{
+    if (m_tabs.empty() || !core::Settings::Instance().TabsEnabled())
+    {
+        return 0;
+    }
+    return Scale(32);
+}
+
+void MainWindow::ApplyWindowModeFromSettings()
+{
+    const bool tabsEnabled = core::Settings::Instance().TabsEnabled();
+
+    if (!tabsEnabled && m_tabs.size() > 1)
+    {
+        TabState keep = std::move(m_tabs[m_activeTab]);
+        m_tabs.clear();
+        m_tabs.push_back(std::move(keep));
+        m_activeTab = 0;
+    }
+
+    LayoutChildren();
+    ::InvalidateRect(m_hWnd, nullptr, TRUE);
 }
 
 void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
@@ -2266,9 +2340,14 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         x = tabRect.right + gap;
     }
 
-    // 「+」固定在右侧，不跟着标签跑出屏幕
-    m_tabPlusRect = { clientRect.right - Scale(8) - plusWidth, top,
-                      clientRect.right - Scale(8), bottom };
+    // 「+」跟在最后一个标签后面
+    m_tabPlusRect = { x, top, x + plusWidth, bottom };
+    if (m_tabPlusRect.right > clientRect.right - Scale(4))
+    {
+        const int shift = m_tabPlusRect.right - (clientRect.right - Scale(4));
+        m_tabPlusRect.left -= shift;
+        m_tabPlusRect.right -= shift;
+    }
     ::SetTextColor(dc, RGB(80, 88, 96));
     ::DrawTextW(dc, L"+", -1, &m_tabPlusRect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -4197,6 +4276,14 @@ void MainWindow::OpenFolderInNewWindow(const std::wstring& folderPath, bool forc
 {
     if (folderPath.empty())
     {
+        return;
+    }
+
+    // 单实例模式：所有"新窗口"请求都变成现有窗口里的新标签
+    if (core::Settings::Instance().SingleInstance() &&
+        core::Settings::Instance().TabsEnabled())
+    {
+        NewTab(folderPath);
         return;
     }
 

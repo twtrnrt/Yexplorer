@@ -263,17 +263,11 @@ private:
             return;
         }
 
-        // 已经有一个可见窗口
+        // 已经有一个可见窗口：Win+E / 任务栏都只把它拉到最前，不再新开
         if (::IsWindowVisible(m_warm->Handle()))
         {
-            if (newWindowWhenVisible)
-            {
-                LaunchNewWindow();   // Win+E：按"新开一个"处理
-            }
-            else
-            {
-                ui::ForceForegroundWindow(m_warm->Handle());   // 任务栏/开始菜单：直接拉前台
-            }
+            (void)newWindowWhenVisible;
+            ui::ForceForegroundWindow(m_warm->Handle());
             return;
         }
 

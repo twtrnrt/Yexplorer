@@ -309,6 +309,8 @@ bool Settings::Load()
         // ---------------- 快速启动 ----------------
         m_backgroundStartup = json.value("backgroundStartup", false);
         m_takeOverWinE = json.value("takeOverWinE", false);
+        m_tabsEnabled = json.value("tabsEnabled", true);
+        m_singleInstance = json.value("singleInstance", true);
 
         // ---------------- 界面开关 ----------------
         // 右键菜单显示图标：没记过就是关（保持原来的纯文字菜单）
@@ -568,6 +570,14 @@ bool Settings::Save()
     if (m_takeOverWinE)
     {
         json["takeOverWinE"] = true;
+    }
+    if (!m_tabsEnabled)
+    {
+        json["tabsEnabled"] = false;
+    }
+    if (!m_singleInstance)
+    {
+        json["singleInstance"] = false;
     }
 
     // ---------------- 界面开关 ----------------

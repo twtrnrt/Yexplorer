@@ -203,6 +203,15 @@ public:
     bool TakeOverWinE() const { return m_takeOverWinE; }
     void SetTakeOverWinE(bool enabled) { m_takeOverWinE = enabled; }
 
+    // ---------------- 窗口模式 ----------------
+    // 多标签模式（默认开）；关掉就是原来的"一个窗口一个目录"
+    bool TabsEnabled() const { return m_tabsEnabled; }
+    void SetTabsEnabled(bool enabled) { m_tabsEnabled = enabled; }
+
+    // 只允许一个实例（仅多标签模式；默认开）
+    bool SingleInstance() const { return m_singleInstance; }
+    void SetSingleInstance(bool enabled) { m_singleInstance = enabled; }
+
     // ---------------- 界面开关 ----------------
     // 右键菜单里是否显示程序图标（「打开方式」各项、「新建」各项前面）。
     // 默认关：不显示图标就是以前的纯文字菜单，最省事也最快。
@@ -275,6 +284,8 @@ private:
     std::wstring  m_customStartupFolder;
     bool          m_backgroundStartup = false;
     bool          m_takeOverWinE = false;
+    bool          m_tabsEnabled = true;
+    bool          m_singleInstance = true;
     bool          m_menuIcons      = false;   // 右键菜单是否显示图标（默认关）
 
     // 显示隐藏文件 / 系统文件（默认都关，和资源管理器的默认一致）

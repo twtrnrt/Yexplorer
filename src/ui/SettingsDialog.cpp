@@ -31,7 +31,7 @@ namespace
 const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 const int kClientWidth  = 420;
-const int kClientHeight = 690;
+const int kClientHeight = 780;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -49,6 +49,8 @@ const int kControlIdRadioCustom    = 4012;
 const int kControlIdRadioLast      = 4013;
 const int kControlIdBackground     = 4014;
 const int kControlIdWinE           = 4015;
+const int kControlIdTabs           = 4016;
+const int kControlIdSingleInstance = 4017;
 
 const COLORREF kBackgroundColor = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
@@ -77,6 +79,10 @@ const wchar_t* kBackgroundCheckText = L"开机时后台启动（托盘常驻，�
 const wchar_t* kBackgroundHintText  = L"登录时启动一个隐藏窗口，之后打开会快很多。";
 const wchar_t* kWinECheckText = L"接管 Win+E（勾选时自动开启上面的后台启动）";
 const wchar_t* kWinEHintText  = L"按 Win+E 新开一个窗口，停在上面选择的位置。";
+
+const wchar_t* kWindowTitle = L"窗口模式";
+const wchar_t* kTabsCheckText = L"多标签模式（关掉就是一个窗口一个目录）";
+const wchar_t* kSingleInstanceCheckText = L"只允许一个实例（所有打开都进现有窗口）";
 
 const wchar_t* kSectionTitle = L"注册与集成（可分别勾选，互不影响）";
 
@@ -267,6 +273,9 @@ bool SettingsDialog::CreateDialogWindow()
     m_hCheckWinE       = createCheck(kWinECheckText, kControlIdWinE, BS_AUTOCHECKBOX);
 
     // ---- 注册与集成 ----
+    m_hCheckTabs           = createCheck(kTabsCheckText, kControlIdTabs, BS_AUTOCHECKBOX);
+    m_hCheckSingleInstance = createCheck(kSingleInstanceCheckText, kControlIdSingleInstance, BS_AUTOCHECKBOX);
+
     m_hCheckDefaultManager = createCheck(kDefaultCheckText, kControlIdDefaultManager, BS_AUTOCHECKBOX);
     m_hCheckProxy          = createCheck(kProxyCheckText, kControlIdProxy, BS_AUTOCHECKBOX);
     m_hCheckListary        = createCheck(kListaryCheckText, kControlIdListary, BS_AUTOCHECKBOX);
@@ -274,6 +283,7 @@ bool SettingsDialog::CreateDialogWindow()
 
     RefreshStartupControls();
     RefreshQuickStart();
+    RefreshWindowModeChecks();
     RefreshRegistrationChecks();
 
     Layout();
@@ -330,11 +340,15 @@ void SettingsDialog::Layout()
     place(m_hCheckBackground, 334);
     place(m_hCheckWinE,       374);
 
+    // 窗口模式
+    place(m_hCheckTabs,           424);
+    place(m_hCheckSingleInstance, 458);
+
     // 注册与集成
-    place(m_hCheckDefaultManager, 434);
-    place(m_hCheckProxy,          478);
-    place(m_hCheckListary,        522);
-    place(m_hCheckShellWindow,    566);
+    place(m_hCheckDefaultManager, 516);
+    place(m_hCheckProxy,          560);
+    place(m_hCheckListary,        604);
+    place(m_hCheckShellWindow,    648);
 
     // 关闭按钮
     const int buttonWidth  = Scale(88);
@@ -517,6 +531,13 @@ void SettingsDialog::RefreshQuickStart()
     SetChecked(m_hCheckWinE, settings.TakeOverWinE());
 }
 
+void SettingsDialog::RefreshWindowModeChecks()
+{
+    const core::Settings& settings = core::Settings::Instance();
+    SetChecked(m_hCheckTabs, settings.TabsEnabled());
+    SetChecked(m_hCheckSingleInstance, settings.SingleInstance());
+}
+
 void SettingsDialog::OnRegistrationToggle(int controlId)
 {
     const bool want = IsChecked(
@@ -649,7 +670,7 @@ void SettingsDialog::Draw(HDC dc)
                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(332) };
     ::DrawTextW(dc, kQuickTitle, -1, &quickTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
-    // 分隔线 3
+    // 分隔线 3（快速启动 / 窗口模式）
     const int divider3 = Scale(kPadding) + Scale(402);
     dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
     oldPen  = ::SelectObject(dc, dividerPen);
@@ -658,22 +679,37 @@ void SettingsDialog::Draw(HDC dc)
     ::SelectObject(dc, oldPen);
     ::DeleteObject(dividerPen);
 
+    // ---- 窗口模式 ----
+    ::SetTextColor(dc, kTitleColor);
+    RECT windowTitle = { Scale(kPadding), Scale(kPadding) + Scale(408),
+                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(428) };
+    ::DrawTextW(dc, kWindowTitle, -1, &windowTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
+
+    // 分隔线 4（窗口模式 / 注册与集成）
+    const int divider4 = Scale(kPadding) + Scale(484);
+    dividerPen = ::CreatePen(PS_SOLID, 1, kDividerColor);
+    oldPen  = ::SelectObject(dc, dividerPen);
+    ::MoveToEx(dc, Scale(kPadding), divider4, nullptr);
+    ::LineTo(dc, clientRect.right - Scale(kPadding), divider4);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(dividerPen);
+
     // ---- 注册与集成 ----
     ::SetTextColor(dc, kTitleColor);
-    RECT sectionRect = { Scale(kPadding), Scale(kPadding) + Scale(410),
-                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(432) };
+    RECT sectionRect = { Scale(kPadding), Scale(kPadding) + Scale(492),
+                         clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(514) };
     ::DrawTextW(dc, kSectionTitle, -1, &sectionRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
     ::SetTextColor(dc, kHintColor);
-    RECT regHint = { Scale(kPadding), Scale(kPadding) + Scale(590),
-                     clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(610) };
+    RECT regHint = { Scale(kPadding), Scale(kPadding) + Scale(672),
+                     clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(692) };
     ::DrawTextW(dc, L"代理和 Listary 插件需要管理员权限；失败详情见日志文件。", -1, &regHint,
                 DT_LEFT | DT_TOP | DT_SINGLELINE);
 
     if (m_lastActionFailed)
     {
-        RECT errorRect = { Scale(kPadding), Scale(kPadding) + Scale(614),
-                           clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(634) };
+        RECT errorRect = { Scale(kPadding), Scale(kPadding) + Scale(696),
+                           clientRect.right - Scale(kPadding), Scale(kPadding) + Scale(716) };
         ::SetTextColor(dc, kErrorColor);
         ::DrawTextW(dc, kActionFailedText, -1, &errorRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
     }
@@ -727,6 +763,22 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         if (controlId == kControlIdBackground || controlId == kControlIdWinE)
         {
             OnQuickStartToggle(controlId);
+            return 0;
+        }
+
+        if (controlId == kControlIdTabs || controlId == kControlIdSingleInstance)
+        {
+            core::Settings& settings = core::Settings::Instance();
+            if (controlId == kControlIdTabs)
+            {
+                settings.SetTabsEnabled(IsChecked(m_hCheckTabs));
+            }
+            else
+            {
+                settings.SetSingleInstance(IsChecked(m_hCheckSingleInstance));
+            }
+            settings.Save();
+            RefreshWindowModeChecks();
             return 0;
         }
 
@@ -879,6 +931,8 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         m_hRadioLast = nullptr;
         m_hCheckBackground = nullptr;
         m_hCheckWinE = nullptr;
+        m_hCheckTabs = nullptr;
+        m_hCheckSingleInstance = nullptr;
         m_hCheckDefaultManager = nullptr;
         m_hCheckProxy = nullptr;
         m_hCheckListary = nullptr;

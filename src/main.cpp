@@ -275,6 +275,68 @@ int WINAPI wWinMain(HINSTANCE hInstance,
         }
     }
 
+    // ---------- 步骤 3.6：单实例 ----------
+    // 多标签 + 单实例：所有带路径启动都交给现有窗口开新标签；无参数只呼出窗口。
+    {
+        core::Settings::Instance().Load();
+        if (core::Settings::Instance().TabsEnabled() &&
+            core::Settings::Instance().SingleInstance())
+        {
+            std::wstring raw = ExtractStartupPath(lpCmdLine);
+            const bool hasExplicitPath = !raw.empty() && raw.front() != L'-';
+
+            if (!hasExplicitPath)
+            {
+                if (ui::IsBackgroundHostRunning())
+                {
+                    Logger::Info(L"单实例：已有后台宿主，呼出窗口");
+                    ui::ActivateBackgroundHost();
+                    ::OleUninitialize();
+                    Logger::Shutdown();
+                    return 0;
+                }
+
+                if (ui::ActivateExistingWindow(nullptr))
+                {
+                    Logger::Info(L"单实例：已有窗口，呼出并退出本次启动");
+                    ::OleUninitialize();
+                    Logger::Shutdown();
+                    return 0;
+                }
+            }
+            else
+            {
+                std::wstring folder = raw;
+                std::wstring selectFile;
+
+                const DWORD attributes = ::GetFileAttributesW(raw.c_str());
+                if (attributes != INVALID_FILE_ATTRIBUTES &&
+                    (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+                    !shell::IsContainerFileExtension(raw))
+                {
+                    const size_t slash = raw.find_last_of(L"\\/");
+                    if (slash != std::wstring::npos)
+                    {
+                        selectFile = raw;
+                        folder = raw.substr(0, slash);
+                        if (folder.size() == 2 && folder[1] == L':')
+                        {
+                            folder.push_back(L'\\');
+                        }
+                    }
+                }
+
+                if (ui::RelayOpenInExistingWindow(folder, selectFile, nullptr))
+                {
+                    Logger::Info(L"单实例：已交给现有窗口开新标签：" + folder);
+                    ::OleUninitialize();
+                    Logger::Shutdown();
+                    return 0;
+                }
+            }
+        }
+    }
+
     // ---------- 步骤 4：主窗口与消息循环 ----------
     {
         // 命令行参数有两种可能：
