@@ -2815,6 +2815,13 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         DrawWindowButtons(dc);
+
+        // 标签/导航条之间的 1px 分隔线（没有标签时整条画）
+        HBRUSH lineBrush = ::CreateSolidBrush(RGB(227, 227, 227));
+        RECT lineRect = { 0, tabHeight, clientRect.right, tabHeight + 1 };
+        ::FillRect(dc, &lineRect, lineBrush);
+        ::DeleteObject(lineBrush);
+
         ::SelectObject(dc, oldFont);
         return;
     }
@@ -3050,6 +3057,36 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
     }
 
     DrawWindowButtons(dc);
+
+    // 标签和导航条之间的 1px 分隔线；当前选中的标签下方断开
+    HBRUSH lineBrush = ::CreateSolidBrush(RGB(227, 227, 227));
+    const int lineY = tabHeight;
+    const bool hasActiveRect = (m_activeTab < m_tabRects.size() &&
+                                !::IsRectEmpty(&m_tabRects[m_activeTab]));
+
+    if (hasActiveRect)
+    {
+        const RECT& activeRect = m_tabRects[m_activeTab];
+
+        RECT leftLine = { 0, lineY, activeRect.left, lineY + 1 };
+        if (leftLine.right > leftLine.left)
+        {
+            ::FillRect(dc, &leftLine, lineBrush);
+        }
+
+        RECT rightLine = { activeRect.right, lineY, clientRect.right, lineY + 1 };
+        if (rightLine.right > rightLine.left)
+        {
+            ::FillRect(dc, &rightLine, lineBrush);
+        }
+    }
+    else
+    {
+        RECT lineRect = { 0, lineY, clientRect.right, lineY + 1 };
+        ::FillRect(dc, &lineRect, lineBrush);
+    }
+
+    ::DeleteObject(lineBrush);
     ::SelectObject(dc, oldFont);
 }
 
