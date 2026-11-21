@@ -19,6 +19,7 @@
 
 #include "core/Logger.h"
 #include "core/Settings.h"
+#include "shell/AutoStart.h"
 #include "shell/ExplorerProxy.h"   // 管理员身份下部署/移除 System32 里的 explorer.exe 代理
 #include "shell/ListaryIntegration.h"   // 顺手把内嵌的 Listary 插件装进 Listary 目录
 #include "shell/ShellFolder.h"     // IsContainerFileExtension：压缩包要当目录打开
@@ -243,6 +244,17 @@ int WINAPI wWinMain(HINSTANCE hInstance,
 
         if (command == L"--background")
         {
+            // 启动项可能是旧的（用户已经关掉后台启动），别留一个幽灵托盘进程。
+            core::Settings::Instance().Load();
+            if (!core::Settings::Instance().BackgroundStartup())
+            {
+                Logger::Info(L"后台启动已关闭，清理旧的启动项并退出");
+                shell::SetAutoStart(false);
+                ::OleUninitialize();
+                Logger::Shutdown();
+                return 0;
+            }
+
             Logger::Info(L"以后台宿主身份启动");
             const int backgroundExit = ui::RunBackgroundHost(hInstance);
             ::OleUninitialize();
