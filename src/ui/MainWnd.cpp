@@ -2818,7 +2818,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
         // 标签/导航条之间的 1px 分隔线（没有标签时整条画）
         HBRUSH lineBrush = ::CreateSolidBrush(RGB(227, 227, 227));
-        RECT lineRect = { 0, tabHeight, clientRect.right, tabHeight + 1 };
+        RECT lineRect = { 0, tabHeight - 1, clientRect.right, tabHeight };
         ::FillRect(dc, &lineRect, lineBrush);
         ::DeleteObject(lineBrush);
 
@@ -3000,6 +3000,28 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         ::SelectObject(dc, oldPen);
         ::DeleteObject(closePen);
 
+        // 当前选中的标签：除底部外，左/上/右各画 1px 边框
+        if (active)
+        {
+            HPEN borderPen = ::CreatePen(PS_SOLID, 1, RGB(227, 227, 227));
+            HGDIOBJ oldBorderPen = ::SelectObject(dc, borderPen);
+
+            // 上边
+            ::MoveToEx(dc, tabRect.left, tabRect.top, nullptr);
+            ::LineTo(dc, tabRect.right, tabRect.top);
+
+            // 左边
+            ::MoveToEx(dc, tabRect.left, tabRect.top, nullptr);
+            ::LineTo(dc, tabRect.left, tabRect.bottom);
+
+            // 右边
+            ::MoveToEx(dc, tabRect.right - 1, tabRect.top, nullptr);
+            ::LineTo(dc, tabRect.right - 1, tabRect.bottom);
+
+            ::SelectObject(dc, oldBorderPen);
+            ::DeleteObject(borderPen);
+        }
+
         // 命中区裁到视口内，滚出去的部分点不到
         RECT hit = tabRect;
         hit.left = (hit.left < viewportLeft) ? viewportLeft : hit.left;
@@ -3060,7 +3082,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
     // 标签和导航条之间的 1px 分隔线；当前选中的标签下方断开
     HBRUSH lineBrush = ::CreateSolidBrush(RGB(227, 227, 227));
-    const int lineY = tabHeight;
+    const int lineY = tabHeight - 1;
     const bool hasActiveRect = (m_activeTab < m_tabRects.size() &&
                                 !::IsRectEmpty(&m_tabRects[m_activeTab]));
 
