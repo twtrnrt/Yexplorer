@@ -929,6 +929,45 @@ void MainWindow::DrawMenuItem(const DRAWITEMSTRUCT* drawItem)
     const bool selected = ((drawItem->itemState & ODS_SELECTED) != 0);
     const bool disabled = ((drawItem->itemState & ODS_DISABLED) != 0);
 
+    if (data->modern)
+    {
+        HBRUSH white = ::CreateSolidBrush(RGB(255, 255, 255));
+        ::FillRect(drawItem->hDC, &rc, white);
+        ::DeleteObject(white);
+
+        if (selected)
+        {
+            RECT hover = rc;
+            ::InflateRect(&hover, -Scale(4), -Scale(2));
+
+            const COLORREF hoverColor = RGB(240, 242, 245);
+            HBRUSH hoverBrush = ::CreateSolidBrush(hoverColor);
+            HPEN hoverPen = ::CreatePen(PS_SOLID, 1, hoverColor);
+            HGDIOBJ oldBrush = ::SelectObject(drawItem->hDC, hoverBrush);
+            HGDIOBJ oldPen = ::SelectObject(drawItem->hDC, hoverPen);
+            ::RoundRect(drawItem->hDC, hover.left, hover.top, hover.right, hover.bottom,
+                        Scale(6), Scale(6));
+            ::SelectObject(drawItem->hDC, oldBrush);
+            ::SelectObject(drawItem->hDC, oldPen);
+            ::DeleteObject(hoverBrush);
+            ::DeleteObject(hoverPen);
+        }
+
+        RECT textRect = rc;
+        textRect.left += Scale(12);
+        textRect.right -= Scale(12);
+
+        ::SetBkMode(drawItem->hDC, TRANSPARENT);
+        ::SetTextColor(drawItem->hDC,
+                       disabled ? RGB(160, 164, 170) : RGB(42, 46, 52));
+
+        HGDIOBJ oldFont = ::SelectObject(drawItem->hDC, m_hUiFont);
+        ::DrawTextW(drawItem->hDC, data->text.c_str(), -1, &textRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        ::SelectObject(drawItem->hDC, oldFont);
+        return;
+    }
+
     // ---- 底色 ----
     HBRUSH background = ::CreateSolidBrush(
         selected ? ::GetSysColor(COLOR_HIGHLIGHT) : ::GetSysColor(COLOR_MENU));

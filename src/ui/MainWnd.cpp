@@ -1266,7 +1266,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_MBUTTONDOWN:
     {
-        m_middleButtonHandled = false;
+        m_middleTabCandidate = -1;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (pt.y < TabBarHeight())
         {
@@ -1274,32 +1274,29 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             const int tabIndex = HitTestTab(pt, closeButton);
             if (tabIndex >= 0)
             {
-                CloseTab(static_cast<size_t>(tabIndex));
-                m_middleButtonHandled = true;
-                return 0;
+                m_middleTabCandidate = tabIndex;
             }
         }
-        break;
+        return 0;
     }
 
     case WM_MBUTTONUP:
     {
-        // 兜底：个别鼠标/驱动只给 up 不给 down
-        if (!m_middleButtonHandled)
+        const int candidate = m_middleTabCandidate;
+        m_middleTabCandidate = -1;
+
+        if (candidate >= 0)
         {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            if (pt.y < TabBarHeight())
+            bool closeButton = false;
+            const int upIndex = (pt.y < TabBarHeight()) ? HitTestTab(pt, closeButton) : -1;
+
+            if (upIndex == candidate && candidate < static_cast<int>(m_tabs.size()))
             {
-                bool closeButton = false;
-                const int tabIndex = HitTestTab(pt, closeButton);
-                if (tabIndex >= 0)
-                {
-                    CloseTab(static_cast<size_t>(tabIndex));
-                }
+                CloseTab(static_cast<size_t>(candidate));
             }
         }
-        m_middleButtonHandled = false;
-        break;
+        return 0;
     }
 
     case WM_RBUTTONUP:
@@ -1418,6 +1415,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         m_tabDragIndex = -1;
         m_tabDragging = false;
         m_resizingWindow = false;
+        m_middleTabCandidate = -1;
         break;
 
     // --------------------------------------------------------------
@@ -1444,6 +1442,29 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         {
             const MenuDrawItem* data =
                 reinterpret_cast<const MenuDrawItem*>(measure->itemData);
+
+            if (data->modern)
+            {
+                int textWidth = Scale(120);
+                HDC dc = ::GetDC(m_hWnd);
+                if (dc != nullptr)
+                {
+                    HGDIOBJ oldFont = ::SelectObject(dc, m_hUiFont);
+                    SIZE textSize = {};
+                    if (::GetTextExtentPoint32W(dc, data->text.c_str(),
+                                                static_cast<int>(data->text.size()), &textSize))
+                    {
+                        textWidth = textSize.cx;
+                    }
+                    ::SelectObject(dc, oldFont);
+                    ::ReleaseDC(m_hWnd, dc);
+                }
+
+                measure->itemHeight = static_cast<UINT>(Scale(32));
+                measure->itemWidth = static_cast<UINT>(
+                    (std::max)(Scale(180), Scale(24) + textWidth));
+                return TRUE;
+            }
 
             // 高度取系统菜单项高度，保证和同一菜单里的普通项一样高
             measure->itemHeight = static_cast<UINT>(::GetSystemMetrics(SM_CYMENU));
@@ -2721,9 +2742,28 @@ void MainWindow::ShowTabContextMenu(POINT clientPoint, size_t tabIndex)
         return;
     }
 
-    ::AppendMenuW(menu, MF_STRING, kMenuClose, L"关闭标签");
-    ::AppendMenuW(menu, MF_STRING, kMenuCloseOthers, L"关闭其它标签");
-    ::AppendMenuW(menu, MF_STRING, kMenuCloseAll, L"关闭所有标签");
+    m_menuDrawItems.clear();
+
+    auto addModernItem = [&](UINT id, const wchar_t* text)
+    {
+        auto data = std::make_unique<MenuDrawItem>();
+        data->text = text;
+        data->modern = true;
+        MenuDrawItem* raw = data.get();
+        m_menuDrawItems.push_back(std::move(data));
+        ::AppendMenuW(menu, MF_OWNERDRAW, id, reinterpret_cast<LPCWSTR>(raw));
+    };
+
+    addModernItem(kMenuClose, L"关闭标签");
+    addModernItem(kMenuCloseOthers, L"关闭其它标签");
+    addModernItem(kMenuCloseAll, L"关闭所有标签");
+
+    HBRUSH menuBackground = ::CreateSolidBrush(RGB(255, 255, 255));
+    MENUINFO menuInfo = {};
+    menuInfo.cbSize = sizeof(menuInfo);
+    menuInfo.fMask = MIM_BACKGROUND;
+    menuInfo.hbrBack = menuBackground;
+    ::SetMenuInfo(menu, &menuInfo);
 
     POINT screenPoint = clientPoint;
     ::ClientToScreen(m_hWnd, &screenPoint);
@@ -2733,6 +2773,11 @@ void MainWindow::ShowTabContextMenu(POINT clientPoint, size_t tabIndex)
         menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
         screenPoint.x, screenPoint.y, 0, m_hWnd, nullptr);
     ::DestroyMenu(menu);
+    if (menuBackground != nullptr)
+    {
+        ::DeleteObject(menuBackground);
+    }
+    m_menuDrawItems.clear();
     ::PostMessageW(m_hWnd, WM_NULL, 0, 0);
 
     // 菜单打开期间标签可能被别处改掉

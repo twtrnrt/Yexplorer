@@ -631,7 +631,7 @@ private:
     size_t                m_activeTab = 0;
     bool                  m_restoreTabsOnStartup = false;
     bool                  m_cacheHiddenOnly = false;   // 窗口隐藏时只保留当前标签缓存
-    bool                  m_middleButtonHandled = false;
+    int                   m_middleTabCandidate = -1;
     std::vector<RECT>     m_tabRects;
     std::vector<RECT>     m_tabCloseRects;
     RECT                  m_tabPlusRect = {};
@@ -697,6 +697,7 @@ private:
     {
         std::wstring text;              // 菜单项文字
         HICON        icon = nullptr;    // 16px 图标（可为空：画空位，不探测）
+        bool         modern = false;    // 标签右键菜单的简约样式
     };
 
     std::vector<std::unique_ptr<MenuDrawItem>> m_menuDrawItems;
