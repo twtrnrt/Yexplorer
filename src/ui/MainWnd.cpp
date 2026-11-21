@@ -1158,6 +1158,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CLOSE:
         // 这是最后一次机会把"关掉时的样子"记下来（窗口还没销毁，位置大小都取得到）
         SaveWindowState();
+
+        // 后台宿主的窗口：关闭只隐藏，进程和托盘继续跑
+        if (m_hideOnClose)
+        {
+            ::ShowWindow(m_hWnd, SW_HIDE);
+            return 0;
+        }
         break;   // 交给系统继续走默认流程（DestroyWindow）
 
     // --------------------------------------------------------------

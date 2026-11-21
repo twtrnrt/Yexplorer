@@ -160,11 +160,14 @@
     <ClCompile Include="src\shell\DefaultManager.cpp" />
     <ClCompile Include="src\shell\ExplorerProxy.cpp" />
     <ClCompile Include="src\shell\ListaryIntegration.cpp" />
+    <ClCompile Include="src\shell\AutoStart.cpp" />
     <ClCompile Include="src\shell\ShellOperations.cpp" />
     <ClCompile Include="src\ui\AddressBar.cpp" />
     <ClCompile Include="src\ui\FileListView.cpp" />
     <ClCompile Include="src\ui\FlatButton.cpp" />
     <ClCompile Include="src\ui\MainWnd.cpp" />
+    <ClCompile Include="src\ui\BackgroundHost.cpp" />
+    <ClCompile Include="src\ui\WinEHook.cpp" />
     <ClCompile Include="src\ui\ShellWindowHost.cpp" />
     <ClCompile Include="src\ui\MainWndMenus.cpp" />
     <ClCompile Include="src\ui\NavigationPane.cpp" />
@@ -189,6 +192,9 @@
     <ClInclude Include="src\core\PinyinInitials.h" />
     <ClInclude Include="src\core\NavigationHistory.h" />
     <ClInclude Include="src\core\Settings.h" />
+    <ClInclude Include="src\shell\AutoStart.h" />
+    <ClInclude Include="src\ui\BackgroundHost.h" />
+    <ClInclude Include="src\ui\WinEHook.h" />
     <ClInclude Include="src\core\UndoStack.h" />
     <ClInclude Include="src\shell\ContainerExtract.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />

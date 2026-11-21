@@ -18,9 +18,11 @@
 #include <string>
 
 #include "core/Logger.h"
+#include "core/Settings.h"
 #include "shell/ExplorerProxy.h"   // 管理员身份下部署/移除 System32 里的 explorer.exe 代理
 #include "shell/ListaryIntegration.h"   // 顺手把内嵌的 Listary 插件装进 Listary 目录
 #include "shell/ShellFolder.h"     // IsContainerFileExtension：压缩包要当目录打开
+#include "ui/BackgroundHost.h"
 #include "ui/MainWnd.h"
 #include "ui/WindowRelay.h"   // "这个目录已经开着了"就交给已有窗口
 
@@ -226,6 +228,30 @@ int WINAPI wWinMain(HINSTANCE hInstance,
 
     int exitCode = 0;
 
+    // ---------- 步骤 3.5：后台宿主（--background） ----------
+    // 开机启动项/设置里启动的就是这个：托盘常驻 + 可选 Win+E 钩子 + 隐藏热窗口。
+    {
+        std::wstring command = (lpCmdLine != nullptr) ? std::wstring(lpCmdLine) : std::wstring();
+        while (!command.empty() && (command.front() == L' ' || command.front() == L'\t'))
+        {
+            command.erase(command.begin());
+        }
+        while (!command.empty() && (command.back() == L' ' || command.back() == L'\t'))
+        {
+            command.pop_back();
+        }
+
+        if (command == L"--background")
+        {
+            Logger::Info(L"以后台宿主身份启动");
+            const int backgroundExit = ui::RunBackgroundHost(hInstance);
+            ::OleUninitialize();
+            Logger::Info(L"后台宿主退出码=" + std::to_wstring(backgroundExit));
+            Logger::Shutdown();
+            return backgroundExit;
+        }
+    }
+
     // ---------- 步骤 4：主窗口与消息循环 ----------
     {
         // 命令行参数有两种可能：
@@ -234,6 +260,14 @@ int WINAPI wWinMain(HINSTANCE hInstance,
         //      → 打开它所在的目录，并把这个文件选中高亮
         std::wstring startupPath = ExtractStartupPath(lpCmdLine);
         std::wstring startupSelectFile;
+
+        // 没有显式路径（直接启动 / 任务栏 / 开始菜单）时，按设置里的「启动位置」决定。
+        // 显式路径（双击文件夹、/select、右键在新窗口打开）永远优先。
+        if (startupPath.empty() || startupPath.front() == L'-')
+        {
+            core::Settings::Instance().Load();
+            startupPath = core::Settings::Instance().ResolveStartupPath();
+        }
 
         if (!startupPath.empty())
         {

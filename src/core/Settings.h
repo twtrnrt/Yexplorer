@@ -107,6 +107,15 @@ struct OpenWithEntry
 // 勾选状态、默认程序都按这个串比对，改路径时不会张冠李戴。
 std::wstring OpenWithKey(const OpenWithItem& item);
 
+// 「启动位置」：无参数启动 / Win+E 时打开哪里
+enum class StartupLocation
+{
+    LastFolder = 0,   // 最后一次打开的文件夹（默认，保持旧行为）
+    ThisPc     = 1,   // 此电脑
+    Home       = 2,   // 主文件夹（Shell 的 Home 视图）
+    Custom     = 3,   // 用户自定义目录
+};
+
 // 本软件公用配置。全程序只有一个实例（Settings::Instance()）。
 class Settings
 {
@@ -172,6 +181,27 @@ public:
     // 上次停留的目录（下次启动直接打开这里）
     const std::wstring& LastFolder() const { return m_lastFolder; }
     void                SetLastFolder(const std::wstring& path) { m_lastFolder = path; }
+
+    // ---------------- 启动位置 ----------------
+    StartupLocation Startup() const { return m_startupLocation; }
+    void SetStartup(StartupLocation location) { m_startupLocation = location; }
+
+    const std::wstring& CustomStartupFolder() const { return m_customStartupFolder; }
+    void SetCustomStartupFolder(const std::wstring& path) { m_customStartupFolder = path; }
+
+    // 无参数启动时的实际路径：把上面四项解析成主窗口能接受的路径
+    // （此电脑/主文件夹是 Shell 命名空间路径，不是文件系统目录）。
+    std::wstring ResolveStartupPath() const;
+
+    // 后台宿主用：丢掉内存里的旧值，重新读一次磁盘
+    void ReloadFromDisk();
+
+    // ---------------- 快速启动 ----------------
+    bool BackgroundStartup() const { return m_backgroundStartup; }
+    void SetBackgroundStartup(bool enabled) { m_backgroundStartup = enabled; }
+
+    bool TakeOverWinE() const { return m_takeOverWinE; }
+    void SetTakeOverWinE(bool enabled) { m_takeOverWinE = enabled; }
 
     // ---------------- 界面开关 ----------------
     // 右键菜单里是否显示程序图标（「打开方式」各项、「新建」各项前面）。
@@ -241,6 +271,10 @@ private:
     // 只在内存里查，导航时不开销（启动读一次，关闭写一次）
     std::map<std::wstring, int> m_viewByLocation;
     std::wstring  m_lastFolder;
+    StartupLocation m_startupLocation = StartupLocation::LastFolder;
+    std::wstring  m_customStartupFolder;
+    bool          m_backgroundStartup = false;
+    bool          m_takeOverWinE = false;
     bool          m_menuIcons      = false;   // 右键菜单是否显示图标（默认关）
 
     // 显示隐藏文件 / 系统文件（默认都关，和资源管理器的默认一致）

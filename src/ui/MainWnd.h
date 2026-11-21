@@ -138,6 +138,12 @@ public:
                 const std::wstring& initialPath = std::wstring(),
                 const std::wstring& initialSelectFile = std::wstring());
     void Show(int nCmdShow);
+
+    // 后台宿主用：关窗口时隐藏而不是销毁（进程继续跑，托盘还在）。
+    void SetHideOnClose(bool hide) { m_hideOnClose = hide; }
+
+    // 后台宿主用：把窗口导航到指定路径（虚拟路径/文件系统路径都行）。
+    void OpenPath(const std::wstring& path) { NavigateToPath(path); }
     int  RunMessageLoop();
 
     HWND Handle() const { return m_hWnd; }
@@ -513,6 +519,7 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
 
 private:
     HWND      m_hWnd      = nullptr;
+    bool      m_hideOnClose = false;   // 后台宿主窗口：关闭 = 隐藏到托盘
     HINSTANCE m_hInstance = nullptr;
 
     // 普通目录那套视图（"全局"）。进「此电脑」「控制面板」时会临时切到它们自己的模式，

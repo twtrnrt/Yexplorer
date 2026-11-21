@@ -17,6 +17,7 @@
 #include "core/Settings.h"
 
 #include "core/Logger.h"
+#include "shell/ShellFolder.h"
 #include "nlohmann/json.hpp"
 
 #include <windows.h>
@@ -285,6 +286,30 @@ bool Settings::Load()
         // ---------------- 上次停留的目录 ----------------
         m_lastFolder = FromUtf8(json.value("lastFolder", std::string()));
 
+        // ---------------- 启动位置 ----------------
+        const std::string startupLocation = json.value("startupLocation", std::string("last"));
+        if (startupLocation == "thispc")
+        {
+            m_startupLocation = StartupLocation::ThisPc;
+        }
+        else if (startupLocation == "home")
+        {
+            m_startupLocation = StartupLocation::Home;
+        }
+        else if (startupLocation == "custom")
+        {
+            m_startupLocation = StartupLocation::Custom;
+        }
+        else
+        {
+            m_startupLocation = StartupLocation::LastFolder;
+        }
+        m_customStartupFolder = FromUtf8(json.value("customStartupFolder", std::string()));
+
+        // ---------------- 快速启动 ----------------
+        m_backgroundStartup = json.value("backgroundStartup", false);
+        m_takeOverWinE = json.value("takeOverWinE", false);
+
         // ---------------- 界面开关 ----------------
         // 右键菜单显示图标：没记过就是关（保持原来的纯文字菜单）
         m_menuIcons = json.value("menuIcons", false);
@@ -520,6 +545,31 @@ bool Settings::Save()
         json["lastFolder"] = ToUtf8(m_lastFolder);
     }
 
+    // ---------------- 启动位置 ----------------
+    switch (m_startupLocation)
+    {
+    case StartupLocation::ThisPc: json["startupLocation"] = "thispc"; break;
+    case StartupLocation::Home:   json["startupLocation"] = "home"; break;
+    case StartupLocation::Custom: json["startupLocation"] = "custom"; break;
+    case StartupLocation::LastFolder:
+    default:                      json["startupLocation"] = "last"; break;
+    }
+
+    if (!m_customStartupFolder.empty())
+    {
+        json["customStartupFolder"] = ToUtf8(m_customStartupFolder);
+    }
+
+    // ---------------- 快速启动 ----------------
+    if (m_backgroundStartup)
+    {
+        json["backgroundStartup"] = true;
+    }
+    if (m_takeOverWinE)
+    {
+        json["takeOverWinE"] = true;
+    }
+
     // ---------------- 界面开关 ----------------
     // 只在"开"的时候写，关就是默认值，不往文件里塞多余的字段
     if (m_menuIcons)
@@ -714,6 +764,40 @@ OpenWithEntry& Settings::EnsureOpenWith(const std::wstring& ext)
     fresh.ext = ext;
     m_openWith.push_back(std::move(fresh));
     return m_openWith.back();
+}
+
+std::wstring Settings::ResolveStartupPath() const
+{    switch (m_startupLocation)
+    {
+    case StartupLocation::ThisPc:
+        return shell::kThisPcPath;
+
+    case StartupLocation::Home:
+        return shell::kHomeFolderPath;
+
+    case StartupLocation::Custom:
+    {
+        const DWORD attributes = ::GetFileAttributesW(m_customStartupFolder.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            return m_customStartupFolder;
+        }
+
+        Logger::Warn(L"启动位置：自定义目录不可用，回退到主文件夹：" + m_customStartupFolder);
+        return shell::kHomeFolderPath;
+    }
+
+    case StartupLocation::LastFolder:
+    default:
+        return m_lastFolder.empty() ? std::wstring(shell::kHomeFolderPath) : m_lastFolder;
+    }
+}
+
+void Settings::ReloadFromDisk()
+{
+    m_loaded = false;
+    Load();
 }
 
 } // namespace core
