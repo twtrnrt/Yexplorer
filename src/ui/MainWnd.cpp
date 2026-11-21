@@ -924,13 +924,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         const bool maximized = ::IsZoomed(m_hWnd) != FALSE;
         const int border = Scale(7);
+        const int topBorder = Scale(1);
 
         // 四边/四角先给缩放命中（最大化时不缩放）
         if (!maximized)
         {
             const bool left   = pt.x < border;
             const bool right  = pt.x >= clientRect.right - border;
-            const bool top    = pt.y < border;
+            const bool top    = pt.y < topBorder;
             const bool bottom = pt.y >= clientRect.bottom - border;
 
             if (top && left)      { return HTTOPLEFT; }
