@@ -1266,6 +1266,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_MBUTTONDOWN:
     {
+        m_middleButtonHandled = false;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (pt.y < TabBarHeight())
         {
@@ -1274,6 +1275,43 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             if (tabIndex >= 0)
             {
                 CloseTab(static_cast<size_t>(tabIndex));
+                m_middleButtonHandled = true;
+                return 0;
+            }
+        }
+        break;
+    }
+
+    case WM_MBUTTONUP:
+    {
+        // 兜底：个别鼠标/驱动只给 up 不给 down
+        if (!m_middleButtonHandled)
+        {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (pt.y < TabBarHeight())
+            {
+                bool closeButton = false;
+                const int tabIndex = HitTestTab(pt, closeButton);
+                if (tabIndex >= 0)
+                {
+                    CloseTab(static_cast<size_t>(tabIndex));
+                }
+            }
+        }
+        m_middleButtonHandled = false;
+        break;
+    }
+
+    case WM_RBUTTONUP:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (pt.y < TabBarHeight())
+        {
+            bool closeButton = false;
+            const int tabIndex = HitTestTab(pt, closeButton);
+            if (tabIndex >= 0)
+            {
+                ShowTabContextMenu(pt, static_cast<size_t>(tabIndex));
                 return 0;
             }
         }
@@ -2607,6 +2645,116 @@ void MainWindow::CloseTab(size_t index)
     }
 
     RestoreTab(next);
+}
+
+void MainWindow::CloseOtherTabs(size_t keepIndex)
+{
+    if (keepIndex >= m_tabs.size())
+    {
+        return;
+    }
+
+    if (keepIndex != m_activeTab)
+    {
+        ActivateTab(keepIndex);
+        if (m_activeTab != keepIndex)
+        {
+            return;
+        }
+    }
+
+    if (m_tabs.size() <= 1)
+    {
+        return;
+    }
+
+    SaveActiveTab();
+
+    TabState keep = std::move(m_tabs[m_activeTab]);
+    m_tabs.clear();
+    m_tabs.push_back(std::move(keep));
+    m_activeTab = 0;
+
+    TrimTabCache();
+
+    RECT strip = {};
+    ::GetClientRect(m_hWnd, &strip);
+    strip.bottom = TabBarHeight();
+    ::InvalidateRect(m_hWnd, &strip, FALSE);
+}
+
+void MainWindow::CloseAllTabsToHome(size_t targetIndex)
+{
+    if (targetIndex >= m_tabs.size())
+    {
+        return;
+    }
+
+    if (targetIndex != m_activeTab)
+    {
+        ActivateTab(targetIndex);
+        if (m_activeTab != targetIndex)
+        {
+            return;
+        }
+    }
+
+    // 当前标签打开主文件夹，然后只保留这一个标签
+    NavigateToPath(shell::kHomeFolderPath);
+    CloseOtherTabs(m_activeTab);
+}
+
+void MainWindow::ShowTabContextMenu(POINT clientPoint, size_t tabIndex)
+{
+    if (tabIndex >= m_tabs.size())
+    {
+        return;
+    }
+
+    constexpr UINT kMenuClose = 5001;
+    constexpr UINT kMenuCloseOthers = 5002;
+    constexpr UINT kMenuCloseAll = 5003;
+
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr)
+    {
+        return;
+    }
+
+    ::AppendMenuW(menu, MF_STRING, kMenuClose, L"关闭标签");
+    ::AppendMenuW(menu, MF_STRING, kMenuCloseOthers, L"关闭其它标签");
+    ::AppendMenuW(menu, MF_STRING, kMenuCloseAll, L"关闭所有标签");
+
+    POINT screenPoint = clientPoint;
+    ::ClientToScreen(m_hWnd, &screenPoint);
+
+    ::SetForegroundWindow(m_hWnd);
+    const UINT command = ::TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        screenPoint.x, screenPoint.y, 0, m_hWnd, nullptr);
+    ::DestroyMenu(menu);
+    ::PostMessageW(m_hWnd, WM_NULL, 0, 0);
+
+    // 菜单打开期间标签可能被别处改掉
+    if (tabIndex >= m_tabs.size())
+    {
+        return;
+    }
+
+    switch (command)
+    {
+    case kMenuClose:
+        CloseTab(tabIndex);
+        break;
+    case kMenuCloseOthers:
+        CloseOtherTabs(tabIndex);
+        break;
+    case kMenuCloseAll:
+        CloseAllTabsToHome(tabIndex);
+        break;
+    default:
+        break;
+    }
 }
 
 void MainWindow::UpdateActiveTabFromCurrent()

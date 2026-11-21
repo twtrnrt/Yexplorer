@@ -226,6 +226,9 @@ private:
     void SaveTabSession();
     bool RestoreTabSession();
     void CloseTab(size_t index);
+    void CloseOtherTabs(size_t keepIndex);
+    void CloseAllTabsToHome(size_t targetIndex);
+    void ShowTabContextMenu(POINT clientPoint, size_t tabIndex);
     void ActivateTab(size_t index);
 
     // 启动后台枚举（只负责枚举与界面刷新，不改历史）
@@ -628,6 +631,7 @@ private:
     size_t                m_activeTab = 0;
     bool                  m_restoreTabsOnStartup = false;
     bool                  m_cacheHiddenOnly = false;   // 窗口隐藏时只保留当前标签缓存
+    bool                  m_middleButtonHandled = false;
     std::vector<RECT>     m_tabRects;
     std::vector<RECT>     m_tabCloseRects;
     RECT                  m_tabPlusRect = {};
