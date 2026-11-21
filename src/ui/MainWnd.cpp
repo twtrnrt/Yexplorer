@@ -924,7 +924,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
         const bool maximized = ::IsZoomed(m_hWnd) != FALSE;
         const int border = Scale(7);
-        const int topBorder = Scale(1);
+        const int topBorder = 0;
 
         // 四边/四角先给缩放命中（最大化时不缩放）
         if (!maximized)
