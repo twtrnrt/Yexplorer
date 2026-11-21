@@ -2603,8 +2603,8 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
             ::DeleteObject(closeHoverPen);
         }
 
-        // 直接画两条对角线：8px 见方，2px 线宽
-        const int cross = Scale(8);
+        // 直接画两条对角线：9px 见方，2px 线宽
+        const int cross = Scale(9);
         const int centerX = (closeRect.left + closeRect.right) / 2;
         const int centerY = (closeRect.top + closeRect.bottom) / 2;
         const int half = cross / 2;
