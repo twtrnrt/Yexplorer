@@ -62,9 +62,6 @@ public:
     // 把当前文字重新写进第 0 格（状态栏被别处改过时恢复；粘贴期间 UpdateStatusBar 会调）
     void RefreshText();
 
-    // 状态栏顶部 1px 线颜色（CLR_INVALID = 不画）
-    void SetStatusTopLineColor(COLORREF color) { m_statusTopLineColor = color; }
-    void SetStatusBackgroundColor(COLORREF color) { m_statusBackgroundColor = color; }
 
     // 状态栏尺寸变化时重排
     void Layout();
@@ -80,7 +77,6 @@ private:
 
     void InitTaskbarProgress();
     void Paint();
-    void PaintStatusTopLine();
     void BuildLines(int barWidth);
     int  Scale(int value) const;
 
@@ -101,6 +97,4 @@ private:
     std::vector<int> m_lineOffsets;          // 文件边界线的条内 x 偏移（已去重）
     bool          m_linesDirty = true;
     std::wstring  m_progressText;            // 当前第 0 格文字（没变就不重写）
-    COLORREF      m_statusTopLineColor = CLR_INVALID;
-    COLORREF      m_statusBackgroundColor = CLR_INVALID;
 };

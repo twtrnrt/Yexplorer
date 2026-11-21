@@ -294,43 +294,6 @@ int PasteProgressBar::Scale(int value) const
 // 绘制
 // ============================================================================
 
-void PasteProgressBar::PaintStatusTopLine()
-{
-    if (m_statusBar == nullptr || m_statusTopLineColor == CLR_INVALID)
-    {
-        return;
-    }
-
-    RECT client = {};
-    ::GetClientRect(m_statusBar, &client);
-    if (client.right <= client.left || client.bottom <= client.top)
-    {
-        return;
-    }
-
-    HDC dc = ::GetDC(m_statusBar);
-    if (dc == nullptr)
-    {
-        return;
-    }
-
-    // 先盖掉系统状态栏内部的 1px 深色边（大约在顶部 2px 处），
-    // 再用 227 画最顶部 1px 线。
-    if (m_statusBackgroundColor != CLR_INVALID)
-    {
-        RECT clean = { 0, 0, client.right, Scale(4) };
-        HBRUSH backBrush = ::CreateSolidBrush(m_statusBackgroundColor);
-        ::FillRect(dc, &clean, backBrush);
-        ::DeleteObject(backBrush);
-    }
-
-    RECT line = { 0, 0, client.right, Scale(1) };
-    HBRUSH brush = ::CreateSolidBrush(m_statusTopLineColor);
-    ::FillRect(dc, &line, brush);
-    ::DeleteObject(brush);
-    ::ReleaseDC(m_statusBar, dc);
-}
-
 void PasteProgressBar::Paint()
 {
     if (m_statusBar == nullptr || ::IsRectEmpty(&m_barRect))
@@ -636,12 +599,6 @@ LRESULT CALLBACK PasteProgressBar::StatusBarSubclassProc(HWND hwnd, UINT msg, WP
                                                          LPARAM lParam, UINT_PTR idSubclass,
                                                          DWORD_PTR refData)
 {
-    // 状态栏原生边框不要；背景色由 SB_SETBKCOLOR 负责
-    if (msg == WM_NCPAINT)
-    {
-        return 0;
-    }
-
     // 先让系统照常处理（画背景、写左右两格文字）
     const LRESULT result = ::DefSubclassProc(hwnd, msg, wParam, lParam);
 
@@ -650,7 +607,6 @@ LRESULT CALLBACK PasteProgressBar::StatusBarSubclassProc(HWND hwnd, UINT msg, WP
     if (msg == WM_PAINT && self != nullptr)
     {
         self->Paint();
-        self->PaintStatusTopLine();
     }
     else if (msg == WM_NCDESTROY)
     {

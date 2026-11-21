@@ -41,7 +41,6 @@
 #include <memory>     // shared_ptr（把解压结果从后台线程递回主线程）
 
 #pragma comment(lib, "propsys.lib")
-#pragma comment(lib, "uxtheme.lib")
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -740,14 +739,8 @@ void MainWindow::CreateChildControls()
         ::SendMessageW(m_hStatusBar, WM_SETFONT, reinterpret_cast<WPARAM>(m_hUiFont), TRUE);
     }
 
-    // 状态栏底色：240,241,245；去掉主题，保证是直角矩形
-    ::SetWindowTheme(m_hStatusBar, L"", L"");
-    ::SendMessageW(m_hStatusBar, SB_SETBKCOLOR, 0, RGB(240, 241, 245));
-
-    // 状态栏要能"自己补画"粘贴进度条：子类化它的窗口过程 + 挂任务栏进度
+    // 状态栏跟随系统视觉主题
     m_pasteBar.Attach(m_hWnd, m_hStatusBar);
-    m_pasteBar.SetStatusTopLineColor(RGB(227, 227, 227));
-    m_pasteBar.SetStatusBackgroundColor(RGB(240, 241, 245));
 
     // ---------------- 6. 键盘快捷键 ----------------
     // 用系统的加速键表，好处是不用去拦截每个控件的按键消息
