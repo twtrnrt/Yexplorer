@@ -250,6 +250,17 @@ int WINAPI wWinMain(HINSTANCE hInstance,
             Logger::Shutdown();
             return backgroundExit;
         }
+
+        // 无参数启动（任务栏 / 开始菜单 / 双击 exe）：已有后台宿主就交给它，
+        // 直接显示热窗口，不用再冷启动一个完整窗口。
+        if (command.empty() && ui::IsBackgroundHostRunning())
+        {
+            Logger::Info(L"已有后台宿主，交给它显示窗口");
+            ui::ActivateBackgroundHost();
+            ::OleUninitialize();
+            Logger::Shutdown();
+            return 0;
+        }
     }
 
     // ---------- 步骤 4：主窗口与消息循环 ----------

@@ -144,6 +144,9 @@ public:
 
     // 后台宿主用：把窗口导航到指定路径（虚拟路径/文件系统路径都行）。
     void OpenPath(const std::wstring& path) { NavigateToPath(path); }
+
+    // 后台宿主用：窗口当前所在路径（判断"已经是这个目录"就不用再导航）
+    const std::wstring& CurrentPath() const { return m_history.Current(); }
     int  RunMessageLoop();
 
     HWND Handle() const { return m_hWnd; }

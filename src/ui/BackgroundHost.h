@@ -25,6 +25,10 @@ bool StartBackgroundHost();
 // 让后台宿主退出（移除托盘/钩子/热窗口）。
 void StopBackgroundHost();
 
+// 无参数启动（任务栏/开始菜单/双击 exe）时，把请求交给后台宿主：
+// 隐藏窗口直接显示，已显示则拉到前台；不新开进程。
+void ActivateBackgroundHost();
+
 // 设置变了：让后台宿主重新读配置（钩子开/关、热窗口路径）。
 void ReloadBackgroundHost();
 

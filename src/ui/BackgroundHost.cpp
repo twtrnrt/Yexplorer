@@ -9,6 +9,7 @@
 #include "core/Settings.h"
 #include "ui/MainWnd.h"
 #include "ui/WinEHook.h"
+#include "ui/WindowRelay.h"
 #include "../res/resource.h"
 
 #include <memory>
@@ -23,6 +24,7 @@ const wchar_t* kHostMutexName = L"Local\\Yexplorer.BackgroundHost";
 constexpr UINT kMsgTray   = WM_APP + 41;
 constexpr UINT kMsgReload = WM_APP + 42;
 constexpr UINT kMsgStop   = WM_APP + 43;
+constexpr UINT kMsgActivate = WM_APP + 44;
 
 constexpr UINT kTrayId = 1;
 constexpr UINT kMenuOpen = 1;
@@ -134,7 +136,11 @@ private:
         switch (msg)
         {
         case ui::kWinEMessage:
-            ShowWarmWindow();
+            ShowWarmWindow(true);
+            return 0;
+
+        case kMsgActivate:
+            ShowWarmWindow(false);
             return 0;
 
         case kMsgReload:
@@ -209,7 +215,7 @@ private:
         }
     }
 
-    void ShowWarmWindow()
+    void ShowWarmWindow(bool newWindowWhenVisible)
     {
         EnsureWarmWindow();
         if (!m_warm || m_warm->Handle() == nullptr)
@@ -218,22 +224,29 @@ private:
             return;
         }
 
-        // 已经有一个可见窗口：Win+E 按"新开一个"处理
+        // 已经有一个可见窗口
         if (::IsWindowVisible(m_warm->Handle()))
         {
-            LaunchNewWindow();
+            if (newWindowWhenVisible)
+            {
+                LaunchNewWindow();   // Win+E：按"新开一个"处理
+            }
+            else
+            {
+                ui::ForceForegroundWindow(m_warm->Handle());   // 任务栏/开始菜单：直接拉前台
+            }
             return;
         }
 
-        // 隐藏的热窗口：导航到设置的位置再显示
+        // 隐藏的热窗口：已经在目标目录就不用再导航（省掉一次枚举）
         const std::wstring path = core::Settings::Instance().ResolveStartupPath();
-        if (!path.empty())
+        if (!path.empty() && ::_wcsicmp(m_warm->CurrentPath().c_str(), path.c_str()) != 0)
         {
             m_warm->OpenPath(path);
         }
 
         m_warm->Show(SW_SHOW);
-        ::SetForegroundWindow(m_warm->Handle());
+        ui::ForceForegroundWindow(m_warm->Handle());
     }
 
     void LaunchNewWindow()
@@ -298,7 +311,7 @@ private:
     {
         if (event == WM_LBUTTONDBLCLK)
         {
-            ShowWarmWindow();
+            ShowWarmWindow(false);
             return;
         }
 
@@ -327,7 +340,7 @@ private:
 
         if (command == kMenuOpen)
         {
-            ShowWarmWindow();
+            ShowWarmWindow(false);
         }
         else if (command == kMenuExit)
         {
@@ -442,6 +455,15 @@ void StopBackgroundHost()
     if (host != nullptr)
     {
         ::PostMessageW(host, kMsgStop, 0, 0);
+    }
+}
+
+void ActivateBackgroundHost()
+{
+    HWND host = ::FindWindowW(kHostClassName, nullptr);
+    if (host != nullptr)
+    {
+        ::PostMessageW(host, kMsgActivate, 0, 0);
     }
 }
 
