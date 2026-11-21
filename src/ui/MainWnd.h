@@ -632,6 +632,15 @@ private:
     RECT                  m_tabPlusRect = {};
     RECT                  m_tabLeftRect = {};
     RECT                  m_tabRightRect = {};
+    RECT                  m_minButtonRect = {};
+    RECT                  m_maxButtonRect = {};
+    RECT                  m_closeButtonRect = {};
+    int                   m_windowButtonHover = -1;
+    bool                  m_windowButtonTracking = false;
+    bool                  m_resizingWindow = false;
+    int                   m_resizeHit = 0;
+    RECT                  m_resizeStartRect = {};
+    POINT                 m_resizeStartCursor = {};
     int                   m_tabScrollOffset = 0;
     int                   m_tabHover = -1;
     bool                  m_tabHoverClose = false;
@@ -653,7 +662,10 @@ private:
     void UpdateTabHover(POINT pt);
     void UpdateTabDrag(POINT pt);
     void ScrollTabs(int delta);
-    int  TabBarHeight() const;
+    void LayoutWindowButtons(const RECT& clientRect);
+    void DrawWindowButtons(HDC dc);
+    int  HitTestWindowButton(POINT pt) const;
+    int  TabBarHeight() const { return Scale(40); }
 
     // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----
     MenuIconCache      m_menuIcons;

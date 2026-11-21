@@ -861,6 +861,181 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // --------------------------------------------------------------
+    // 自定义标题栏：去掉原生 caption，客户区铺满整个窗口
+    // --------------------------------------------------------------
+    case WM_NCCALCSIZE:
+        if (wParam != FALSE)
+        {
+            // 最大化时窗口矩形会比工作区大一圈边框；把客户区收回来，
+            // 否则标题栏和底部会伸到屏幕/任务栏外面。
+            if (::IsZoomed(m_hWnd))
+            {
+                NCCALCSIZE_PARAMS* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+                const int border = ::GetSystemMetrics(SM_CXSIZEFRAME) +
+                                   ::GetSystemMetrics(SM_CXPADDEDBORDER);
+                params->rgrc[0].left   += border;
+                params->rgrc[0].top    += border;
+                params->rgrc[0].right  -= border;
+                params->rgrc[0].bottom -= border;
+            }
+            return 0;
+        }
+        break;
+
+    case WM_NCPAINT:
+        return 0;
+
+    case WM_NCACTIVATE:
+        // 不让系统再画原生标题栏
+        return TRUE;
+
+    case WM_NCHITTEST:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ::ScreenToClient(m_hWnd, &pt);
+
+        RECT clientRect = {};
+        ::GetClientRect(m_hWnd, &clientRect);
+        LayoutWindowButtons(clientRect);
+
+        const bool maximized = ::IsZoomed(m_hWnd) != FALSE;
+        const int border = Scale(7);
+
+        // 四边/四角先给缩放命中（最大化时不缩放）
+        if (!maximized)
+        {
+            const bool left   = pt.x < border;
+            const bool right  = pt.x >= clientRect.right - border;
+            const bool top    = pt.y < border;
+            const bool bottom = pt.y >= clientRect.bottom - border;
+
+            if (top && left)      { return HTTOPLEFT; }
+            if (top && right)     { return HTTOPRIGHT; }
+            if (bottom && left)   { return HTBOTTOMLEFT; }
+            if (bottom && right)  { return HTBOTTOMRIGHT; }
+            if (left)             { return HTLEFT; }
+            if (right)            { return HTRIGHT; }
+            if (top)              { return HTTOP; }
+            if (bottom)           { return HTBOTTOM; }
+        }
+
+        if (pt.y < TabBarHeight())
+        {
+            const int button = HitTestWindowButton(pt);
+            if (button == 0) { return HTMINBUTTON; }
+            if (button == 1) { return HTMAXBUTTON; }
+            if (button == 2) { return HTCLOSE; }
+
+            if (pt.x < clientRect.right - Scale(46) * 3)
+            {
+                bool closeButton = false;
+                if (HitTestTab(pt, closeButton) >= 0 ||
+                    ::PtInRect(&m_tabPlusRect, pt) ||
+                    ::PtInRect(&m_tabLeftRect, pt) ||
+                    ::PtInRect(&m_tabRightRect, pt))
+                {
+                    return HTCLIENT;
+                }
+            }
+            return HTCAPTION;
+        }
+        return HTCLIENT;
+    }
+
+    case WM_NCLBUTTONDOWN:
+    {
+        if (wParam == HTMINBUTTON)
+        {
+            ::ShowWindow(m_hWnd, SW_MINIMIZE);
+            return 0;
+        }
+        if (wParam == HTMAXBUTTON)
+        {
+            ::ShowWindow(m_hWnd, ::IsZoomed(m_hWnd) ? SW_RESTORE : SW_MAXIMIZE);
+            return 0;
+        }
+        if (wParam == HTCLOSE)
+        {
+            ::PostMessageW(m_hWnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
+
+        if (wParam == HTLEFT || wParam == HTRIGHT ||
+            wParam == HTTOP || wParam == HTBOTTOM ||
+            wParam == HTTOPLEFT || wParam == HTTOPRIGHT ||
+            wParam == HTBOTTOMLEFT || wParam == HTBOTTOMRIGHT)
+        {
+            m_resizingWindow = true;
+            m_resizeHit = static_cast<int>(wParam);
+            ::GetWindowRect(m_hWnd, &m_resizeStartRect);
+            ::GetCursorPos(&m_resizeStartCursor);
+            ::SetCapture(m_hWnd);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_NCMOUSEMOVE:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ::ScreenToClient(m_hWnd, &pt);
+
+        const int button = HitTestWindowButton(pt);
+        if (button != m_windowButtonHover)
+        {
+            m_windowButtonHover = button;
+
+            RECT strip = {};
+            ::GetClientRect(m_hWnd, &strip);
+            strip.bottom = TabBarHeight();
+            ::InvalidateRect(m_hWnd, &strip, FALSE);
+        }
+
+        if (!m_windowButtonTracking)
+        {
+            TRACKMOUSEEVENT track = {};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE | TME_NONCLIENT;
+            track.hwndTrack = m_hWnd;
+            ::TrackMouseEvent(&track);
+            m_windowButtonTracking = true;
+        }
+        break;
+    }
+
+    case WM_NCMOUSELEAVE:
+        m_windowButtonTracking = false;
+        if (m_windowButtonHover != -1)
+        {
+            m_windowButtonHover = -1;
+            RECT strip = {};
+            ::GetClientRect(m_hWnd, &strip);
+            strip.bottom = TabBarHeight();
+            ::InvalidateRect(m_hWnd, &strip, FALSE);
+        }
+        break;
+
+    case WM_NCRBUTTONUP:
+        if (wParam == HTCAPTION)
+        {
+            HMENU menu = ::GetSystemMenu(m_hWnd, FALSE);
+            if (menu != nullptr)
+            {
+                POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ::SetForegroundWindow(m_hWnd);
+                const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                                      pt.x, pt.y, 0, m_hWnd, nullptr);
+                ::PostMessageW(m_hWnd, WM_NULL, 0, 0);
+                if (command != 0)
+                {
+                    ::PostMessageW(m_hWnd, WM_SYSCOMMAND, command, 0);
+                }
+            }
+            return 0;
+        }
+        break;
+
+    // --------------------------------------------------------------
     // 创建
     // --------------------------------------------------------------
     case WM_CREATE:
@@ -1025,6 +1200,44 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
+        if (m_resizingWindow)
+        {
+            POINT cursor = {};
+            ::GetCursorPos(&cursor);
+            const int dx = cursor.x - m_resizeStartCursor.x;
+            const int dy = cursor.y - m_resizeStartCursor.y;
+
+            RECT rect = m_resizeStartRect;
+            const int minWidth = Scale(480);
+            const int minHeight = Scale(320);
+
+            if (m_resizeHit == HTLEFT || m_resizeHit == HTTOPLEFT || m_resizeHit == HTBOTTOMLEFT)
+            {
+                rect.left += dx;
+                if (rect.right - rect.left < minWidth) { rect.left = rect.right - minWidth; }
+            }
+            if (m_resizeHit == HTRIGHT || m_resizeHit == HTTOPRIGHT || m_resizeHit == HTBOTTOMRIGHT)
+            {
+                rect.right += dx;
+                if (rect.right - rect.left < minWidth) { rect.right = rect.left + minWidth; }
+            }
+            if (m_resizeHit == HTTOP || m_resizeHit == HTTOPLEFT || m_resizeHit == HTTOPRIGHT)
+            {
+                rect.top += dy;
+                if (rect.bottom - rect.top < minHeight) { rect.top = rect.bottom - minHeight; }
+            }
+            if (m_resizeHit == HTBOTTOM || m_resizeHit == HTBOTTOMLEFT || m_resizeHit == HTBOTTOMRIGHT)
+            {
+                rect.bottom += dy;
+                if (rect.bottom - rect.top < minHeight) { rect.bottom = rect.top + minHeight; }
+            }
+
+            ::SetWindowPos(m_hWnd, nullptr, rect.left, rect.top,
+                           rect.right - rect.left, rect.bottom - rect.top,
+                           SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+
         if (m_tabDragIndex >= 0)
         {
             UpdateTabDrag(pt);
@@ -1069,6 +1282,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_LBUTTONUP:
     {
+        if (m_resizingWindow)
+        {
+            m_resizingWindow = false;
+            ::ReleaseCapture();
+            return 0;
+        }
+
         if (m_tabDragIndex >= 0)
         {
             const int index = m_tabDragIndex;
@@ -1107,6 +1327,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         m_draggingSplitter = false;
         m_tabDragIndex = -1;
         m_tabDragging = false;
+        m_resizingWindow = false;
         break;
 
     // --------------------------------------------------------------
@@ -2404,15 +2625,6 @@ void MainWindow::TrimTabCache()
     }
 }
 
-int MainWindow::TabBarHeight() const
-{
-    if (m_tabs.empty() || !core::Settings::Instance().TabsEnabled())
-    {
-        return 0;
-    }
-    return Scale(32);
-}
-
 void MainWindow::ApplyWindowModeFromSettings()
 {
     const bool tabsEnabled = core::Settings::Instance().TabsEnabled();
@@ -2429,16 +2641,105 @@ void MainWindow::ApplyWindowModeFromSettings()
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
 }
 
+void MainWindow::LayoutWindowButtons(const RECT& clientRect)
+{
+    const int width = Scale(46);
+    const int height = TabBarHeight();
+    const int right = clientRect.right;
+
+    m_closeButtonRect = { right - width, 0, right, height };
+    m_maxButtonRect   = { right - width * 2, 0, right - width, height };
+    m_minButtonRect   = { right - width * 3, 0, right - width * 2, height };
+}
+
+int MainWindow::HitTestWindowButton(POINT pt) const
+{
+    if (::PtInRect(&m_closeButtonRect, pt)) { return 2; }
+    if (::PtInRect(&m_maxButtonRect, pt))   { return 1; }
+    if (::PtInRect(&m_minButtonRect, pt))   { return 0; }
+    return -1;
+}
+
+void MainWindow::DrawWindowButtons(HDC dc)
+{
+    auto drawButtonBackground = [&](const RECT& rect, bool hovered)
+    {
+        if (!hovered)
+        {
+            return;
+        }
+        HBRUSH brush = ::CreateSolidBrush(RGB(226, 229, 233));
+        ::FillRect(dc, &rect, brush);
+        ::DeleteObject(brush);
+    };
+
+    drawButtonBackground(m_minButtonRect, m_windowButtonHover == 0);
+    drawButtonBackground(m_maxButtonRect, m_windowButtonHover == 1);
+    drawButtonBackground(m_closeButtonRect, m_windowButtonHover == 2);
+
+    const COLORREF glyph = RGB(60, 66, 74);
+    HPEN pen = ::CreatePen(PS_SOLID, Scale(1), glyph);
+    HGDIOBJ oldPen = ::SelectObject(dc, pen);
+    HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
+
+    // 最小化
+    {
+        const int cx = (m_minButtonRect.left + m_minButtonRect.right) / 2;
+        const int cy = (m_minButtonRect.top + m_minButtonRect.bottom) / 2;
+        const int half = Scale(5);
+        ::MoveToEx(dc, cx - half, cy, nullptr);
+        ::LineTo(dc, cx + half + 1, cy);
+    }
+
+    // 最大化 / 还原
+    {
+        const int cx = (m_maxButtonRect.left + m_maxButtonRect.right) / 2;
+        const int cy = (m_maxButtonRect.top + m_maxButtonRect.bottom) / 2;
+        const int half = Scale(5);
+
+        if (::IsZoomed(m_hWnd))
+        {
+            ::MoveToEx(dc, cx - half, cy - half + Scale(2), nullptr);
+            ::LineTo(dc, cx + half, cy - half + Scale(2));
+            ::LineTo(dc, cx + half, cy + half);
+            ::LineTo(dc, cx - half + Scale(2), cy + half);
+            ::MoveToEx(dc, cx - half + Scale(2), cy - half + Scale(4), nullptr);
+            ::LineTo(dc, cx - half + Scale(2), cy - half + Scale(2));
+        }
+        else
+        {
+            ::Rectangle(dc, cx - half, cy - half, cx + half + 1, cy + half + 1);
+        }
+    }
+
+    // 关闭
+    {
+        const int cx = (m_closeButtonRect.left + m_closeButtonRect.right) / 2;
+        const int cy = (m_closeButtonRect.top + m_closeButtonRect.bottom) / 2;
+        const int half = Scale(5);
+        ::MoveToEx(dc, cx - half, cy - half, nullptr);
+        ::LineTo(dc, cx + half + 1, cy + half + 1);
+        ::MoveToEx(dc, cx - half, cy + half, nullptr);
+        ::LineTo(dc, cx + half + 1, cy - half - 1);
+    }
+
+    ::SelectObject(dc, oldBrush);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(pen);
+}
+
 void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 {
     const int tabHeight = TabBarHeight();
-    if (tabHeight <= 0 || m_tabs.empty())
+    if (tabHeight <= 0)
     {
         return;
     }
 
+    LayoutWindowButtons(clientRect);
+
     RECT strip = { 0, 0, clientRect.right, tabHeight };
-    HBRUSH stripBrush = ::CreateSolidBrush(RGB(236, 238, 242));
+    HBRUSH stripBrush = ::CreateSolidBrush(RGB(240, 242, 245));
     ::FillRect(dc, &strip, stripBrush);
     ::DeleteObject(stripBrush);
 
@@ -2446,13 +2747,31 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
     m_tabCloseRects.assign(m_tabs.size(), RECT{});
     ::SetRectEmpty(&m_tabLeftRect);
     ::SetRectEmpty(&m_tabRightRect);
+    ::SetRectEmpty(&m_tabPlusRect);
 
     HGDIOBJ oldFont = ::SelectObject(dc, m_hUiFont != nullptr ? m_hUiFont
                                                              : ::GetStockObject(DEFAULT_GUI_FONT));
     ::SetBkMode(dc, TRANSPARENT);
 
-    const int top = Scale(3);
-    const int bottom = tabHeight - Scale(1);
+    // 单标签模式（或还没建标签）：标题栏只显示窗口标题
+    if (m_tabs.empty() || !core::Settings::Instance().TabsEnabled())
+    {
+        std::wstring title = m_lastTitle.empty()
+                           ? std::wstring(kWindowTitleBase)
+                           : m_lastTitle;
+        RECT titleRect = { Scale(12), 0,
+                           clientRect.right - Scale(46) * 3 - Scale(8), tabHeight };
+        ::SetTextColor(dc, RGB(48, 54, 62));
+        ::DrawTextW(dc, title.c_str(), -1, &titleRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        DrawWindowButtons(dc);
+        ::SelectObject(dc, oldFont);
+        return;
+    }
+
+    const int top = Scale(5);
+    const int bottom = tabHeight - Scale(5);
     const int gap = Scale(2);
     const int plusWidth = Scale(30);
     const int arrowWidth = Scale(22);
@@ -2476,7 +2795,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
     }
 
     int baseLeft = margin;
-    int baseRight = clientRect.right - margin;
+    int baseRight = clientRect.right - Scale(46) * 3 - margin;
     int plusLeft = baseRight - plusWidth;
 
     // 先按"不显示箭头"算视口；放不下才启用左右箭头
@@ -2681,6 +3000,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         ::SelectObject(dc, oldArrowFont);
     }
 
+    DrawWindowButtons(dc);
     ::SelectObject(dc, oldFont);
 }
 
@@ -7333,6 +7653,8 @@ void MainWindow::LayoutChildren()
     ::GetClientRect(m_hWnd, &clientRect);
     int clientWidth  = clientRect.right  - clientRect.left;
     int clientHeight = clientRect.bottom - clientRect.top;
+
+    LayoutWindowButtons(clientRect);
 
      int margin     = Scale(8);
     int buttonWidth  = Scale(34);
