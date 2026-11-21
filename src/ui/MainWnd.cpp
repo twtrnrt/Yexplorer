@@ -942,7 +942,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             if (bottom)           { return HTBOTTOM; }
         }
 
-        if (pt.y < TabBarHeight())
+        if (pt.y < TabHitBottom())
         {
             const int button = HitTestWindowButton(pt);
             if (button == 0) { return HTMINBUTTON; }
@@ -1016,7 +1016,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
             RECT strip = {};
             ::GetClientRect(m_hWnd, &strip);
-            strip.bottom = TabBarHeight();
+            strip.bottom = TabHitBottom();
             ::InvalidateRect(m_hWnd, &strip, FALSE);
         }
 
@@ -1048,7 +1048,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             m_windowButtonHover = -1;
             RECT strip = {};
             ::GetClientRect(m_hWnd, &strip);
-            strip.bottom = TabBarHeight();
+            strip.bottom = TabHitBottom();
             ::InvalidateRect(m_hWnd, &strip, FALSE);
         }
         break;
@@ -1171,7 +1171,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        if (pt.y < TabBarHeight())
+        if (pt.y < TabHitBottom())
         {
             if (::PtInRect(&m_tabLeftRect, pt))
             {
@@ -1221,7 +1221,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_MBUTTONDOWN:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (pt.y < TabBarHeight())
+        if (pt.y < TabHitBottom())
         {
             bool closeButton = false;
             const int tabIndex = HitTestTab(pt, closeButton);
@@ -1268,7 +1268,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             m_tabHoverClose = false;
             RECT strip = {};
             ::GetClientRect(m_hWnd, &strip);
-            strip.bottom = TabBarHeight();
+            strip.bottom = TabHitBottom();
             ::InvalidateRect(m_hWnd, &strip, FALSE);
         }
         break;
@@ -1277,7 +1277,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ::ScreenToClient(m_hWnd, &pt);
-        if (pt.y < TabBarHeight())
+        if (pt.y < TabHitBottom())
         {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             ScrollTabs(delta > 0 ? -Scale(80) : Scale(80));
@@ -1311,7 +1311,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
             RECT strip = {};
             ::GetClientRect(m_hWnd, &strip);
-            strip.bottom = TabBarHeight();
+            strip.bottom = TabHitBottom();
             ::InvalidateRect(m_hWnd, &strip, FALSE);
             return 0;
         }
@@ -2787,7 +2787,8 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
 
     LayoutWindowButtons(clientRect);
 
-    RECT strip = { 0, 0, clientRect.right, tabHeight };
+    const int tabStripBottom = tabHeight + Scale(4);
+    RECT strip = { 0, 0, clientRect.right, tabStripBottom };
     HBRUSH stripBrush = ::CreateSolidBrush(RGB(240, 242, 245));
     ::FillRect(dc, &strip, stripBrush);
     ::DeleteObject(stripBrush);
@@ -2819,8 +2820,8 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         return;
     }
 
-    const int top = Scale(5);
-    const int bottom = tabHeight - Scale(5);
+    const int top = tabStripBottom - Scale(30);
+    const int bottom = tabStripBottom;
     const int gap = Scale(2);
     const int plusWidth = Scale(30);
     const int arrowWidth = Scale(22);
@@ -2915,7 +2916,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         const bool hovered = (static_cast<int>(i) == m_tabHover);
 
         // 非活动标签悬停时加深一档；活动标签保持白底
-        COLORREF fill = active ? RGB(255, 255, 255)
+        COLORREF fill = active ? RGB(248, 248, 248)
                                : (hovered ? RGB(224, 228, 233) : RGB(246, 247, 249));
         HBRUSH tabBrush = ::CreateSolidBrush(fill);
         ::FillRect(dc, &tabRect, tabBrush);
@@ -3077,7 +3078,7 @@ void MainWindow::UpdateTabHover(POINT pt)
     int hover = -1;
     bool hoverClose = false;
 
-    if (pt.y < TabBarHeight())
+    if (pt.y < TabHitBottom())
     {
         bool closeButton = false;
         const int index = HitTestTab(pt, closeButton);
@@ -3095,11 +3096,11 @@ void MainWindow::UpdateTabHover(POINT pt)
 
         RECT strip = {};
         ::GetClientRect(m_hWnd, &strip);
-        strip.bottom = TabBarHeight();
+        strip.bottom = TabHitBottom();
         ::InvalidateRect(m_hWnd, &strip, FALSE);
     }
 
-    if (!m_tabTracking && pt.y < TabBarHeight())
+    if (!m_tabTracking && pt.y < TabHitBottom())
     {
         TRACKMOUSEEVENT track = {};
         track.cbSize = sizeof(track);
@@ -3125,7 +3126,7 @@ void MainWindow::ScrollTabs(int delta)
 
     RECT strip = {};
     ::GetClientRect(m_hWnd, &strip);
-    strip.bottom = TabBarHeight();
+    strip.bottom = TabHitBottom();
     ::InvalidateRect(m_hWnd, &strip, FALSE);
 }
 
@@ -3194,7 +3195,7 @@ void MainWindow::UpdateTabDrag(POINT pt)
 
     RECT strip = {};
     ::GetClientRect(m_hWnd, &strip);
-    strip.bottom = TabBarHeight();
+    strip.bottom = TabHitBottom();
     ::InvalidateRect(m_hWnd, &strip, FALSE);
 }
 
