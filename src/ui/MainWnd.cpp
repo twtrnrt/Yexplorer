@@ -588,8 +588,8 @@ void MainWindow::CreateChildControls()
         LOGFONTW closeFont = {};
         if (::GetObjectW(m_hUiFont, sizeof(closeFont), &closeFont) != 0)
         {
-            closeFont.lfHeight = ::MulDiv(closeFont.lfHeight, 130, 100);
-            closeFont.lfWeight = FW_SEMIBOLD;
+            closeFont.lfHeight = ::MulDiv(closeFont.lfHeight, 140, 100);
+            closeFont.lfWeight = FW_NORMAL;
             m_tabCloseFont = ::CreateFontIndirectW(&closeFont);
         }
     }
@@ -2546,38 +2546,57 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         const bool active = (i == m_activeTab);
         const bool hovered = (static_cast<int>(i) == m_tabHover);
 
+        // 非活动标签悬停时加深一档；活动标签保持白底
         COLORREF fill = active ? RGB(255, 255, 255)
-                               : (hovered ? RGB(244, 246, 249) : RGB(246, 247, 249));
+                               : (hovered ? RGB(224, 228, 233) : RGB(246, 247, 249));
         HBRUSH tabBrush = ::CreateSolidBrush(fill);
         ::FillRect(dc, &tabRect, tabBrush);
         ::DeleteObject(tabBrush);
 
+        // 关闭按钮是正方形，× 只放大、不加粗
+        const int closeSize = Scale(24);
+        const int closeRight = tabRect.right - Scale(4);
+        RECT closeRect = {
+            closeRight - closeSize,
+            (tabRect.top + tabRect.bottom - closeSize) / 2,
+            closeRight,
+            (tabRect.top + tabRect.bottom - closeSize) / 2 + closeSize
+        };
+
         RECT textRect = { tabRect.left + Scale(8), tabRect.top,
-                          tabRect.right - Scale(28), tabRect.bottom };
-        ::SetTextColor(dc, active ? RGB(32, 32, 32) : RGB(96, 103, 111));
+                          closeRect.left - Scale(6), tabRect.bottom };
+        ::SetTextColor(dc, active ? RGB(32, 32, 32)
+                                  : (hovered ? RGB(60, 68, 76) : RGB(96, 103, 111)));
         const std::wstring& title = m_tabs[i].title.empty() ? m_tabs[i].path
                                                             : m_tabs[i].title;
         ::DrawTextW(dc, title.c_str(), -1, &textRect,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        // 关闭按钮：命中区 24px，× 用大一号的字体
-        RECT closeRect = { tabRect.right - Scale(26), tabRect.top + Scale(2),
-                           tabRect.right - Scale(2), tabRect.bottom - Scale(2) };
-        if (hovered && m_tabHoverClose)
+        // 活动标签的 × 用浅灰；非活动标签正常灰；悬停时统一再深一档
+        COLORREF closeColor;
+        if (hovered)
         {
-            HBRUSH closeBrush = ::CreateSolidBrush(RGB(253, 231, 233));
-            ::FillRect(dc, &closeRect, closeBrush);
-            ::DeleteObject(closeBrush);
+            closeColor = active ? RGB(110, 116, 123) : RGB(64, 72, 80);
+        }
+        else
+        {
+            closeColor = active ? RGB(165, 170, 176) : RGB(126, 132, 139);
         }
 
-        HGDIOBJ oldCloseFont = ::SelectObject(dc, m_tabCloseFont != nullptr
-                                                       ? m_tabCloseFont
-                                                       : m_hUiFont);
-        ::SetTextColor(dc, (hovered && m_tabHoverClose) ? RGB(196, 43, 28)
-                                                        : RGB(96, 103, 111));
-        ::DrawTextW(dc, L"×", -1, &closeRect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        ::SelectObject(dc, oldCloseFont);
+        // 直接画两条对角线：宽高严格相等，只加大不加粗
+        const int cross = Scale(14);
+        const int centerX = (closeRect.left + closeRect.right) / 2;
+        const int centerY = (closeRect.top + closeRect.bottom) / 2;
+        const int half = cross / 2;
+
+        HPEN closePen = ::CreatePen(PS_SOLID, Scale(1), closeColor);
+        HGDIOBJ oldPen = ::SelectObject(dc, closePen);
+        ::MoveToEx(dc, centerX - half, centerY - half, nullptr);
+        ::LineTo(dc, centerX + half + 1, centerY + half + 1);
+        ::MoveToEx(dc, centerX - half, centerY + half, nullptr);
+        ::LineTo(dc, centerX + half + 1, centerY - half - 1);
+        ::SelectObject(dc, oldPen);
+        ::DeleteObject(closePen);
 
         // 命中区裁到视口内，滚出去的部分点不到
         RECT hit = tabRect;
