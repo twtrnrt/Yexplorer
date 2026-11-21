@@ -2583,17 +2583,28 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
             closeColor = active ? RGB(165, 170, 176) : RGB(126, 132, 139);
         }
 
-        // 鼠标落在 × 上：恢复灰色悬停底（原来的粉色改成灰色）
+        // 鼠标落在 × 上：灰色圆角矩形悬停底
         if (hovered && m_tabHoverClose)
         {
-            HBRUSH closeHoverBrush = ::CreateSolidBrush(active ? RGB(232, 235, 239)
-                                                               : RGB(208, 213, 219));
-            ::FillRect(dc, &closeRect, closeHoverBrush);
+            const COLORREF hoverFill = active ? RGB(232, 235, 239)
+                                              : RGB(208, 213, 219);
+            HBRUSH closeHoverBrush = ::CreateSolidBrush(hoverFill);
+            HPEN closeHoverPen = ::CreatePen(PS_SOLID, 1, hoverFill);
+            HGDIOBJ oldBrush = ::SelectObject(dc, closeHoverBrush);
+            HGDIOBJ oldPen = ::SelectObject(dc, closeHoverPen);
+
+            const int radius = Scale(5);
+            ::RoundRect(dc, closeRect.left, closeRect.top, closeRect.right,
+                        closeRect.bottom, radius * 2, radius * 2);
+
+            ::SelectObject(dc, oldBrush);
+            ::SelectObject(dc, oldPen);
             ::DeleteObject(closeHoverBrush);
+            ::DeleteObject(closeHoverPen);
         }
 
         // 直接画两条对角线：宽高严格相等，只加大不加粗
-        const int cross = Scale(11);
+        const int cross = Scale(10);
         const int centerX = (closeRect.left + closeRect.right) / 2;
         const int centerY = (closeRect.top + closeRect.bottom) / 2;
         const int half = cross / 2;
