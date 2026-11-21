@@ -28,7 +28,8 @@
 #include <shlobj.h>     // SHCreateItemFromParsingName / SHGetKnownFolderPath
 #include <shlwapi.h>    // StrCmpLogicalW（资源管理器同款的本地化自然排序）
 #include <shobjidl.h>   // IFileOperation / IShellItem2（撤销删除时要还原回收站里的项）
-#include <propsys.h>    // PSGetPropertyKeyFromName（按属性名取回收站的 DeletedFrom 键）
+#include <propsys.h>
+#include <uxtheme.h>    // PSGetPropertyKeyFromName（按属性名取回收站的 DeletedFrom 键）
 #include <algorithm>
 #include <climits>
 #include <chrono>
@@ -40,6 +41,7 @@
 #include <memory>     // shared_ptr（把解压结果从后台线程递回主线程）
 
 #pragma comment(lib, "propsys.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -738,8 +740,14 @@ void MainWindow::CreateChildControls()
         ::SendMessageW(m_hStatusBar, WM_SETFONT, reinterpret_cast<WPARAM>(m_hUiFont), TRUE);
     }
 
+    // 状态栏底色：240,241,245；去掉主题，保证是直角矩形
+    ::SetWindowTheme(m_hStatusBar, L"", L"");
+    ::SendMessageW(m_hStatusBar, SB_SETBKCOLOR, 0, RGB(240, 241, 245));
+
     // 状态栏要能"自己补画"粘贴进度条：子类化它的窗口过程 + 挂任务栏进度
     m_pasteBar.Attach(m_hWnd, m_hStatusBar);
+    m_pasteBar.SetStatusTopLineColor(RGB(227, 227, 227));
+    m_pasteBar.SetStatusBackgroundColor(RGB(240, 241, 245));
 
     // ---------------- 6. 键盘快捷键 ----------------
     // 用系统的加速键表，好处是不用去拦截每个控件的按键消息
@@ -2540,9 +2548,11 @@ void MainWindow::NewTab(const std::wstring& path)
     tab.sortColumn      = m_sortColumn;
     tab.sortAscending   = m_sortAscending;
 
-    const size_t insertAt = (m_tabs.empty() ? 0 : m_activeTab + 1);
-    m_tabs.insert(m_tabs.begin() + static_cast<ptrdiff_t>(insertAt), std::move(tab));
+    const size_t insertAt = m_tabs.size();
+    m_tabs.push_back(std::move(tab));
 
+    // 新标签在最右；如果已经溢出，下一次绘制会把它滚到可见位置
+    m_tabScrollOffset = INT_MAX;
     RestoreTab(insertAt);
 }
 
@@ -2908,8 +2918,7 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
             contentWidth = compressed;
         }
 
-        const int contentWithPlus = contentWidth + gap + plusWidth;
-        const int maxOffset = (contentWithPlus > available) ? (contentWithPlus - available) : 0;
+        const int maxOffset = (contentWidth > available) ? (contentWidth - available) : 0;
         if (maxOffset == 0)
         {
             // 压缩后已经放得下：不需要箭头，视口还给整条
@@ -3064,29 +3073,36 @@ void MainWindow::DrawTabBar(HDC dc, const RECT& clientRect)
         x += width + gap;
     }
 
-    // 「+」在最后一个标签后面
-    m_tabPlusRect = { x, top, x + plusWidth, bottom };
-    if (m_tabPlusRect.left < viewportRight)
+    ::RestoreDC(dc, savedDc);
+
+    // 溢出时「+」固定在最右，右箭头在「+」左边；不溢出时才跟在最后标签后
+    if (overflow)
+    {
+        m_tabPlusRect = { plusLeft, top, plusLeft + plusWidth, bottom };
+    }
+    else
+    {
+        m_tabPlusRect = { x, top, x + plusWidth, bottom };
+        if (m_tabPlusRect.left >= viewportRight)
+        {
+            ::SetRectEmpty(&m_tabPlusRect);
+        }
+    }
+
+    if (!::IsRectEmpty(&m_tabPlusRect))
     {
         ::SetTextColor(dc, RGB(80, 88, 96));
         ::DrawTextW(dc, L"+", -1, &m_tabPlusRect,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    else
-    {
-        ::SetRectEmpty(&m_tabPlusRect);
-    }
-
-    ::RestoreDC(dc, savedDc);
 
     // 左右箭头（只在溢出时出现）
     if (overflow)
     {
         m_tabLeftRect = { baseLeft, top, baseLeft + arrowWidth, bottom };
-        m_tabRightRect = { baseRight - arrowWidth, top, baseRight, bottom };
+        m_tabRightRect = { plusLeft - gap - arrowWidth, top, plusLeft - gap, bottom };
 
-        const int contentWithPlus = contentWidth + gap + plusWidth;
-        const int maxOffset = (contentWithPlus > available) ? (contentWithPlus - available) : 0;
+        const int maxOffset = (contentWidth > available) ? (contentWidth - available) : 0;
 
         HBRUSH arrowBrush = ::CreateSolidBrush(RGB(246, 247, 249));
         ::FillRect(dc, &m_tabLeftRect, arrowBrush);
