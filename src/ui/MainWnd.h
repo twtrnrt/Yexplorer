@@ -667,7 +667,6 @@ private:
     void DrawWindowButtons(HDC dc);
     int  HitTestWindowButton(POINT pt) const;
     int  TabBarHeight() const { return Scale(40); }
-    int  TabHitBottom() const { return TabBarHeight(); }
 
     // ---- 右键菜单用的小图标（后台预取，菜单只查内存）----
     MenuIconCache      m_menuIcons;
