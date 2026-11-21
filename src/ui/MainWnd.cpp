@@ -915,34 +915,19 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_NCHITTEST:
     {
+        // 边框/角落交给系统原生 sizing loop
+        const LRESULT nativeHit = ::DefWindowProcW(m_hWnd, WM_NCHITTEST, wParam, lParam);
+        if (nativeHit != HTCLIENT)
+        {
+            return nativeHit;
+        }
+
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ::ScreenToClient(m_hWnd, &pt);
 
         RECT clientRect = {};
         ::GetClientRect(m_hWnd, &clientRect);
         LayoutWindowButtons(clientRect);
-
-        const bool maximized = ::IsZoomed(m_hWnd) != FALSE;
-        const int border = Scale(7);
-        const int topBorder = 0;
-
-        // 四边/四角先给缩放命中（最大化时不缩放）
-        if (!maximized)
-        {
-            const bool left   = pt.x < border;
-            const bool right  = pt.x >= clientRect.right - border;
-            const bool top    = pt.y < topBorder;
-            const bool bottom = pt.y >= clientRect.bottom - border;
-
-            if (top && left)      { return HTTOPLEFT; }
-            if (top && right)     { return HTTOPRIGHT; }
-            if (bottom && left)   { return HTBOTTOMLEFT; }
-            if (bottom && right)  { return HTBOTTOMRIGHT; }
-            if (left)             { return HTLEFT; }
-            if (right)            { return HTRIGHT; }
-            if (top)              { return HTTOP; }
-            if (bottom)           { return HTBOTTOM; }
-        }
 
         if (pt.y < TabBarHeight())
         {
@@ -985,18 +970,6 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
 
-        if (wParam == HTLEFT || wParam == HTRIGHT ||
-            wParam == HTTOP || wParam == HTBOTTOM ||
-            wParam == HTTOPLEFT || wParam == HTTOPRIGHT ||
-            wParam == HTBOTTOMLEFT || wParam == HTBOTTOMRIGHT)
-        {
-            m_resizingWindow = true;
-            m_resizeHit = static_cast<int>(wParam);
-            ::GetWindowRect(m_hWnd, &m_resizeStartRect);
-            ::GetCursorPos(&m_resizeStartCursor);
-            ::SetCapture(m_hWnd);
-            return 0;
-        }
         break;
     }
 
@@ -1130,8 +1103,32 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             ::DeleteObject(topBrush);
         }
 
-        // 顶部标签栏
-        DrawTabBar(hdc, clientRect);
+        // 顶部标签栏：先画到内存位图再一次性贴上去，避免鼠标划过时闪
+        const int tabHeight = TabBarHeight();
+        if (tabHeight > 0 && clientRect.right > 0)
+        {
+            HDC memDc = ::CreateCompatibleDC(hdc);
+            HBITMAP memBitmap = (memDc != nullptr)
+                ? ::CreateCompatibleBitmap(hdc, clientRect.right, tabHeight)
+                : nullptr;
+
+            if (memDc != nullptr && memBitmap != nullptr)
+            {
+                HGDIOBJ oldBitmap = ::SelectObject(memDc, memBitmap);
+                DrawTabBar(memDc, clientRect);
+                ::BitBlt(hdc, 0, 0, clientRect.right, tabHeight, memDc, 0, 0, SRCCOPY);
+
+                ::SelectObject(memDc, oldBitmap);
+                ::DeleteObject(memBitmap);
+                ::DeleteDC(memDc);
+            }
+            else
+            {
+                if (memBitmap != nullptr) { ::DeleteObject(memBitmap); }
+                if (memDc != nullptr) { ::DeleteDC(memDc); }
+                DrawTabBar(hdc, clientRect);
+            }
+        }
 
         // 地址栏下面那条横线（把上面的路径和下面的文件区分开）
         if (!::IsRectEmpty(&m_addressDividerRect))
