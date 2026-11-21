@@ -987,12 +987,35 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         const int button = HitTestWindowButton(pt);
         if (button != m_windowButtonHover)
         {
+            const int oldButton = m_windowButtonHover;
             m_windowButtonHover = button;
 
-            RECT strip = {};
-            ::GetClientRect(m_hWnd, &strip);
-            strip.bottom = TabBarHeight();
-            ::InvalidateRect(m_hWnd, &strip, FALSE);
+            auto buttonRect = [&](int index) -> const RECT*
+            {
+                if (index == 0) { return &m_minButtonRect; }
+                if (index == 1) { return &m_maxButtonRect; }
+                if (index == 2) { return &m_closeButtonRect; }
+                return nullptr;
+            };
+
+            RECT dirty = {};
+            bool hasDirty = false;
+            const RECT* oldRect = buttonRect(oldButton);
+            const RECT* newRect = buttonRect(button);
+            if (oldRect != nullptr && !::IsRectEmpty(oldRect))
+            {
+                dirty = *oldRect;
+                hasDirty = true;
+            }
+            if (newRect != nullptr && !::IsRectEmpty(newRect))
+            {
+                if (!hasDirty) { dirty = *newRect; hasDirty = true; }
+                else { RECT merged = {}; ::UnionRect(&merged, &dirty, newRect); dirty = merged; }
+            }
+            if (hasDirty)
+            {
+                ::InvalidateRect(m_hWnd, &dirty, FALSE);
+            }
         }
 
         if (!m_windowButtonTracking)
@@ -1020,11 +1043,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         m_windowButtonTracking = false;
         if (m_windowButtonHover != -1)
         {
+            const int oldButton = m_windowButtonHover;
             m_windowButtonHover = -1;
-            RECT strip = {};
-            ::GetClientRect(m_hWnd, &strip);
-            strip.bottom = TabBarHeight();
-            ::InvalidateRect(m_hWnd, &strip, FALSE);
+
+            const RECT* oldRect = (oldButton == 0) ? &m_minButtonRect
+                                : (oldButton == 1) ? &m_maxButtonRect
+                                : (oldButton == 2) ? &m_closeButtonRect
+                                : nullptr;
+            if (oldRect != nullptr && !::IsRectEmpty(oldRect))
+            {
+                ::InvalidateRect(m_hWnd, oldRect, FALSE);
+            }
         }
         break;
 
@@ -3156,13 +3185,40 @@ void MainWindow::UpdateTabHover(POINT pt)
 
     if (hover != m_tabHover || hoverClose != m_tabHoverClose)
     {
+        const int oldHover = m_tabHover;
         m_tabHover = hover;
         m_tabHoverClose = hoverClose;
 
-        RECT strip = {};
-        ::GetClientRect(m_hWnd, &strip);
-        strip.bottom = TabBarHeight();
-        ::InvalidateRect(m_hWnd, &strip, FALSE);
+        // 只重画旧/新标签，不要连带整条标题栏和三个窗口按钮
+        RECT dirty = {};
+        bool hasDirty = false;
+
+        auto addTabRect = [&](int index)
+        {
+            if (index >= 0 && index < static_cast<int>(m_tabRects.size()) &&
+                !::IsRectEmpty(&m_tabRects[index]))
+            {
+                if (!hasDirty)
+                {
+                    dirty = m_tabRects[index];
+                    hasDirty = true;
+                }
+                else
+                {
+                    RECT merged = {};
+                    ::UnionRect(&merged, &dirty, &m_tabRects[index]);
+                    dirty = merged;
+                }
+            }
+        };
+
+        addTabRect(oldHover);
+        addTabRect(hover);
+
+        if (hasDirty)
+        {
+            ::InvalidateRect(m_hWnd, &dirty, FALSE);
+        }
     }
 
     if (!m_tabTracking && pt.y < TabBarHeight())
