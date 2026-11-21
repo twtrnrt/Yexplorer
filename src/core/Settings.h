@@ -116,6 +116,16 @@ enum class StartupLocation
     Custom     = 3,   // 用户自定义目录
 };
 
+// 重启恢复标签用：只记路径和视图/排序，不记选中和滚动
+struct TabSessionEntry
+{
+    std::wstring path;
+    int  viewMode = 3;          // FileListView::ViewMode 的整数值
+    bool viewModeManual = false;
+    int  sortColumn = 0;
+    bool sortAscending = true;
+};
+
 // 本软件公用配置。全程序只有一个实例（Settings::Instance()）。
 class Settings
 {
@@ -212,6 +222,12 @@ public:
     bool SingleInstance() const { return m_singleInstance; }
     void SetSingleInstance(bool enabled) { m_singleInstance = enabled; }
 
+    // ---------------- 重启恢复标签 ----------------
+    const std::vector<TabSessionEntry>& TabSession() const { return m_tabSession; }
+    void SetTabSession(const std::vector<TabSessionEntry>& entries) { m_tabSession = entries; }
+    int  ActiveTabIndex() const { return m_activeTabIndex; }
+    void SetActiveTabIndex(int index) { m_activeTabIndex = index; }
+
     // ---------------- 界面开关 ----------------
     // 右键菜单里是否显示程序图标（「打开方式」各项、「新建」各项前面）。
     // 默认关：不显示图标就是以前的纯文字菜单，最省事也最快。
@@ -286,6 +302,8 @@ private:
     bool          m_takeOverWinE = false;
     bool          m_tabsEnabled = true;
     bool          m_singleInstance = true;
+    std::vector<TabSessionEntry> m_tabSession;
+    int           m_activeTabIndex = 0;
     bool          m_menuIcons      = false;   // 右键菜单是否显示图标（默认关）
 
     // 显示隐藏文件 / 系统文件（默认都关，和资源管理器的默认一致）

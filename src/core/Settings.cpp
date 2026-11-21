@@ -312,6 +312,30 @@ bool Settings::Load()
         m_tabsEnabled = json.value("tabsEnabled", true);
         m_singleInstance = json.value("singleInstance", true);
 
+        // 重启恢复的标签
+        m_tabSession.clear();
+        m_activeTabIndex = json.value("activeTab", 0);
+        if (json.contains("tabs") && json["tabs"].is_array())
+        {
+            for (const auto& item : json["tabs"])
+            {
+                if (!item.is_object())
+                {
+                    continue;
+                }
+                TabSessionEntry entry;
+                entry.path = FromUtf8(item.value("path", std::string()));
+                entry.viewMode = item.value("viewMode", 3);
+                entry.viewModeManual = item.value("viewModeManual", false);
+                entry.sortColumn = item.value("sortColumn", 0);
+                entry.sortAscending = item.value("sortAscending", true);
+                if (!entry.path.empty())
+                {
+                    m_tabSession.push_back(std::move(entry));
+                }
+            }
+        }
+
         // ---------------- 界面开关 ----------------
         // 右键菜单显示图标：没记过就是关（保持原来的纯文字菜单）
         m_menuIcons = json.value("menuIcons", false);
@@ -578,6 +602,23 @@ bool Settings::Save()
     if (!m_singleInstance)
     {
         json["singleInstance"] = false;
+    }
+
+    if (!m_tabSession.empty())
+    {
+        nlohmann::json tabs = nlohmann::json::array();
+        for (const TabSessionEntry& entry : m_tabSession)
+        {
+            tabs.push_back({
+                {"path", ToUtf8(entry.path)},
+                {"viewMode", entry.viewMode},
+                {"viewModeManual", entry.viewModeManual},
+                {"sortColumn", entry.sortColumn},
+                {"sortAscending", entry.sortAscending},
+            });
+        }
+        json["tabs"] = std::move(tabs);
+        json["activeTab"] = m_activeTabIndex;
     }
 
     // ---------------- 界面开关 ----------------

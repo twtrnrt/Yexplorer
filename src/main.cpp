@@ -345,6 +345,7 @@ int WINAPI wWinMain(HINSTANCE hInstance,
         //      → 打开它所在的目录，并把这个文件选中高亮
         std::wstring startupPath = ExtractStartupPath(lpCmdLine);
         std::wstring startupSelectFile;
+        const bool noExplicitPath = startupPath.empty() || startupPath.front() == L'-';
 
         // 没有显式路径（直接启动 / 任务栏 / 开始菜单）时，按设置里的「启动位置」决定。
         // 显式路径（双击文件夹、/select、右键在新窗口打开）永远优先。
@@ -411,7 +412,7 @@ int WINAPI wWinMain(HINSTANCE hInstance,
         else
         {
             MainWindow mainWindow;
-            if (mainWindow.Create(hInstance, startupPath, startupSelectFile))
+            if (mainWindow.Create(hInstance, startupPath, startupSelectFile, noExplicitPath))
             {
                 mainWindow.Show(SW_SHOW);
 

@@ -139,7 +139,8 @@ public:
     //                      目录会打开它所在的文件夹，首次枚举完成后把这一项选中
     bool Create(HINSTANCE hInstance,
                 const std::wstring& initialPath = std::wstring(),
-                const std::wstring& initialSelectFile = std::wstring());
+                const std::wstring& initialSelectFile = std::wstring(),
+                bool restoreTabs = false);
     void Show(int nCmdShow);
 
     // 后台宿主用：关窗口时隐藏而不是销毁（进程继续跑，托盘还在）。
@@ -222,6 +223,8 @@ private:
     // ---- 标签 ----
     void ApplyWindowModeFromSettings();
     void NewTab(const std::wstring& path);
+    void SaveTabSession();
+    bool RestoreTabSession();
     void CloseTab(size_t index);
     void ActivateTab(size_t index);
 
@@ -622,6 +625,7 @@ private:
     // ---- 标签 ----
     std::vector<TabState> m_tabs;
     size_t                m_activeTab = 0;
+    bool                  m_restoreTabsOnStartup = false;
     std::vector<RECT>     m_tabRects;
     std::vector<RECT>     m_tabCloseRects;
     RECT                  m_tabPlusRect = {};

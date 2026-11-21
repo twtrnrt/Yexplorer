@@ -247,7 +247,7 @@ private:
         m_warm->SetHideOnClose(true);
 
         const std::wstring path = core::Settings::Instance().ResolveStartupPath();
-        if (!m_warm->Create(m_instance, path, std::wstring()))
+        if (!m_warm->Create(m_instance, path, std::wstring(), true))
         {
             Logger::Warn(L"后台宿主：热窗口创建失败");
             m_warm.reset();

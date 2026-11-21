@@ -360,10 +360,12 @@ MainWindow::~MainWindow()
 
 bool MainWindow::Create(HINSTANCE hInstance,
                         const std::wstring& initialPath,
-                        const std::wstring& initialSelectFile)
+                        const std::wstring& initialSelectFile,
+                        bool restoreTabs)
 {
     m_hInstance        = hInstance;
     m_startupPath      = initialPath;
+    m_restoreTabsOnStartup = restoreTabs;
     m_startupSelectFile = initialSelectFile;
 
     WNDCLASSEXW wc = {};
@@ -1845,9 +1847,15 @@ void MainWindow::OnCreate()
 
     Logger::Info(L"启动目录：" + startPath);
 
-    // 第一个标签
-    m_tabs.clear();
+    bool restoredSession = false;
+    if (m_restoreTabsOnStartup && core::Settings::Instance().TabsEnabled())
     {
+        restoredSession = RestoreTabSession();
+    }
+
+    if (!restoredSession)
+    {
+        m_tabs.clear();
         TabState first;
         first.path = startPath;
         first.title = TabTitleForPath(startPath);
@@ -1858,11 +1866,11 @@ void MainWindow::OnCreate()
         first.sortAscending = m_sortAscending;
         m_tabs.push_back(std::move(first));
         m_activeTab = 0;
+        m_history = m_tabs[0].history;
     }
 
-    m_history.Reset(startPath);
     LayoutChildren();
-    StartEnumeration(startPath);
+    StartEnumeration(m_tabs[m_activeTab].path);
 
     // Shell 窗口集成：开关打开时把主窗口注册进 IShellWindows（默认关，零影响）
     SyncShellWindowRegistration();
@@ -2002,6 +2010,99 @@ void MainWindow::NavigateToPath(const std::wstring& path)
 // ============================================================================
 // 标签：快照 / 恢复 / 新建 / 关闭
 // ============================================================================
+
+void MainWindow::SaveTabSession()
+{
+    std::vector<core::TabSessionEntry> entries;
+    entries.reserve(m_tabs.size());
+
+    for (const TabState& tab : m_tabs)
+    {
+        if (tab.path.empty())
+        {
+            continue;
+        }
+
+        core::TabSessionEntry entry;
+        entry.path = tab.path;
+        entry.viewMode = static_cast<int>(tab.viewMode);
+        entry.viewModeManual = tab.viewModeManual;
+        entry.sortColumn = tab.sortColumn;
+        entry.sortAscending = tab.sortAscending;
+        entries.push_back(std::move(entry));
+    }
+
+    if (!entries.empty())
+    {
+        core::Settings& settings = core::Settings::Instance();
+        settings.SetTabSession(entries);
+        settings.SetActiveTabIndex(static_cast<int>(m_activeTab));
+    }
+}
+
+bool MainWindow::RestoreTabSession()
+{
+    const core::Settings& settings = core::Settings::Instance();
+    const std::vector<core::TabSessionEntry>& session = settings.TabSession();
+    if (session.empty())
+    {
+        return false;
+    }
+
+    std::vector<TabState> restored;
+    restored.reserve(session.size());
+
+    for (const core::TabSessionEntry& entry : session)
+    {
+        if (entry.path.empty() || !IsStartPathUsable(entry.path))
+        {
+            Logger::Warn(L"恢复标签：路径不可用，跳过 " + entry.path);
+            continue;
+        }
+
+        int viewMode = entry.viewMode;
+        if (viewMode < 0 || viewMode > static_cast<int>(FileListView::ViewMode::Tiles))
+        {
+            viewMode = static_cast<int>(FileListView::ViewMode::Details);
+        }
+
+        TabState tab;
+        tab.path = entry.path;
+        tab.title = TabTitleForPath(entry.path);
+        tab.history.Reset(entry.path);
+        tab.viewMode = static_cast<FileListView::ViewMode>(viewMode);
+        tab.viewModeManual = entry.viewModeManual;
+        tab.sortColumn = entry.sortColumn;
+        tab.sortAscending = entry.sortAscending;
+        restored.push_back(std::move(tab));
+    }
+
+    if (restored.empty())
+    {
+        return false;
+    }
+
+    m_tabs = std::move(restored);
+
+    int active = settings.ActiveTabIndex();
+    if (active < 0 || active >= static_cast<int>(m_tabs.size()))
+    {
+        active = 0;
+    }
+    m_activeTab = static_cast<size_t>(active);
+
+    const TabState& current = m_tabs[m_activeTab];
+    m_history = current.history;
+    m_viewMode = current.viewMode;
+    m_viewModeManual = current.viewModeManual;
+    m_sortColumn = current.sortColumn;
+    m_sortAscending = current.sortAscending;
+    m_navOrigins.clear();
+
+    Logger::Info(L"恢复上次标签：" + std::to_wstring(m_tabs.size()) +
+                 L" 个，活动标签=" + std::to_wstring(m_activeTab));
+    return true;
+}
 
 void MainWindow::SaveActiveTab()
 {
@@ -5467,6 +5568,7 @@ void MainWindow::SaveWindowState()
     }
 
     core::Settings& settings = core::Settings::Instance();
+    SaveTabSession();
 
     // ---- 窗口位置与大小 ----
     // 用 GetWindowPlacement 而不是 GetWindowRect：
