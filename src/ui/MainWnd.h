@@ -100,6 +100,14 @@ static const int kCommandViewList    = 3303;  // 列表
 static const int kCommandViewDetails = 3304;  // 详细信息
 static const int kCommandViewTiles   = 3305;  // 平铺（此电脑那种带容量进度条的）
 
+// 右键「排序 >」子菜单：四个依据列 + 升/降序
+static const int kCommandSortName    = 3311;  // 按名称
+static const int kCommandSortDate    = 3312;  // 按修改日期
+static const int kCommandSortType    = 3313;  // 按类型
+static const int kCommandSortSize    = 3314;  // 按大小
+static const int kCommandSortAsc     = 3315;  // 升序
+static const int kCommandSortDesc    = 3316;  // 降序
+
 // 重命名快捷键
 static const int kCommandRename     = 3109;  // F2
 
@@ -322,8 +330,9 @@ private:
     // 同样由 ShowContextMenu 在拼菜单前填好。
     bool m_menuSuppressDeleteCut = false;
 
-    // 查看 / 新建文件夹 + 新建 这两块公共片段
+    // 查看 / 排序 / 新建文件夹 + 新建 这几块公共片段
     void FillViewMenu(HMENU parentMenu);
+    void FillSortMenu(HMENU parentMenu);
     void FillNewFolderAndNewMenu(HMENU menu);
 
     // ---- 撤销 / 恢复（多级，和资源管理器一样 Ctrl+Z / Ctrl+Y）----
@@ -479,8 +488,12 @@ void OpenPinnedOrFolder(const std::wstring& path);
 // 把拖进左栏固定区的东西记进配置文件（只记路径，不动文件本身）
 void AddPinnedItems(const std::vector<std::wstring>& sources);
 
-    // ---- 排序（点表头）----
+    // ---- 排序（点表头 / 右键排序菜单）----
     void OnColumnClick(int column);
+    bool IsSortDisabledHere() const;      // 此电脑分组视图：排序整体禁用
+    void SortByColumn(int column);        // 按指定列排序：同列切方向，异列从升序开始
+    void SetSortAscending(bool ascending); // 在当前列上设定升/降序
+    void ApplySortState();       // 按当前列/方向重排并刷新表头箭头、整表
     void SortEntries();          // 按当前排序状态排一遍数据
 
     // ---- 重命名 ----

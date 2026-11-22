@@ -2014,6 +2014,26 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
         ApplyViewMode(FileListView::ViewMode::Tiles, true);
         return true;
 
+    // ---- 右键「排序 >」子菜单 ----
+    case kCommandSortName:
+        SortByColumn(0);
+        return true;
+    case kCommandSortDate:
+        SortByColumn(1);
+        return true;
+    case kCommandSortType:
+        SortByColumn(2);
+        return true;
+    case kCommandSortSize:
+        SortByColumn(3);
+        return true;
+    case kCommandSortAsc:
+        SetSortAscending(true);
+        return true;
+    case kCommandSortDesc:
+        SetSortAscending(false);
+        return true;
+
     // ---- 2026-11-18 新增的快捷键命令 ----
     case kCommandNewWindow:
     {
@@ -6387,10 +6407,21 @@ void MainWindow::SortEntries()
 
 void MainWindow::OnColumnClick(int column)
 {
+    SortByColumn(column);
+}
+
+// 「此电脑」是分组视图，不允许按列排序（表头点击和右键排序菜单都走这个判断）
+bool MainWindow::IsSortDisabledHere() const
+{
+    return _wcsicmp(m_history.Current().c_str(), shell::kThisPcPath) == 0;
+}
+
+void MainWindow::SortByColumn(int column)
+{
     // 「此电脑」是分组显示的（上面有一行「设备和驱动器」标题）。
     // 一排序，那一行标题就会被当成普通条目排到中间去，分组就散了。
     // 系统的此电脑本来也不让按列排序，所以这里直接不响应。
-    if (_wcsicmp(m_history.Current().c_str(), shell::kThisPcPath) == 0)
+    if (IsSortDisabledHere())
     {
         Logger::Info(L"「此电脑」是分组视图，忽略按列排序");
         return;
@@ -6407,6 +6438,29 @@ void MainWindow::OnColumnClick(int column)
         m_sortAscending = true;
     }
 
+    ApplySortState();
+}
+
+void MainWindow::SetSortAscending(bool ascending)
+{
+    if (IsSortDisabledHere())
+    {
+        return;
+    }
+
+    // 方向没变就不重排，避免点一下同方向菜单白刷一遍
+    if (m_sortAscending == ascending)
+    {
+        return;
+    }
+
+    m_sortAscending = ascending;
+    ApplySortState();
+}
+
+// 按当前 m_sortColumn / m_sortAscending 重排数据，刷新表头箭头和整表，记日志
+void MainWindow::ApplySortState()
+{
     SortEntries();
 
     std::shared_ptr<shell::EnumerateResult> result = CurrentResult();
@@ -6421,7 +6475,8 @@ void MainWindow::OnColumnClick(int column)
     if (result != nullptr)
     {
         const wchar_t* columnNames[] = { L"名称", L"修改日期", L"类型", L"大小" };
-        std::wstring columnName = (column >= 0 && column <= 3) ? columnNames[column] : L"未知";
+        std::wstring columnName = (m_sortColumn >= 0 && m_sortColumn <= 3)
+                                      ? columnNames[m_sortColumn] : L"未知";
 
         std::wstring sample;
         for (size_t i = 0; i < result->entries.size() && i < 5; ++i)

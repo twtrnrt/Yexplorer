@@ -201,7 +201,8 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 //
 // 分组按用户要求：
 //   查看 >
-//   刷新            （和「查看」同一组，紧在查看下面）
+//   排序 >          （紧在查看下面；此电脑分组视图下隐藏）
+//   刷新            （和「查看」同一组，紧在排序下面）
 //   ─────
 //   粘贴            （剪贴板里有文件才出现）
 //   撤销 / 恢复      （紧跟在「粘贴」那一格的下一格，有才出现）
@@ -214,6 +215,7 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 void MainWindow::BuildBackgroundMenu(HMENU menu)
 {
     FillViewMenu(menu);
+    FillSortMenu(menu);
     ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
 
     // 压缩包内部（不分格式）不显示「粘贴」：
@@ -668,6 +670,48 @@ void MainWindow::FillViewMenu(HMENU parentMenu)
 
     ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
                   reinterpret_cast<UINT_PTR>(viewMenu), L"查看(&V)");
+}
+
+// ---------------------------------------------------------------------------
+// 「排序」子菜单（位于「查看」下面）
+//
+//   名称 / 修改日期 / 类型 / 大小   当前排序列打勾
+//   ─────
+//   升序 / 降序                    当前方向打勾
+//
+// 「此电脑」是分组视图，排序整体禁用，这里直接不挂这个子菜单。
+// ---------------------------------------------------------------------------
+void MainWindow::FillSortMenu(HMENU parentMenu)
+{
+    if (IsSortDisabledHere())
+    {
+        return;
+    }
+
+    HMENU sortMenu = ::CreatePopupMenu();
+    if (sortMenu == nullptr)
+    {
+        return;
+    }
+
+    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 0 ? MF_CHECKED : 0),
+                  kCommandSortName, L"名称(&N)");
+    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 1 ? MF_CHECKED : 0),
+                  kCommandSortDate, L"修改日期(&D)");
+    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 2 ? MF_CHECKED : 0),
+                  kCommandSortType, L"类型(&T)");
+    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 3 ? MF_CHECKED : 0),
+                  kCommandSortSize, L"大小(&Z)");
+
+    ::AppendMenuW(sortMenu, MF_SEPARATOR, 0, nullptr);
+
+    ::AppendMenuW(sortMenu, MF_STRING | (m_sortAscending ? MF_CHECKED : 0),
+                  kCommandSortAsc, L"升序(&A)");
+    ::AppendMenuW(sortMenu, MF_STRING | (!m_sortAscending ? MF_CHECKED : 0),
+                  kCommandSortDesc, L"降序(&E)");
+
+    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(sortMenu), L"排序(&O)");
 }
 
 // ---------------------------------------------------------------------------
