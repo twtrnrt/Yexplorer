@@ -166,13 +166,22 @@ std::vector<RawHandler> ScanRegistry()
                 break;
             }
 
-            // 默认值 = 处理器 CLSID 字符串
+            // 打开子键，读它的默认值（处理器 CLSID 字符串）；父键本身默认值为空
+            HKEY subKey = nullptr;
+            if (::RegOpenKeyExW(key, name, 0, KEY_READ, &subKey) != ERROR_SUCCESS)
+            {
+                continue;
+            }
+
             wchar_t clsidStr[128] = {};
             DWORD   size = sizeof(clsidStr);
             DWORD   type = 0;
-            if (::RegQueryValueExW(key, nullptr, nullptr, &type,
-                                   reinterpret_cast<LPBYTE>(clsidStr), &size) != ERROR_SUCCESS ||
-                type != REG_SZ)
+            const bool hasClsid = ::RegQueryValueExW(subKey, nullptr, nullptr, &type,
+                                       reinterpret_cast<LPBYTE>(clsidStr), &size) == ERROR_SUCCESS &&
+                                  (type == REG_SZ);
+            ::RegCloseKey(subKey);
+
+            if (!hasClsid)
             {
                 continue;
             }
