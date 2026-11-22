@@ -29,6 +29,7 @@
 #include "ui/BackgroundHost.h"
 #include "ui/FlatDraw.h"
 #include "ui/OverlaySettingsDialog.h"
+#include "ui/ContextMenuSettingsDialog.h"
 #include "shell/ShellOverlay.h"
 
 namespace
@@ -37,7 +38,7 @@ namespace
 const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 const int kClientWidth  = 460;
-const int kClientHeight = 950;
+const int kClientHeight = 1010;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -114,6 +115,10 @@ const wchar_t* kOverlayTitle       = L"同步状态角标";
 const wchar_t* kOverlayCheckText  = L"显示同步状态";
 const wchar_t* kOverlayHintText   = L"在文件 / 文件夹图标左下角叠加 Git、网盘等同步状态标记；可在配置里限定目录范围。";
 const wchar_t* kOverlayConfigText  = L"配置…";
+
+const wchar_t* kCtxMenuTitle       = L"右键菜单";
+const wchar_t* kCtxMenuHintText    = L"查看系统里第三方程序注册的右键菜单项（一期只展示，不改动系统设置）。";
+const wchar_t* kCtxMenuConfigText  = L"配置右键菜单…";
 
 const wchar_t* kActionFailedText = L"上次操作失败，详情见日志文件。";
 
@@ -520,6 +525,14 @@ void SettingsDialog::Layout()
                      m_overlayConfigRect.left - padding - overlayBtnGap, rowHeight, TRUE);
     }
 
+    // 右键菜单配置按钮（自绘，始终可用；说明文字在按钮左侧）
+    const int ctxBtnWidth  = Scale(130);
+    const int ctxBtnHeight = Scale(30);
+    m_ctxMenuRect.right = clientRect.right - padding;
+    m_ctxMenuRect.left  = m_ctxMenuRect.right - ctxBtnWidth;
+    m_ctxMenuRect.top    = Scale(912);
+    m_ctxMenuRect.bottom = m_ctxMenuRect.top + ctxBtnHeight;
+
     // 底部按钮：恢复/重置（左）+ 关闭（右）
     const int closeWidth   = Scale(88);
     const int restoreWidth = Scale(100);
@@ -860,6 +873,13 @@ void SettingsDialog::OnOverlayConfigButton()
     }
 }
 
+void SettingsDialog::OnCtxMenuConfigButton()
+{
+    // 一期纯查看：弹出采集结果窗口，不写回配置、不执行菜单命令
+    ui::ContextMenuSettingsDialog dialog(m_hWnd);
+    dialog.ShowModal();
+}
+
 bool SettingsDialog::RestoreSystemIntegration()
 {
     bool ok = true;
@@ -1024,6 +1044,7 @@ void SettingsDialog::Draw(HDC dc)
     drawCard(492, 584, kWindowTitleShort);
     drawCard(596, 770, kSectionTitle);
     drawCard(782, 884, kOverlayTitle);
+    drawCard(896, 944, kCtxMenuTitle);
 
     ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kHintColor);
@@ -1065,11 +1086,21 @@ void SettingsDialog::Draw(HDC dc)
     ::DrawTextW(dc, kOverlayHintText, -1, &overlayHint,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
+    // 右键菜单说明（按钮左侧）
+    RECT ctxHint = { Scale(kPadding), Scale(916),
+                     m_ctxMenuRect.left - Scale(12), Scale(936) };
+    ::SetTextColor(dc, kHintColor);
+    ::DrawTextW(dc, kCtxMenuHintText, -1, &ctxHint,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
     ::SelectObject(dc, oldFont);
 
     const bool overlayEnabled = core::Settings::Instance().OverlayEnabled();
     DrawButton(dc, m_overlayConfigRect, kOverlayConfigText,
                m_hotOverlayConfig, m_pressedOverlayConfig, overlayEnabled);
+
+    DrawButton(dc, m_ctxMenuRect, kCtxMenuConfigText,
+               m_hotCtxMenu, m_pressedCtxMenu, true);
 
     DrawButton(dc, m_restoreRect, L"恢复/重置", m_hotRestore, m_pressedRestore, true);
     DrawButton(dc, m_closeRect, L"关闭", m_hotClose, m_pressedClose, true);
@@ -1196,6 +1227,7 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         const bool hotClose   = (::PtInRect(&m_closeRect, pt) != FALSE);
         const bool hotRestore = (::PtInRect(&m_restoreRect, pt) != FALSE);
         const bool hotOverlay = (::PtInRect(&m_overlayConfigRect, pt) != FALSE);
+        const bool hotCtxMenu = (::PtInRect(&m_ctxMenuRect, pt) != FALSE);
 
         if (hotClose != m_hotClose)
         {
@@ -1211,6 +1243,11 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         {
             m_hotOverlayConfig = hotOverlay;
             ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
+        }
+        if (hotCtxMenu != m_hotCtxMenu)
+        {
+            m_hotCtxMenu = hotCtxMenu;
+            ::InvalidateRect(hWnd, &m_ctxMenuRect, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -1246,6 +1283,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedOverlayConfig = false;
             ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
         }
+        if (m_hotCtxMenu || m_pressedCtxMenu)
+        {
+            m_hotCtxMenu    = false;
+            m_pressedCtxMenu = false;
+            ::InvalidateRect(hWnd, &m_ctxMenuRect, FALSE);
+        }
         return 0;
 
     case WM_LBUTTONDOWN:
@@ -1272,6 +1315,13 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedOverlayConfig = true;
             ::SetCapture(hWnd);
             ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
+            return 0;
+        }
+        if (::PtInRect(&m_ctxMenuRect, pt))
+        {
+            m_pressedCtxMenu = true;
+            ::SetCapture(hWnd);
+            ::InvalidateRect(hWnd, &m_ctxMenuRect, FALSE);
             return 0;
         }
         return 0;
@@ -1314,6 +1364,18 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             if (inside)
             {
                 OnOverlayConfigButton();
+            }
+            return 0;
+        }
+        if (m_pressedCtxMenu)
+        {
+            m_pressedCtxMenu = false;
+            ::ReleaseCapture();
+            const bool inside = (::PtInRect(&m_ctxMenuRect, pt) != FALSE);
+            ::InvalidateRect(hWnd, &m_ctxMenuRect, FALSE);
+            if (inside)
+            {
+                OnCtxMenuConfigButton();
             }
             return 0;
         }
