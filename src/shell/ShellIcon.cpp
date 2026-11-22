@@ -494,9 +494,9 @@ HICON IconCache::CreateCompositeIcon(HICON base, HICON overlay, int size)
     ::DrawIconEx(memoryDc, 0, 0, base, size, size, 0, nullptr, DI_NORMAL);
 
     // overlay 角标贴左下角（横坐标贴左、纵坐标贴下）。
-    // 边长按主图标档位取：小图标(16) 10px，大图标(48) 16px；贴着角标资源原生
-    // 尺寸（约 16×16）以内，避免放大拉伸模糊。
-    int overlaySize = (size <= 16) ? 10 : 16;
+    // 边长按主图标档位取：小图标/列表/详细信息(16) 8px，大图标/平铺(48) 16px；
+    // 贴着角标资源原生尺寸（约 16）以内，避免放大拉伸模糊。
+    int overlaySize = (size <= 16) ? 8 : 16;
     if (overlaySize > size)
     {
         overlaySize = size;
