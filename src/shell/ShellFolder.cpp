@@ -716,7 +716,15 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
             // 所以拿到绝对路径后再问一次文件属性（只对本地文件系统有意义，
             // Shell 命名空间里的虚拟项路径为空，直接跳过）。
             // ----------------------------------------------------------
-            if (needHidden && !entry.fullPath.empty())
+            // 驱动器项（盘符根，如 C:\）豁免这一段：
+            // 它的路径就是盘根目录，GetFileAttributesW 取到的是「根目录」的属性，
+            // 而系统盘 / 某些保留盘、同步映射盘的根目录天然带 SYSTEM（常同时带
+            // HIDDEN）位。拿根目录属性去判定盘本身，会把驱动器误标成系统文件，
+            // 只开「显示隐藏文件」时就被过滤掉——资源管理器的此电脑从不按盘根
+            // 目录属性过滤驱动器。这里直接跳过，驱动器始终保留。
+            const bool entryIsDrive = DriveLetterFromParsingName(entry.fullPath) != 0;
+
+            if (needHidden && !entry.fullPath.empty() && !entryIsDrive)
             {
                 // 上面校正 isFolder 时可能已经问过一次了，能复用就复用，
                 // 别对同一个路径重复查两次磁盘
