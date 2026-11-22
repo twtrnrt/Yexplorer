@@ -517,18 +517,19 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
 
     hit.chips.clear();
 
-    // 不勾全部路径、又没选任何文件夹 = 这套禁用，提示「不显示状态」
+    // 末尾「+」按钮位置（无论白名单是否为空都要可点，方便从空列表加第一条）
+    hit.add = { addLeft, centerY - addSize / 2, addLeft + addSize, centerY - addSize / 2 + addSize };
+
+    // 不勾全部路径、又没选任何文件夹 = 这套禁用，提示「不显示状态」；右侧仍保留「+」
     if (set.paths.empty())
     {
-        hit.add = RECT{};
-        RECT emptyRect = { cursorX, rowRect.top, scopeRight, rowRect.bottom };
+        RECT emptyRect = { cursorX, rowRect.top, addLeft - chipGap, rowRect.bottom };
         ::SetTextColor(dc, kHintTextColor);
         ::DrawTextW(dc, L"不显示状态", -1, &emptyRect,
                     DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        DrawGlyphButton(dc, hit.add, L"+", false, true);
         return;
     }
-
-    hit.add = { addLeft, centerY - addSize / 2, addLeft + addSize, centerY - addSize / 2 + addSize };
 
     HDC measureDc = ::GetDC(m_hWnd);
     HGDIOBJ oldMeasureFont = nullptr;

@@ -361,6 +361,11 @@ bool Settings::Load()
                 }
                 OverlaySet set;
                 set.id       = FromUtf8(one.value("id", ""));
+                // 空 id 项是历史遗留的脏数据，加载时直接丢弃，不再写回配置
+                if (set.id.empty())
+                {
+                    continue;
+                }
                 set.name     = FromUtf8(one.value("name", ""));
                 set.allPaths = one.value("allPaths", true);
                 if (one.contains("paths") && one["paths"].is_array())
@@ -689,6 +694,10 @@ bool Settings::Save()
         nlohmann::json sets = nlohmann::json::array();
         for (const OverlaySet& set : m_overlaySets)
         {
+            if (set.id.empty())
+            {
+                continue; // 双保险：保存时也不落空 id 项
+            }
             nlohmann::json one;
             one["id"]       = ToUtf8(set.id);
             one["name"]     = ToUtf8(set.name);

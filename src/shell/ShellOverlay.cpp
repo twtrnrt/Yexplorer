@@ -90,11 +90,24 @@ bool IsPathUnderDirectory(const std::wstring& dir, const std::wstring& path)
     return false;
 }
 
-// 读 CLSID 对应的 InprocServer32 DLL 路径（归并同族用）；取不到返回空串
-std::wstring ReadClsidDllPath(const CLSID& clsid)
+// CLSID 转大写字符串（带花括号）；失败返回空串
+std::wstring ClsidToString(const CLSID& clsid)
 {
     LPOLESTR clsidStr = nullptr;
     if (::StringFromCLSID(clsid, &clsidStr) != S_OK || clsidStr == nullptr)
+    {
+        return std::wstring();
+    }
+    std::wstring result = clsidStr;
+    ::CoTaskMemFree(clsidStr);
+    return result;
+}
+
+// 读 CLSID 对应的 InprocServer32 DLL 路径（归并同族用）；取不到返回空串
+std::wstring ReadClsidDllPath(const CLSID& clsid)
+{
+    const std::wstring clsidStr = ClsidToString(clsid);
+    if (clsidStr.empty())
     {
         return std::wstring();
     }
@@ -102,7 +115,6 @@ std::wstring ReadClsidDllPath(const CLSID& clsid)
     std::wstring subKey = L"CLSID\\";
     subKey += clsidStr;
     subKey += L"\\InprocServer32";
-    ::CoTaskMemFree(clsidStr);
 
     HKEY key = nullptr;
     if (::RegOpenKeyExW(HKEY_CLASSES_ROOT, subKey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
@@ -124,6 +136,68 @@ std::wstring ReadClsidDllPath(const CLSID& clsid)
 
     ::RegCloseKey(key);
     return dll;
+}
+
+// 读 CLSID 键的默认值（处理器友好描述，如 "TortoiseSVN"）；取不到返回空串
+std::wstring ReadClsidDescription(const CLSID& clsid)
+{
+    const std::wstring clsidStr = ClsidToString(clsid);
+    if (clsidStr.empty())
+    {
+        return std::wstring();
+    }
+
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(HKEY_CLASSES_ROOT, clsidStr.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
+    {
+        return std::wstring();
+    }
+
+    wchar_t buffer[512] = {};
+    DWORD   size = sizeof(buffer) - sizeof(wchar_t);
+    DWORD   type = 0;
+    std::wstring desc;
+
+    if (::RegQueryValueExW(key, nullptr, nullptr, &type,
+                           reinterpret_cast<LPBYTE>(buffer), &size) == ERROR_SUCCESS &&
+        type == REG_SZ)
+    {
+        desc = buffer;
+    }
+
+    ::RegCloseKey(key);
+    return desc;
+}
+
+// 清理描述里冗余的尾巴（"Class" / "Handler Class" 等），让界面名更短
+std::wstring CleanDescription(std::wstring desc)
+{
+    while (true)
+    {
+        const std::wstring before = desc;
+        // 去首尾空白
+        size_t start = desc.find_first_not_of(L" \t");
+        size_t end   = desc.find_last_not_of(L" \t");
+        if (start != std::wstring::npos)
+        {
+            desc = desc.substr(start, end - start + 1);
+        }
+        // 去掉结尾的 " Class" / " Handler Class" / " Class Handler"
+        for (const wchar_t* tail : { L" Handler Class", L" Class Handler", L" Class", L" Handler" })
+        {
+            const size_t tlen = ::wcslen(tail);
+            if (desc.size() > tlen && _wcsicmp(desc.c_str() + desc.size() - tlen, tail) == 0)
+            {
+                desc.resize(desc.size() - tlen);
+                break;
+            }
+        }
+        if (desc == before)
+        {
+            break;
+        }
+    }
+    return desc;
 }
 
 // 注册表扫描出的原始处理器项（尚未实例化 COM）
@@ -215,9 +289,18 @@ std::vector<RawHandler> ScanRegistry()
         rawItem.regName = entry.regName;
         rawItem.clsid   = entry.clsid;
         rawItem.dll     = ReadClsidDllPath(entry.clsid);
-        rawItem.setId   = ToLower(rawItem.dll);
 
-        if (!rawItem.dll.empty())
+        // 套标识优先用 DLL 路径小写；DLL 读不到时用 CLSID 字符串兜底，保证唯一、不产生空 id
+        const std::wstring clsidStr = ClsidToString(entry.clsid);
+        rawItem.setId = !rawItem.dll.empty() ? ToLower(rawItem.dll) : ToLower(clsidStr);
+
+        // 显示名优先级：CLSID 友好描述 → DLL 文件名（去扩展名）→ 注册表子键名
+        const std::wstring desc = CleanDescription(ReadClsidDescription(entry.clsid));
+        if (!desc.empty())
+        {
+            rawItem.displayName = desc;
+        }
+        else if (!rawItem.dll.empty())
         {
             rawItem.displayName = StripExtension(BaseName(rawItem.dll));
         }
@@ -345,6 +428,10 @@ void OverlayManager::EnumerateHandlers()
     for (const core::OverlaySet& set : sets)
     {
         const std::wstring key = ToLower(set.id);
+        if (key.empty())
+        {
+            continue; // 丢弃历史遗留的空 id 配置项
+        }
         for (auto& handler : m_handlers)
         {
             if (handler.setId == key)
@@ -377,7 +464,8 @@ std::vector<core::OverlaySet> OverlayManager::ListSets()
     std::unordered_map<std::wstring, bool> seen;
     for (const RawHandler& entry : raw)
     {
-        if (seen.count(entry.setId))
+        // 空 id 不进入列表（兜底已用 CLSID，理论上不会空；双保险）
+        if (entry.setId.empty() || seen.count(entry.setId))
         {
             continue;
         }
@@ -398,6 +486,10 @@ std::vector<core::OverlaySet> OverlayManager::ListSets()
     for (const core::OverlaySet& savedSet : saved)
     {
         const std::wstring key = ToLower(savedSet.id);
+        if (key.empty())
+        {
+            continue; // 丢弃历史遗留的空 id 配置项
+        }
         for (auto& set : sets)
         {
             if (set.id == key)
