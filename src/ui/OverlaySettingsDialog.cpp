@@ -217,6 +217,10 @@ void OverlaySettingsDialog::CreateControls()
         ::SendMessageW(m_hList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
 
+        // 子类化列表：拦截鼠标移动 / 离开，做行内按钮（↑↓＋）悬停高亮
+        ::SetWindowSubclass(m_hList, &OverlaySettingsDialog::ListSubclassProc, 1,
+                            reinterpret_cast<DWORD_PTR>(this));
+
         LVCOLUMNW column = {};
         column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         column.fmt  = LVCFMT_LEFT;
@@ -247,6 +251,8 @@ void OverlaySettingsDialog::ReloadList()
 
     ListView_DeleteAllItems(m_hList);
     m_hits.assign(m_sets.size(), RowHit{});
+    m_hotRow  = -1;
+    m_hotPart = HotNone;
 
     for (int i = 0; i < static_cast<int>(m_sets.size()); ++i)
     {
@@ -420,9 +426,11 @@ static void DrawGlyphButton(HDC dc, const RECT& rect, const wchar_t* glyph,
     ui::FlatButtonVisual visual;
     visual.hot     = hot;
     visual.enabled = enabled;
-    ui::DrawBorderedRect(dc, rect,
-                         enabled ? ui::kButtonFace : ui::kButtonDisabledFace,
-                         enabled ? ui::kButtonBorder : ui::kButtonDisabledBorder);
+
+    // 悬停 / 禁用分别取对应配色
+    COLORREF face   = enabled ? (hot ? ui::kButtonHotFace : ui::kButtonFace) : ui::kButtonDisabledFace;
+    COLORREF border = enabled ? (hot ? ui::kButtonHotBorder : ui::kButtonBorder) : ui::kButtonDisabledBorder;
+    ui::DrawBorderedRect(dc, rect, face, border);
 
     if (enabled)
     {
@@ -460,8 +468,8 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
     const int scopeLeft = priWidth + nameWidth;
 
     // ---- 优先级列：序号 + ↑ / ↓ ----
-    // 箭头按钮窄一半（宽 11），高度不变；两箭头中间间隔 2px
-    const int btnW    = Scale(11);
+    // 箭头按钮宽 16，高度不变；两箭头中间间隔 2px
+    const int btnW    = Scale(16);
     const int btnH    = Scale(22);
     const int btnGap  = Scale(2);
 
@@ -478,8 +486,11 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
     ::DrawTextW(dc, std::to_wstring(index + 1).c_str(), -1, &noRect,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    DrawGlyphButton(dc, upRect,   L"↑", false, index > 0);
-    DrawGlyphButton(dc, downRect, L"↓", false, index + 1 < static_cast<int>(m_sets.size()));
+    const bool hotUp   = (m_hotRow == index && m_hotPart == HotUp);
+    const bool hotDown = (m_hotRow == index && m_hotPart == HotDown);
+    const bool hotAdd  = (m_hotRow == index && m_hotPart == HotAdd);
+    DrawGlyphButton(dc, upRect,   L"↑", hotUp,   index > 0);
+    DrawGlyphButton(dc, downRect, L"↓", hotDown, index + 1 < static_cast<int>(m_sets.size()));
 
     // ---- 应用名列 ----
     RECT nameRect = { priWidth + Scale(8), rowRect.top,
@@ -527,7 +538,7 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
         ::SetTextColor(dc, kHintTextColor);
         ::DrawTextW(dc, L"不显示状态", -1, &emptyRect,
                     DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        DrawGlyphButton(dc, hit.add, L"+", false, true);
+        DrawGlyphButton(dc, hit.add, L"+", hotAdd, true);
         return;
     }
 
@@ -591,7 +602,7 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
     }
 
     // 末尾「+」
-    DrawGlyphButton(dc, hit.add, L"+", false, true);
+    DrawGlyphButton(dc, hit.add, L"+", hotAdd, true);
 }
 
 // ============================================================================
@@ -697,6 +708,74 @@ void OverlaySettingsDialog::RemovePath(int index, int chip)
     m_sets[index].paths.erase(m_sets[index].paths.begin() + chip);
     ReloadList();
     ::UpdateWindow(m_hList);
+}
+
+// 根据列表客户区坐标刷新行内按钮悬停态；命中变化时重绘列表
+void OverlaySettingsDialog::UpdateRowHover(int x, int y)
+{
+    const POINT pt{ x, y };
+    int hotRow  = -1;
+    int hotPart = HotNone;
+
+    for (int i = 0; i < static_cast<int>(m_hits.size()); ++i)
+    {
+        const RowHit& hit = m_hits[i];
+        if (::PtInRect(&hit.up, pt))
+        {
+            hotRow = i; hotPart = HotUp; break;
+        }
+        if (::PtInRect(&hit.down, pt))
+        {
+            hotRow = i; hotPart = HotDown; break;
+        }
+        if (::PtInRect(&hit.add, pt))
+        {
+            hotRow = i; hotPart = HotAdd; break;
+        }
+    }
+
+    if (hotRow != m_hotRow || hotPart != m_hotPart)
+    {
+        m_hotRow  = hotRow;
+        m_hotPart = hotPart;
+        ::InvalidateRect(m_hList, nullptr, FALSE);
+    }
+}
+
+// 列表控件子类过程：转发鼠标移动 / 离开做悬停高亮，其余交给默认处理
+LRESULT CALLBACK OverlaySettingsDialog::ListSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                                         LPARAM lParam, UINT_PTR id, DWORD_PTR refData)
+{
+    OverlaySettingsDialog* self = reinterpret_cast<OverlaySettingsDialog*>(refData);
+
+    if (self != nullptr)
+    {
+        if (msg == WM_MOUSEMOVE)
+        {
+            self->UpdateRowHover(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+
+            TRACKMOUSEEVENT track = {};
+            track.cbSize    = sizeof(track);
+            track.dwFlags   = TME_LEAVE;
+            track.hwndTrack = hWnd;
+            ::TrackMouseEvent(&track);
+        }
+        else if (msg == WM_MOUSELEAVE)
+        {
+            if (self->m_hotRow != -1)
+            {
+                self->m_hotRow  = -1;
+                self->m_hotPart = HotNone;
+                ::InvalidateRect(hWnd, nullptr, FALSE);
+            }
+        }
+        else if (msg == WM_NCDESTROY)
+        {
+            ::RemoveWindowSubclass(hWnd, &OverlaySettingsDialog::ListSubclassProc, id);
+        }
+    }
+
+    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 // ============================================================================

@@ -85,6 +85,15 @@ private:
     void AddPath(int index);               // 「+」选目录加入白名单
     void RemovePath(int index, int chip);  // chip 上的 × 删除
 
+    // 行内按钮悬停跟踪（子类化列表控件后由鼠标消息驱动）
+    enum HotPart { HotNone = 0, HotUp = 1, HotDown = 2, HotAdd = 3 };
+    int  m_hotRow  = -1;   // 悬停在第几行（-1 = 无）
+    int  m_hotPart = HotNone; // 悬停该行的哪个按钮
+    void UpdateRowHover(int x, int y);     // 根据列表客户区坐标刷新悬停态
+
+    static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                             LPARAM lParam, UINT_PTR id, DWORD_PTR refData);
+
     // 底部按钮：确定 / 取消
     enum Button
     {

@@ -16,8 +16,10 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "version.lib")
 
 namespace shell
 {
@@ -147,8 +149,11 @@ std::wstring ReadClsidDescription(const CLSID& clsid)
         return std::wstring();
     }
 
+    // 注意：HKCR 下的完整路径是 CLSID\{...}，不能只传花括号串，否则开键返回 2（找不到）
+    const std::wstring subKey = L"CLSID\\" + clsidStr;
+
     HKEY key = nullptr;
-    if (::RegOpenKeyExW(HKEY_CLASSES_ROOT, clsidStr.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
+    if (::RegOpenKeyExW(HKEY_CLASSES_ROOT, subKey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
     {
         return std::wstring();
     }
@@ -198,6 +203,119 @@ std::wstring CleanDescription(std::wstring desc)
         }
     }
     return desc;
+}
+
+// 读 DLL 版本资源里的指定字段（ProductName / FileDescription）；取不到返回空串
+std::wstring ReadDllVersionString(const std::wstring& dllPath, const wchar_t* field)
+{
+    DWORD ignored = 0;
+    const DWORD size = ::GetFileVersionInfoSizeW(dllPath.c_str(), &ignored);
+    if (size == 0)
+    {
+        return std::wstring();
+    }
+
+    std::vector<BYTE> buffer(size);
+    if (!::GetFileVersionInfoW(dllPath.c_str(), 0, size, buffer.data()))
+    {
+        return std::wstring();
+    }
+
+    struct LangAndCodePage
+    {
+        WORD language;
+        WORD codePage;
+    };
+
+    LangAndCodePage* translation = nullptr;
+    UINT translationLength = 0;
+    if (!::VerQueryValueW(buffer.data(), L"\\VarFileInfo\\Translation",
+                          reinterpret_cast<void**>(&translation), &translationLength) ||
+        translationLength < sizeof(LangAndCodePage))
+    {
+        return std::wstring();
+    }
+
+    wchar_t subBlock[128] = {};
+    ::swprintf_s(subBlock, L"\\StringFileInfo\\%04x%04x\\%s",
+                 translation[0].language, translation[0].codePage, field);
+
+    wchar_t* value = nullptr;
+    UINT valueLength = 0;
+    if (!::VerQueryValueW(buffer.data(), subBlock, reinterpret_cast<void**>(&value), &valueLength) ||
+        value == nullptr)
+    {
+        return std::wstring();
+    }
+    return std::wstring(value);
+}
+
+// 名字是否含内部实现词（Handler/Class/Overlay/Shim/Shell），含则视为不够友好、需降级
+bool LooksInternal(const std::wstring& s)
+{
+    static const wchar_t* words[] = { L"handler", L"class", L"overlay", L"shim", L"shell" };
+    for (const wchar_t* w : words)
+    {
+        const size_t wlen = ::wcslen(w);
+        if (s.size() >= wlen &&
+            std::search(s.begin(), s.end(), w, w + wlen,
+                         [](wchar_t a, wchar_t b) { return ::towlower(a) == ::towlower(b); }) != s.end())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 是否是 Windows 操作系统这类没有信息量的产品名，需要排除
+bool IsOsProductName(const std::wstring& s)
+{
+    return s.find(L"Operating System") != std::wstring::npos ||
+           s.find(L"操作系统") != std::wstring::npos;
+}
+
+// 综合多个来源拼出界面显示名；优先级：干净的 CLSID 描述 → DLL 产品名 → 文件描述 →
+// 含内部词的 CLSID 描述 → DLL 文件名 → 注册表子键名
+std::wstring BuildDisplayName(const std::wstring& regName, const CLSID& clsid, const std::wstring& dll)
+{
+    const std::wstring clsidDesc = CleanDescription(ReadClsidDescription(clsid));
+
+    std::wstring product;
+    std::wstring fileDesc;
+    if (!dll.empty())
+    {
+        product  = CleanDescription(ReadDllVersionString(dll, L"ProductName"));
+        fileDesc = CleanDescription(ReadDllVersionString(dll, L"FileDescription"));
+    }
+    const std::wstring dllName = dll.empty() ? std::wstring() : StripExtension(BaseName(dll));
+
+    // 1) CLSID 描述本身干净（如 TortoiseSVN）
+    if (!clsidDesc.empty() && !LooksInternal(clsidDesc))
+    {
+        return clsidDesc;
+    }
+    // 2) DLL 产品名（排除操作系统名），如 Microsoft OneDrive / 豆包操作电脑
+    if (!product.empty() && !IsOsProductName(product))
+    {
+        return product;
+    }
+    // 3) DLL 文件描述
+    if (!fileDesc.empty())
+    {
+        return fileDesc;
+    }
+    // 4) 含内部词的 CLSID 描述也兜底
+    if (!clsidDesc.empty())
+    {
+        return clsidDesc;
+    }
+    // 5) DLL 文件名（去扩展名）
+    if (!dllName.empty())
+    {
+        return dllName;
+    }
+    // 6) 注册表子键名
+    return regName;
 }
 
 // 注册表扫描出的原始处理器项（尚未实例化 COM）
@@ -294,20 +412,8 @@ std::vector<RawHandler> ScanRegistry()
         const std::wstring clsidStr = ClsidToString(entry.clsid);
         rawItem.setId = !rawItem.dll.empty() ? ToLower(rawItem.dll) : ToLower(clsidStr);
 
-        // 显示名优先级：CLSID 友好描述 → DLL 文件名（去扩展名）→ 注册表子键名
-        const std::wstring desc = CleanDescription(ReadClsidDescription(entry.clsid));
-        if (!desc.empty())
-        {
-            rawItem.displayName = desc;
-        }
-        else if (!rawItem.dll.empty())
-        {
-            rawItem.displayName = StripExtension(BaseName(rawItem.dll));
-        }
-        if (rawItem.displayName.empty())
-        {
-            rawItem.displayName = entry.regName;
-        }
+        // 显示名综合 CLSID 描述 / DLL 版本资源 / 文件名多来源择优
+        rawItem.displayName = BuildDisplayName(entry.regName, entry.clsid, rawItem.dll);
 
         raw.push_back(std::move(rawItem));
     }
@@ -478,7 +584,8 @@ std::vector<core::OverlaySet> OverlayManager::ListSets()
         sets.push_back(std::move(set));
     }
 
-    // 套用已存配置的名称 / 范围，并按配置出现顺序排前；注册表新发现的追加末尾
+    // 套用已存配置的范围（全部 / 白名单），按配置出现顺序排前；注册表新发现的追加末尾。
+    // 显示名始终以注册表 / 版本资源实时生成，不沿用历史存下的旧名（旧名多为 DLL 文件名）。
     const auto& saved = core::Settings::Instance().OverlaySets();
     std::vector<core::OverlaySet> ordered;
     std::unordered_map<std::wstring, bool> used;
@@ -494,20 +601,18 @@ std::vector<core::OverlaySet> OverlayManager::ListSets()
         {
             if (set.id == key)
             {
-                if (!savedSet.name.empty())
-                {
-                    set.name = savedSet.name;
-                }
                 set.allPaths = savedSet.allPaths;
                 set.paths    = savedSet.paths;
                 ordered.push_back(std::move(set));
                 used[key] = true;
+                break; // 一套只匹配一个配置项
             }
         }
     }
     for (auto& set : sets)
     {
-        if (!used.count(set.id))
+        // 跳过空 id（含已被 move 掏空的壳），避免重复追加出空行
+        if (!set.id.empty() && !used.count(set.id))
         {
             ordered.push_back(std::move(set));
         }
