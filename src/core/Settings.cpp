@@ -22,6 +22,7 @@
 
 #include <windows.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 
 #include <fstream>
 #include <iterator>
@@ -828,11 +829,38 @@ std::wstring Settings::ResolveStartupPath() const
 
     case StartupLocation::Custom:
     {
-        const DWORD attributes = ::GetFileAttributesW(m_customStartupFolder.c_str());
-        if (attributes != INVALID_FILE_ATTRIBUTES &&
-            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        if (m_customStartupFolder.empty())
         {
-            return m_customStartupFolder;
+            return shell::kHomeFolderPath;
+        }
+
+        // 支持“此电脑”“主文件夹”等 Shell 虚拟位置
+        const bool isShellNamespace =
+            (m_customStartupFolder.compare(0, 2, L"::") == 0) ||
+            (m_customStartupFolder.compare(0, 6, L"shell:") == 0);
+
+        if (isShellNamespace)
+        {
+            IShellItem* item = nullptr;
+            const bool parsed = SUCCEEDED(::SHCreateItemFromParsingName(
+                m_customStartupFolder.c_str(), nullptr, IID_PPV_ARGS(&item)));
+            if (item != nullptr)
+            {
+                item->Release();
+            }
+            if (parsed)
+            {
+                return m_customStartupFolder;
+            }
+        }
+        else
+        {
+            const DWORD attributes = ::GetFileAttributesW(m_customStartupFolder.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                return m_customStartupFolder;
+            }
         }
 
         Logger::Warn(L"启动位置：自定义目录不可用，回退到主文件夹：" + m_customStartupFolder);

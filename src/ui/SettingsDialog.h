@@ -52,7 +52,7 @@ private:
 
     // 启动位置单选
     void ApplyStartupLocation();
-    void BrowseCustomFolder();
+    void PickCustomStartupFolder();
     void RefreshStartupControls();
 
     // 快速启动两个复选框
@@ -77,11 +77,6 @@ private:
 
     // 启动位置（下拉框）
     HWND  m_hStartupCombo = nullptr;
-    RECT  m_pathRect = {};
-    RECT  m_browseRect = {};
-    bool  m_customPathActive = false;
-    bool  m_hotBrowse = false;
-    bool  m_pressedBrowse = false;
 
     // 快速启动
     HWND  m_hCheckBackground = nullptr;

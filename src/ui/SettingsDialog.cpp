@@ -34,7 +34,7 @@ namespace
 const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 const int kClientWidth  = 460;
-const int kClientHeight = 900;
+const int kClientHeight = 840;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -70,7 +70,7 @@ const wchar_t* kHiddenHintText  = L"隐藏项用浅灰文字标示。改动立�
 const wchar_t* kStartupTitle = L"启动位置";
 const wchar_t* kRadioThisPcText = L"此电脑";
 const wchar_t* kRadioHomeText   = L"主文件夹";
-const wchar_t* kRadioCustomText = L"自定义文件夹";
+const wchar_t* kRadioCustomText = L"自定义";
 const wchar_t* kRadioLastText   = L"最后一次打开的文件夹";
 const wchar_t* kStartupOptions[] = {
     kRadioLastText, kRadioHomeText, kRadioThisPcText, kRadioCustomText
@@ -203,6 +203,39 @@ LRESULT CALLBACK SettingsCheckboxSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
 
 
 } // 匿名命名空间
+
+std::wstring StartupCustomDisplayName(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return path;
+    }
+
+    // 普通磁盘目录直接显示路径；虚拟位置（此电脑/主文件夹）显示系统名
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        return path;
+    }
+
+    IShellItem* item = nullptr;
+    if (SUCCEEDED(::SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) &&
+        item != nullptr)
+    {
+        PWSTR name = nullptr;
+        std::wstring result = path;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name != nullptr)
+        {
+            result.assign(name);
+            ::CoTaskMemFree(name);
+        }
+        item->Release();
+        return result;
+    }
+
+    return path;
+}
 
 SettingsDialog::~SettingsDialog()
 {
@@ -427,8 +460,7 @@ void SettingsDialog::Layout()
     {
         if (control != nullptr)
         {
-            ::MoveWindow(control, padding, Scale(y),
-                         width, rowHeight, TRUE);
+            ::MoveWindow(control, padding, Scale(y), width, rowHeight, TRUE);
         }
     };
 
@@ -444,34 +476,19 @@ void SettingsDialog::Layout()
                      width, Scale(200), TRUE);
     }
 
-    // 自定义路径 + 浏览
-    const int browseWidth = Scale(80);
-    const int browseHeight = Scale(28);
-    const int pathY = Scale(330);
-
-    m_browseRect.left = clientRect.right - padding - browseWidth;
-    m_browseRect.top = pathY;
-    m_browseRect.right = m_browseRect.left + browseWidth;
-    m_browseRect.bottom = m_browseRect.top + browseHeight;
-
-    m_pathRect.left = padding;
-    m_pathRect.top = pathY;
-    m_pathRect.right = m_browseRect.left - Scale(8);
-    m_pathRect.bottom = m_browseRect.bottom;
-
     // 快速启动
-    place(m_hCheckBackground, 448);
-    place(m_hCheckWinE,       482);
+    place(m_hCheckBackground, 388);
+    place(m_hCheckWinE,       422);
 
     // 窗口
-    place(m_hCheckTabs,           590);
-    place(m_hCheckSingleInstance, 624);
+    place(m_hCheckTabs,           528);
+    place(m_hCheckSingleInstance, 562);
 
     // 注册与集成
-    place(m_hCheckDefaultManager, 690);
-    place(m_hCheckProxy,          720);
-    place(m_hCheckListary,        750);
-    place(m_hCheckShellWindow,    780);
+    place(m_hCheckDefaultManager, 626);
+    place(m_hCheckProxy,          656);
+    place(m_hCheckListary,        686);
+    place(m_hCheckShellWindow,    716);
 
     // 关闭按钮
     const int buttonWidth = Scale(88);
@@ -535,9 +552,10 @@ void SettingsDialog::ApplyStartupLocation()
         core::StartupLocation::Custom,
     };
 
-    if (sel < 0 || sel >= static_cast<int>(sizeof(order) / sizeof(order[0])))
+    if (sel < 0 || sel >= static_cast<int>(sizeof(order) / sizeof(order[0])) ||
+        sel == 3)
     {
-        return;
+        return; // 自定义由 PickCustomStartupFolder 处理
     }
 
     core::Settings& settings = core::Settings::Instance();
@@ -550,6 +568,87 @@ void SettingsDialog::ApplyStartupLocation()
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
 }
 
+void SettingsDialog::PickCustomStartupFolder()
+{
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dialog))) ||
+        dialog == nullptr)
+    {
+        RefreshStartupControls();
+        return;
+    }
+
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options)))
+    {
+        // 不强制文件系统，允许选择“此电脑”“主文件夹”等 Shell 位置
+        dialog->SetOptions((options | FOS_PICKFOLDERS) & ~FOS_FORCEFILESYSTEM);
+    }
+    dialog->SetTitle(L"选择自定义启动位置");
+
+    const core::Settings& settings = core::Settings::Instance();
+    const std::wstring current = settings.CustomStartupFolder();
+    if (!current.empty())
+    {
+        IShellItem* currentItem = nullptr;
+        if (SUCCEEDED(::SHCreateItemFromParsingName(current.c_str(), nullptr,
+                                                   IID_PPV_ARGS(&currentItem))) &&
+            currentItem != nullptr)
+        {
+            dialog->SetFolder(currentItem);   // 下次打开直接定位到上次选择
+            currentItem->Release();
+        }
+    }
+
+    const HRESULT shown = dialog->Show(m_hWnd);
+    if (FAILED(shown))
+    {
+        dialog->Release();
+        RefreshStartupControls();   // 取消选择：恢复原下拉项
+        return;
+    }
+
+    std::wstring chosen;
+
+    IShellItem* item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr)
+    {
+        PWSTR value = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &value)) && value != nullptr)
+        {
+            chosen.assign(value);
+            ::CoTaskMemFree(value);
+        }
+        else
+        {
+            value = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &value)) &&
+                value != nullptr)
+            {
+                chosen.assign(value);
+                ::CoTaskMemFree(value);
+            }
+        }
+
+        item->Release();
+    }
+    dialog->Release();
+
+    if (!chosen.empty())
+    {
+        core::Settings& mutableSettings = core::Settings::Instance();
+        mutableSettings.SetCustomStartupFolder(chosen);
+        mutableSettings.SetStartup(core::StartupLocation::Custom);
+        mutableSettings.Save();
+        ui::ReloadBackgroundHost();
+        Logger::Info(L"设置：自定义启动位置 = " + chosen);
+    }
+
+    RefreshStartupControls();
+    ::InvalidateRect(m_hWnd, nullptr, TRUE);
+}
+
 void SettingsDialog::RefreshStartupControls()
 {
     if (m_hStartupCombo == nullptr)
@@ -557,7 +656,21 @@ void SettingsDialog::RefreshStartupControls()
         return;
     }
 
-    const core::StartupLocation location = core::Settings::Instance().Startup();
+    const core::Settings& settings = core::Settings::Instance();
+    const core::StartupLocation location = settings.Startup();
+    const std::wstring custom = settings.CustomStartupFolder();
+
+    std::wstring customText = L"自定义";
+    if (!custom.empty())
+    {
+        customText += L" (" + StartupCustomDisplayName(custom) + L")";
+    }
+
+    ::SendMessageW(m_hStartupCombo, CB_DELETESTRING, 3, 0);
+    ::SendMessageW(m_hStartupCombo, CB_INSERTSTRING, 3,
+                   reinterpret_cast<LPARAM>(customText.c_str()));
+    ::SendMessageW(m_hStartupCombo, CB_SETDROPPEDWIDTH, Scale(420), 0);
+
     int sel = 0;
     switch (location)
     {
@@ -568,49 +681,7 @@ void SettingsDialog::RefreshStartupControls()
     }
 
     ::SendMessageW(m_hStartupCombo, CB_SETCURSEL, sel, 0);
-    m_customPathActive = (location == core::StartupLocation::Custom);
     ::InvalidateRect(m_hWnd, nullptr, TRUE);
-}
-
-void SettingsDialog::BrowseCustomFolder()
-{
-    IFileDialog* dialog = nullptr;
-    if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&dialog))))
-    {
-        return;
-    }
-
-    DWORD options = 0;
-    if (SUCCEEDED(dialog->GetOptions(&options)))
-    {
-        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    }
-    dialog->SetTitle(L"选择启动时打开的文件夹");
-
-    if (SUCCEEDED(dialog->Show(m_hWnd)))
-    {
-        IShellItem* item = nullptr;
-        if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr)
-        {
-            PWSTR path = nullptr;
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path != nullptr)
-            {
-                core::Settings& settings = core::Settings::Instance();
-                settings.SetCustomStartupFolder(path);
-                settings.SetStartup(core::StartupLocation::Custom);
-                settings.Save();
-
-                ::CoTaskMemFree(path);
-                RefreshStartupControls();
-                ui::ReloadBackgroundHost();
-                ::InvalidateRect(m_hWnd, nullptr, TRUE);
-            }
-            item->Release();
-        }
-    }
-
-    dialog->Release();
 }
 
 void SettingsDialog::OnQuickStartToggle(int controlId)
@@ -759,7 +830,6 @@ void SettingsDialog::Draw(HDC dc)
         ::SelectObject(dc, oldFont);
     };
 
-    // ---- 标题 ----
     HGDIOBJ oldFont = ::SelectObject(dc, m_fontTitle);
     ::SetBkMode(dc, TRANSPARENT);
     ::SetTextColor(dc, kTitleColor);
@@ -774,69 +844,33 @@ void SettingsDialog::Draw(HDC dc)
                           clientRect.right - Scale(kPadding), Scale(76) };
     ::DrawTextW(dc, kSubtitleText, -1, &subtitleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // ---- 分组卡片 ----
+    // 分组卡片
     drawCard(82, 242, kViewTitle);
-    drawCard(254, 402, kStartupTitle);
-    drawCard(414, 542, kQuickTitleShort);
-    drawCard(554, 650, kWindowTitleShort);
-    drawCard(662, 840, kSectionTitle);
+    drawCard(254, 340, kStartupTitle);
+    drawCard(352, 480, kQuickTitleShort);
+    drawCard(492, 584, kWindowTitleShort);
+    drawCard(596, 770, kSectionTitle);
 
-    // 查看提示
     ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kHintColor);
+
     RECT viewHint = { Scale(kPadding), Scale(212),
                       clientRect.right - Scale(kPadding), Scale(232) };
     ::DrawTextW(dc, L"隐藏/系统项用浅灰显示；改动立即生效。", -1, &viewHint,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    // ---- 启动位置：自定义路径 ----
-    const core::Settings& settings = core::Settings::Instance();
-    std::wstring path = settings.CustomStartupFolder();
-    if (path.empty())
-    {
-        path = L"（未选择）";
-    }
-
-    const bool customActive = m_customPathActive;
-    HBRUSH pathBackground = ::CreateSolidBrush(customActive ? RGB(250, 251, 253)
-                                                           : RGB(247, 248, 250));
-    ::FillRect(dc, &m_pathRect, pathBackground);
-    ::DeleteObject(pathBackground);
-
-    HPEN pathPen = ::CreatePen(PS_SOLID, 1, RGB(224, 227, 232));
-    HGDIOBJ oldPathPen = ::SelectObject(dc, pathPen);
-    HGDIOBJ oldPathBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
-    ::RoundRect(dc, m_pathRect.left, m_pathRect.top, m_pathRect.right, m_pathRect.bottom,
-                Scale(6), Scale(6));
-    ::SelectObject(dc, oldPathPen);
-    ::SelectObject(dc, oldPathBrush);
-    ::DeleteObject(pathPen);
-
-    RECT pathText = m_pathRect;
-    pathText.left += Scale(10);
-    pathText.right -= Scale(8);
-    ::SetTextColor(dc, customActive ? kTitleColor : RGB(160, 164, 170));
-    ::DrawTextW(dc, path.c_str(), -1, &pathText,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-
-    DrawButton(dc, m_browseRect, L"浏览...", m_hotBrowse && customActive,
-               m_pressedBrowse && customActive, customActive);
-
-    RECT startupHint = { Scale(kPadding), Scale(370),
-                         clientRect.right - Scale(kPadding), Scale(390) };
-    ::SetTextColor(dc, kHintColor);
-    ::DrawTextW(dc, L"自定义目录不存在时回退到主文件夹。", -1, &startupHint,
+    RECT startupHint = { Scale(kPadding), Scale(318),
+                         clientRect.right - Scale(kPadding), Scale(338) };
+    ::DrawTextW(dc, L"点“自定义”会弹出选择窗口，支持此电脑、主文件夹。", -1, &startupHint,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    // 快速启动提示
-    RECT quickHint = { Scale(kPadding), Scale(512),
-                       clientRect.right - Scale(kPadding), Scale(532) };
+    RECT quickHint = { Scale(kPadding), Scale(452),
+                       clientRect.right - Scale(kPadding), Scale(472) };
     ::DrawTextW(dc, L"勾选 Win+E 会自动开启后台启动。", -1, &quickHint,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    // 注册提示 / 错误（同一行，错误时替换提示）
-    RECT regHint = { Scale(kPadding), Scale(814),
-                     clientRect.right - Scale(kPadding), Scale(834) };
+    RECT regHint = { Scale(kPadding), Scale(746),
+                     clientRect.right - Scale(kPadding), Scale(766) };
     if (m_lastActionFailed)
     {
         ::SetTextColor(dc, kErrorColor);
@@ -874,9 +908,18 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         const int controlId = LOWORD(wParam);
         const int notifyCode = HIWORD(wParam);
 
-        if (controlId == kControlIdStartupCombo && notifyCode == CBN_SELCHANGE)
+        if (controlId == kControlIdStartupCombo && notifyCode == CBN_SELENDOK)
         {
-            ApplyStartupLocation();
+            const int sel = static_cast<int>(
+                ::SendMessageW(m_hStartupCombo, CB_GETCURSEL, 0, 0));
+            if (sel == 3)
+            {
+                PickCustomStartupFolder();
+            }
+            else
+            {
+                ApplyStartupLocation();
+            }
             return 0;
         }
 
@@ -952,19 +995,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_MOUSEMOVE:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-
-        const bool hotClose  = (::PtInRect(&m_closeRect, pt) != FALSE);
-        const bool hotBrowse = m_customPathActive && (::PtInRect(&m_browseRect, pt) != FALSE);
+        const bool hotClose = (::PtInRect(&m_closeRect, pt) != FALSE);
 
         if (hotClose != m_hotClose)
         {
             m_hotClose = hotClose;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
-        }
-        if (hotBrowse != m_hotBrowse)
-        {
-            m_hotBrowse = hotBrowse;
-            ::InvalidateRect(hWnd, &m_browseRect, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -988,12 +1024,6 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedClose = false;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
         }
-        if (m_hotBrowse || m_pressedBrowse)
-        {
-            m_hotBrowse     = false;
-            m_pressedBrowse = false;
-            ::InvalidateRect(hWnd, &m_browseRect, FALSE);
-        }
         return 0;
 
     case WM_LBUTTONDOWN:
@@ -1006,12 +1036,6 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             ::SetCapture(hWnd);
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
             return 0;
-        }
-        if (m_customPathActive && ::PtInRect(&m_browseRect, pt))
-        {
-            m_pressedBrowse = true;
-            ::SetCapture(hWnd);
-            ::InvalidateRect(hWnd, &m_browseRect, FALSE);
         }
         return 0;
     }
@@ -1031,18 +1055,6 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                 ::DestroyWindow(hWnd);
             }
             return 0;
-        }
-
-        if (m_pressedBrowse)
-        {
-            m_pressedBrowse = false;
-            ::ReleaseCapture();
-            const bool inside = (::PtInRect(&m_browseRect, pt) != FALSE);
-            ::InvalidateRect(hWnd, &m_browseRect, FALSE);
-            if (inside)
-            {
-                BrowseCustomFolder();
-            }
         }
         return 0;
     }
