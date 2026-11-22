@@ -126,6 +126,23 @@ struct TabSessionEntry
     bool sortAscending = true;
 };
 
+// ============================================================================
+// 同步状态角标（Overlay）：一套处理器的显示范围配置
+//
+//   allPaths = true  → 这套处理全部路径（paths 忽略）
+//   allPaths = false → 白名单：只处理 paths 及其子目录；paths 为空即这套禁用
+//
+// 一期界面阶段：套列表还没接真实注册表枚举，这里先把配置结构定下来，
+// 弹窗用占位套填充；后续接入处理器时按 id 对齐。
+// ============================================================================
+struct OverlaySet
+{
+    std::wstring              id;        // 套标识（一期占位用英文名，二期对齐处理器）
+    std::wstring              name;      // 界面显示名（应用名）
+    bool                      allPaths = true;
+    std::vector<std::wstring> paths;     // 白名单目录（含子目录）
+};
+
 // 本软件公用配置。全程序只有一个实例（Settings::Instance()）。
 class Settings
 {
@@ -264,6 +281,15 @@ public:
     bool ShellWindowIntegration() const { return m_shellWindowIntegration; }
     void SetShellWindowIntegration(bool enabled) { m_shellWindowIntegration = enabled; }
 
+    // ---------------- 同步状态角标（Overlay） ----------------
+    // 总开关：默认勾上（首次安装默认显示同步状态）。关闭时不加载任何处理器，等价现状。
+    bool OverlayEnabled() const { return m_overlayEnabled; }
+    void SetOverlayEnabled(bool enabled) { m_overlayEnabled = enabled; }
+
+    // 各套的显示范围配置（顺序即优先级，数组下标 = 优先级序号）
+    const std::vector<OverlaySet>& OverlaySets() const { return m_overlaySets; }
+    void SetOverlaySets(const std::vector<OverlaySet>& sets) { m_overlaySets = sets; }
+
     // ---------------- 「打开方式」账本 ----------------
     const std::vector<OpenWithEntry>& OpenWithEntries() const { return m_openWith; }
 
@@ -314,6 +340,10 @@ private:
     bool          m_showHiddenFiles = false;
     bool          m_showSystemFiles = false;
     bool          m_shellWindowIntegration = false;   // 实验性：注册成 Shell 窗口
+
+    // 同步状态角标：总开关默认开；各套显示范围（顺序即优先级）
+    bool                      m_overlayEnabled = true;
+    std::vector<OverlaySet>   m_overlaySets;
 
     // 「打开方式」账本（按扩展名分组）
     std::vector<OpenWithEntry> m_openWith;

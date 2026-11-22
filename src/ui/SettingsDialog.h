@@ -66,6 +66,10 @@ private:
     void OnRegistrationToggle(int controlId);
     void RefreshRegistrationChecks();
 
+    // 同步状态角标：总开关联动配置按钮置灰；点「配置…」打开角标配置窗口
+    void RefreshOverlayControls();
+    void OnOverlayConfigButton();
+
     // 「恢复/重置」按钮：弹选择框（仅恢复设置 / 清除所有痕迹），确认后执行
     void OnRestoreButton();
 
@@ -101,6 +105,12 @@ private:
     HWND  m_hCheckProxy = nullptr;
     HWND  m_hCheckListary = nullptr;
     HWND  m_hCheckShellWindow = nullptr;
+
+    // 同步状态角标（Overlay）：总开关复选框 + 自绘「配置…」按钮
+    HWND  m_hCheckOverlay = nullptr;
+    RECT  m_overlayConfigRect = {};
+    bool  m_hotOverlayConfig = false;
+    bool  m_pressedOverlayConfig = false;
 
     HFONT m_font        = nullptr;
     HFONT m_fontTitle   = nullptr;

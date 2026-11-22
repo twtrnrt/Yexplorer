@@ -348,6 +348,35 @@ bool Settings::Load()
         // Shell 窗口集成（实验性）：默认关
         m_shellWindowIntegration = json.value("shellWindowIntegration", false);
 
+        // ---------------- 同步状态角标（Overlay） ----------------
+        m_overlayEnabled = json.value("overlayEnabled", true);
+        m_overlaySets.clear();
+        if (json.contains("overlaySets") && json["overlaySets"].is_array())
+        {
+            for (const auto& one : json["overlaySets"])
+            {
+                if (!one.is_object())
+                {
+                    continue;
+                }
+                OverlaySet set;
+                set.id       = FromUtf8(one.value("id", ""));
+                set.name     = FromUtf8(one.value("name", ""));
+                set.allPaths = one.value("allPaths", true);
+                if (one.contains("paths") && one["paths"].is_array())
+                {
+                    for (const auto& p : one["paths"])
+                    {
+                        if (p.is_string())
+                        {
+                            set.paths.push_back(FromUtf8(p.get<std::string>()));
+                        }
+                    }
+                }
+                m_overlaySets.push_back(std::move(set));
+            }
+        }
+
         // ---------------- 「打开方式」账本 ----------------
         // 结构：{ ".txt": { "default": "…", "items": [ {...}, … ] }, … }
         if (json.contains("openWith") && json["openWith"].is_object())
@@ -647,6 +676,32 @@ bool Settings::Save()
     if (m_shellWindowIntegration)
     {
         json["shellWindowIntegration"] = true;
+    }
+
+    // ---------------- 同步状态角标（Overlay） ----------------
+    // 总开关默认开，只有关掉时才往文件里写 false，避免多余字段
+    if (!m_overlayEnabled)
+    {
+        json["overlayEnabled"] = false;
+    }
+    if (!m_overlaySets.empty())
+    {
+        nlohmann::json sets = nlohmann::json::array();
+        for (const OverlaySet& set : m_overlaySets)
+        {
+            nlohmann::json one;
+            one["id"]       = ToUtf8(set.id);
+            one["name"]     = ToUtf8(set.name);
+            one["allPaths"] = set.allPaths;
+            nlohmann::json paths = nlohmann::json::array();
+            for (const std::wstring& p : set.paths)
+            {
+                paths.push_back(ToUtf8(p));
+            }
+            one["paths"] = std::move(paths);
+            sets.push_back(std::move(one));
+        }
+        json["overlaySets"] = std::move(sets);
     }
 
     // ---------------- 「打开方式」账本 ----------------

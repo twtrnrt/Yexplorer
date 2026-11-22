@@ -28,6 +28,7 @@
 #include "shell/TraceCleanup.h"
 #include "ui/BackgroundHost.h"
 #include "ui/FlatDraw.h"
+#include "ui/OverlaySettingsDialog.h"
 
 namespace
 {
@@ -35,7 +36,7 @@ namespace
 const wchar_t* kClassName = L"FileExplorerSettingsDialog";
 
 const int kClientWidth  = 460;
-const int kClientHeight = 840;
+const int kClientHeight = 950;
 const int kPadding      = 24;
 
 // 控件 ID
@@ -48,6 +49,7 @@ const int kControlIdDefaultManager = 4006;
 const int kControlIdProxy          = 4007;
 const int kControlIdListary        = 4008;
 const int kControlIdStartupCombo   = 4018;
+const int kControlIdOverlayEnabled = 4019;
 const int kControlIdBackground     = 4014;
 const int kControlIdWinE           = 4015;
 const int kControlIdTabs           = 4016;
@@ -106,6 +108,11 @@ const wchar_t* kNoListaryHintText = L"未检测到 Listary，此项不可用。"
 
 const wchar_t* kShellWindowCheckText = L"允许其它程序定位到我打开的文件（实验性）";
 const wchar_t* kShellWindowHintText  = L"注册为 Shell 窗口；Listary 等工具能读到当前目录。";
+
+const wchar_t* kOverlayTitle       = L"同步状态角标";
+const wchar_t* kOverlayCheckText  = L"显示同步状态";
+const wchar_t* kOverlayHintText   = L"在文件 / 文件夹图标左下角叠加 Git、网盘等同步状态标记；可在配置里限定目录范围。";
+const wchar_t* kOverlayConfigText  = L"配置…";
 
 const wchar_t* kActionFailedText = L"上次操作失败，详情见日志文件。";
 
@@ -439,6 +446,11 @@ bool SettingsDialog::CreateDialogWindow()
     m_hCheckListary        = createCheck(kListaryCheckText, kControlIdListary, BS_AUTOCHECKBOX);
     m_hCheckShellWindow    = createCheck(kShellWindowCheckText, kControlIdShellWindow, BS_AUTOCHECKBOX);
 
+    // ---- 同步状态角标：总开关 ----
+    m_hCheckOverlay = createCheck(kOverlayCheckText, kControlIdOverlayEnabled, BS_AUTOCHECKBOX);
+    SetChecked(m_hCheckOverlay, core::Settings::Instance().OverlayEnabled());
+    RefreshOverlayControls();
+
     RefreshStartupControls();
     RefreshQuickStart();
     RefreshWindowModeChecks();
@@ -490,6 +502,22 @@ void SettingsDialog::Layout()
     place(m_hCheckProxy,          656);
     place(m_hCheckListary,        686);
     place(m_hCheckShellWindow,    716);
+
+    // 同步状态角标：总开关复选框（右侧给「配置…」按钮让位）
+    const int overlayBtnWidth  = Scale(88);
+    const int overlayBtnHeight = Scale(30);
+    const int overlayBtnGap     = Scale(12);
+    const int overlayBtnRight   = clientRect.right - padding;
+    m_overlayConfigRect.left   = overlayBtnRight - overlayBtnWidth;
+    m_overlayConfigRect.right   = overlayBtnRight;
+    m_overlayConfigRect.top    = Scale(810);
+    m_overlayConfigRect.bottom  = m_overlayConfigRect.top + overlayBtnHeight;
+
+    if (m_hCheckOverlay != nullptr)
+    {
+        ::MoveWindow(m_hCheckOverlay, padding, Scale(814),
+                     m_overlayConfigRect.left - padding - overlayBtnGap, rowHeight, TRUE);
+    }
 
     // 底部按钮：恢复/重置（左）+ 关闭（右）
     const int closeWidth   = Scale(88);
@@ -808,6 +836,24 @@ void SettingsDialog::RefreshRegistrationChecks()
     }
 }
 
+void SettingsDialog::RefreshOverlayControls()
+{
+    // 「配置…」是自绘按钮，可用状态在 Draw 里读总开关；这里触发一次重绘即可
+    ::InvalidateRect(m_hWnd, nullptr, FALSE);
+}
+
+void SettingsDialog::OnOverlayConfigButton()
+{
+    // 总开关关闭时按钮置灰，点击直接忽略
+    if (!core::Settings::Instance().OverlayEnabled())
+    {
+        return;
+    }
+
+    ui::OverlaySettingsDialog dialog(m_hWnd);
+    dialog.ShowModal();
+}
+
 bool SettingsDialog::RestoreSystemIntegration()
 {
     bool ok = true;
@@ -971,6 +1017,7 @@ void SettingsDialog::Draw(HDC dc)
     drawCard(352, 480, kQuickTitleShort);
     drawCard(492, 584, kWindowTitleShort);
     drawCard(596, 770, kSectionTitle);
+    drawCard(782, 884, kOverlayTitle);
 
     ::SelectObject(dc, m_font);
     ::SetTextColor(dc, kHintColor);
@@ -1005,7 +1052,19 @@ void SettingsDialog::Draw(HDC dc)
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
+    // 同步状态角标说明
+    RECT overlayHint = { Scale(kPadding), Scale(852),
+                         clientRect.right - Scale(kPadding), Scale(872) };
+    ::SetTextColor(dc, kHintColor);
+    ::DrawTextW(dc, kOverlayHintText, -1, &overlayHint,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
     ::SelectObject(dc, oldFont);
+
+    const bool overlayEnabled = core::Settings::Instance().OverlayEnabled();
+    DrawButton(dc, m_overlayConfigRect, kOverlayConfigText,
+               m_hotOverlayConfig, m_pressedOverlayConfig, overlayEnabled);
+
     DrawButton(dc, m_restoreRect, L"恢复/重置", m_hotRestore, m_pressedRestore, true);
     DrawButton(dc, m_closeRect, L"关闭", m_hotClose, m_pressedClose, true);
 }
@@ -1089,6 +1148,15 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         }
 
+        if (controlId == kControlIdOverlayEnabled)
+        {
+            const bool enabled = IsChecked(m_hCheckOverlay);
+            core::Settings::Instance().SetOverlayEnabled(enabled);
+            core::Settings::Instance().Save();
+            RefreshOverlayControls();
+            return 0;
+        }
+
         if (controlId == kControlIdClose)
         {
             ::DestroyWindow(hWnd);
@@ -1119,6 +1187,7 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         const bool hotClose   = (::PtInRect(&m_closeRect, pt) != FALSE);
         const bool hotRestore = (::PtInRect(&m_restoreRect, pt) != FALSE);
+        const bool hotOverlay = (::PtInRect(&m_overlayConfigRect, pt) != FALSE);
 
         if (hotClose != m_hotClose)
         {
@@ -1129,6 +1198,11 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         {
             m_hotRestore = hotRestore;
             ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
+        }
+        if (hotOverlay != m_hotOverlayConfig)
+        {
+            m_hotOverlayConfig = hotOverlay;
+            ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -1158,6 +1232,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedRestore = false;
             ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
         }
+        if (m_hotOverlayConfig || m_pressedOverlayConfig)
+        {
+            m_hotOverlayConfig    = false;
+            m_pressedOverlayConfig = false;
+            ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
+        }
         return 0;
 
     case WM_LBUTTONDOWN:
@@ -1176,6 +1256,14 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedRestore = true;
             ::SetCapture(hWnd);
             ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
+            return 0;
+        }
+        if (core::Settings::Instance().OverlayEnabled() &&
+            ::PtInRect(&m_overlayConfigRect, pt))
+        {
+            m_pressedOverlayConfig = true;
+            ::SetCapture(hWnd);
+            ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
             return 0;
         }
         return 0;
@@ -1209,6 +1297,18 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             }
             return 0;
         }
+        if (m_pressedOverlayConfig)
+        {
+            m_pressedOverlayConfig = false;
+            ::ReleaseCapture();
+            const bool inside = (::PtInRect(&m_overlayConfigRect, pt) != FALSE);
+            ::InvalidateRect(hWnd, &m_overlayConfigRect, FALSE);
+            if (inside)
+            {
+                OnOverlayConfigButton();
+            }
+            return 0;
+        }
         return 0;
     }
 
@@ -1238,6 +1338,7 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         m_hCheckProxy = nullptr;
         m_hCheckListary = nullptr;
         m_hCheckShellWindow = nullptr;
+        m_hCheckOverlay = nullptr;
         return 0;
 
     default:

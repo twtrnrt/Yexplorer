@@ -175,6 +175,7 @@
     <ClCompile Include="src\ui\OpenWithDialog.cpp" />
     <ClCompile Include="src\ui\PasteProgressBar.cpp" />
     <ClCompile Include="src\ui\SettingsDialog.cpp" />
+    <ClCompile Include="src\ui\OverlaySettingsDialog.cpp" />
     <ClCompile Include="src\ui\BatchRenameDialog.cpp" />
     <ClCompile Include="src\ui\BatchRenameRules.cpp" />
     <ClCompile Include="src\ui\CustomWindow.cpp" />
@@ -217,6 +218,7 @@
     <ClInclude Include="src\ui\OpenWithDialog.h" />
     <ClInclude Include="src\ui\PasteProgressBar.h" />
     <ClInclude Include="src\ui\SettingsDialog.h" />
+    <ClInclude Include="src\ui\OverlaySettingsDialog.h" />
     <ClInclude Include="src\ui\BatchRenameDialog.h" />
     <ClInclude Include="src\ui\BatchRenameRules.h" />
     <ClInclude Include="src\ui\CustomWindow.h" />
