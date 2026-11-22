@@ -452,10 +452,23 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
         return -1;
     }
 
-    const PCIDLIST_ABSOLUTE pidl = entry.pidl.empty()
-        ? nullptr
-        : reinterpret_cast<PCIDLIST_ABSOLUTE>(entry.pidl.data());
+    // 已有 PIDL 直接用；物理文件/文件夹条目 pidl 留空，这里按完整路径临时解析一个
+    // 绝对 PIDL。多数角标处理器（Git/SVN/网盘）主要依据 PIDL 判定，传 nullptr 会不命中。
+    PIDLIST_ABSOLUTE pidlFromPath = nullptr;
+    PCIDLIST_ABSOLUTE pidl = nullptr;
+    if (!entry.pidl.empty())
+    {
+        pidl = reinterpret_cast<PCIDLIST_ABSOLUTE>(entry.pidl.data());
+    }
+    else if (!entry.fullPath.empty())
+    {
+        if (::SHParseDisplayName(entry.fullPath.c_str(), nullptr, &pidlFromPath, 0, nullptr) == S_OK)
+        {
+            pidl = pidlFromPath;
+        }
+    }
 
+    int hit = -1;
     for (size_t i = 0; i < m_handlers.size(); ++i)
     {
         const OverlayHandler& set = m_handlers[i];
@@ -475,11 +488,17 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
         // S_OK = 命中；其它成功码（S_FALSE）或失败都按未命中处理
         if (hr == S_OK)
         {
-            return static_cast<int>(i);
+            hit = static_cast<int>(i);
+            break;
         }
     }
 
-    return -1;
+    if (pidlFromPath)
+    {
+        ::ILFree(pidlFromPath);
+    }
+
+    return hit;
 }
 
 void OverlayManager::Annotate(std::vector<ShellEntry>& entries)
@@ -547,11 +566,34 @@ HICON OverlayManager::GetOverlayIcon(size_t handlerIndex, int size)
 
     if (!set.iconFile.empty())
     {
-        SHFILEINFOW shfi = {};
-        const DWORD flags = SHGFI_ICON | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON);
-        if (::SHGetFileInfoW(set.iconFile.c_str(), 0, &shfi, sizeof(shfi), flags) != 0)
+        // GetOverlayInfo 给的 iconIndex 是图标在文件（DLL/EXE/ICO）内的资源索引，
+        // 用 ExtractIconEx 按索引取对应图标；取不到再退回文件默认图标兜底。
+        HICON hLarge = nullptr;
+        HICON hSmall = nullptr;
+        UINT  extracted = ::ExtractIconExW(set.iconFile.c_str(), set.iconIndex,
+                                          &hLarge, &hSmall, 1);
+        if (extracted > 0)
         {
-            icon = shfi.hIcon;
+            icon = large ? hLarge : hSmall;
+            // 释放没用到的另一尺寸
+            if (large && hSmall)
+            {
+                ::DestroyIcon(hSmall);
+            }
+            else if (!large && hLarge)
+            {
+                ::DestroyIcon(hLarge);
+            }
+        }
+
+        if (icon == nullptr)
+        {
+            SHFILEINFOW shfi = {};
+            const DWORD flags = SHGFI_ICON | (large ? SHGFI_LARGEICON : SHGFI_SMALLICON);
+            if (::SHGetFileInfoW(set.iconFile.c_str(), 0, &shfi, sizeof(shfi), flags) != 0)
+            {
+                icon = shfi.hIcon;
+            }
         }
     }
 
