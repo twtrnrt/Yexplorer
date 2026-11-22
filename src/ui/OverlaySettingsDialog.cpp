@@ -54,7 +54,10 @@ const COLORREF kRowTextColor     = RGB(31, 35, 40);
 const COLORREF kHintTextColor    = RGB(96, 103, 111);
 const COLORREF kFrameColor       = RGB(232, 235, 239);
 
-const wchar_t* const kHintLabel = L"配置各套同步角标的显示范围与优先级；勾选「全部路径」外的目录不会询问对应处理器。";
+const wchar_t* const kHintLabel = L"勾选「全部路径」外的目录不会询问对应处理器；白名单为空即不显示状态。";
+const wchar_t* const kPriLabel  = L"优先级";
+const wchar_t* const kNameLabel = L"应用名";
+const wchar_t* const kScopeLabel = L"显示范围";
 
 // 取路径里的文件夹名（chip 上显示用）；悬停 tooltip 仍给完整路径
 std::wstring ShortNameOf(const std::wstring& path)
@@ -355,11 +358,19 @@ void OverlaySettingsDialog::Draw(HDC dc)
     ::SetBkMode(dc, TRANSPARENT);
     ::SetTextColor(dc, kHintTextColor);
 
-    RECT hintRect = { Scale(kPadding), Scale(kPadding),
-                      clientRect.right - Scale(kPadding),
-                      Scale(kPadding) + Scale(kHintHeight) };
-    ::DrawTextW(dc, kHintLabel, -1, &hintRect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    // 列名（列表上方，按各列对齐）
+    const int priW  = static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 0, 0));
+    const int nameW = static_cast<int>(::SendMessageW(m_hList, LVM_GETCOLUMNWIDTH, 1, 0));
+
+    RECT priLabel  = { m_listRect.left + Scale(8), Scale(kPadding),
+                       m_listRect.left + priW, Scale(kPadding) + Scale(kHintHeight) };
+    RECT nameLabel = { m_listRect.left + priW + Scale(8), Scale(kPadding),
+                       m_listRect.left + priW + nameW, Scale(kPadding) + Scale(kHintHeight) };
+    RECT scopeLabel = { m_listRect.left + priW + nameW + Scale(8), Scale(kPadding),
+                        m_listRect.right - Scale(8), Scale(kPadding) + Scale(kHintHeight) };
+    ::DrawTextW(dc, kPriLabel,  -1, &priLabel,  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ::DrawTextW(dc, kNameLabel, -1, &nameLabel, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ::DrawTextW(dc, kScopeLabel, -1, &scopeLabel, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // 列表外那圈框
     HPEN pen = ::CreatePen(PS_SOLID, 1, kFrameColor);
@@ -369,6 +380,16 @@ void OverlaySettingsDialog::Draw(HDC dc)
     ::SelectObject(dc, oldBrush);
     ::SelectObject(dc, oldPen);
     ::DeleteObject(pen);
+
+    // 底部提示词：放在取消按钮左侧、靠右对齐
+    {
+        RECT hintRect = { Scale(kPadding), m_buttonRects[ButtonCancel].top,
+                          m_buttonRects[ButtonCancel].left - Scale(8),
+                          m_buttonRects[ButtonCancel].bottom };
+        ::SetTextColor(dc, kHintTextColor);
+        ::DrawTextW(dc, kHintLabel, -1, &hintRect,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 
     // 底部按钮
     DrawFlatButton(dc, m_buttonRects[ButtonCancel], L"取消", m_font, {});
@@ -460,13 +481,15 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
     const int scopeLeft = priWidth + nameWidth;
 
     // ---- 优先级列：序号 + ↑ / ↓ ----
-    const int btnSize = Scale(22);
-    const int btnGap  = Scale(4);
+    // 箭头按钮窄一半（宽 11），高度不变；两箭头中间间隔 2px
+    const int btnW    = Scale(11);
+    const int btnH    = Scale(22);
+    const int btnGap  = Scale(2);
 
-    RECT upRect = { Scale(34), centerY - btnSize / 2,
-                    Scale(34) + btnSize, centerY - btnSize / 2 + btnSize };
-    RECT downRect = { upRect.right + btnGap, centerY - btnSize / 2,
-                      upRect.right + btnGap + btnSize, centerY - btnSize / 2 + btnSize };
+    RECT upRect = { Scale(34), centerY - btnH / 2,
+                    Scale(34) + btnW, centerY - btnH / 2 + btnH };
+    RECT downRect = { upRect.right + btnGap, centerY - btnH / 2,
+                      upRect.right + btnGap + btnW, centerY - btnH / 2 + btnH };
     hit.up   = upRect;
     hit.down = downRect;
 
@@ -514,6 +537,18 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
     const int addLeft    = scopeRight - addSize;
 
     hit.chips.clear();
+
+    // 不勾全部路径、又没选任何文件夹 = 这套禁用，提示「不显示状态」
+    if (set.paths.empty())
+    {
+        hit.add = RECT{};
+        RECT emptyRect = { cursorX, rowRect.top, scopeRight, rowRect.bottom };
+        ::SetTextColor(dc, kHintTextColor);
+        ::DrawTextW(dc, L"不显示状态", -1, &emptyRect,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        return;
+    }
+
     hit.add = { addLeft, centerY - addSize / 2, addLeft + addSize, centerY - addSize / 2 + addSize };
 
     HDC measureDc = ::GetDC(m_hWnd);
