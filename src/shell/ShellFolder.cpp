@@ -297,7 +297,21 @@ bool IsDesktopSystemItem(const std::wstring& fullPath)
         return (fullPath == pubDesk);
     }
 
-    return true;
+    // 其余真实磁盘路径里，只有系统已知目录入口本身（下载 / 文档 / 图片 / 音乐 / 视频，
+    // 桌面上面已单独判过）才算系统项；它们是 Shell 重定向的已知文件夹，位置记在用户
+    // 配置里，需要在主文件夹里单独提到前面、且不允许剪切/删除。
+    //
+    // 注意这里是「路径精确等于已知目录本身」，不是「落在目录下面」：已知目录里的
+    // 子文件夹/子文件属于普通项，不该跟着被提到前面。
+    std::wstring knownFolderName;
+    if (shell::KnownFolderDisplayName(fullPath, knownFolderName))
+    {
+        return true;
+    }
+
+    // 其它真实磁盘路径（开发目录如 C:\git\…、dist 安装包、网络盘 Z:\、AppData 工作区、
+    // 盘根目录等）一律按普通项处理，不再兜底算系统项。
+    return false;
 }
 
 // ----------------------------------------------------------------------------
