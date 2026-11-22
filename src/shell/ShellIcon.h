@@ -25,6 +25,7 @@
 #include <wil/com.h>
 
 #include <string>
+#include <map>
 #include <unordered_map>
 
 namespace shell
@@ -137,12 +138,24 @@ public:
     // ------------------------------------------------------------------
     int GetDimmedIconIndex(int originalIndex, IconSize size = IconSize::Small);
 
+    // ------------------------------------------------------------------
+    // 取「主图标 + overlay 小角标」合成后的图标索引。
+    //
+    // overlay 角标贴在主图标左下角，边长约为主图标 1/4（对齐原生经验值）。
+    // overlay 传 nullptr 时原样返回 baseIndex。合成结果按「主索引 + overlay 图标」
+    // 组合缓存，不重复合成；失败返回原始索引。
+    // ------------------------------------------------------------------
+    int GetCompositeIconIndex(int baseIndex, HICON overlay, IconSize size = IconSize::Small);
+
 private:
     // 从名称里提取扩展名（小写，含点号，如 ".dll"；没有扩展名返回空串）
     static std::wstring ExtractExtension(const std::wstring& name);
 
     // 把图标做成 50% 透明的版本；失败返回 nullptr
     HICON CreateDimmedIcon(HICON source, int size);
+
+    // 把主图标与 overlay 小角标合成一张图；失败返回 nullptr
+    HICON CreateCompositeIcon(HICON base, HICON overlay, int size);
 
 private:
     wil::com_ptr<IImageList> m_systemImageList;       // 系统小图标图像列表（16px）
@@ -159,6 +172,8 @@ private:
     std::unordered_map<std::wstring, int> m_largePathIconCache;       // 完整路径 → 大图标索引
     std::unordered_map<int, int>          m_dimmedIconCache;          // 小图标原索引 → 半透明索引
     std::unordered_map<int, int>          m_largeDimmedIconCache;     // 大图标原索引 → 半透明索引
+    std::map<std::pair<int, const void*>, int> m_overlayCompositeCache;      // 小：(主索引, overlay) → 合成索引
+    std::map<std::pair<int, const void*>, int> m_largeOverlayCompositeCache; // 大：同上
 
     int  m_folderIconIndex      = 0;   // 文件夹统一小图标
     int  m_largeFolderIconIndex = 0;   // 文件夹统一大图标

@@ -23,6 +23,7 @@
 #include "shell/ShellClipboard.h"
 #include "shell/ShellDragDrop.h"
 #include "shell/ShellOperations.h"
+#include "shell/ShellOverlay.h"
 
 #include <shellapi.h>   // ShellExecuteW
 #include <shlobj.h>     // SHCreateItemFromParsingName / SHGetKnownFolderPath
@@ -3793,6 +3794,15 @@ void MainWindow::StartEnumeration(const std::wstring& path)
         auto startTime = std::chrono::steady_clock::now();
 
         auto enumResult = shell::EnumerateFolder(path, &m_enumToken);
+
+        // 同步状态角标判定：EnumerateFolder 返回前已配对 CoUninitialize，这里重新
+        // 初始化 STA 再问处理器；结果写进 entries.overlayIndex，UI 线程只取图标合成。
+        HRESULT overlayInit = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        shell::OverlayManager::Instance().Annotate(enumResult.entries);
+        if (overlayInit == S_OK || overlayInit == S_FALSE)
+        {
+            ::CoUninitialize();
+        }
 
         auto endTime = std::chrono::steady_clock::now();
         double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();

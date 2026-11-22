@@ -153,6 +153,7 @@
     <ClCompile Include="src\shell\ContainerExtract.cpp" />
     <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\shell\ShellIcon.cpp" />
+    <ClCompile Include="src\shell\ShellOverlay.cpp" />
     <ClCompile Include="src\shell\ShellClipboard.cpp" />
     <ClCompile Include="src\shell\ShellDragDrop.cpp" />
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
@@ -201,6 +202,7 @@
     <ClInclude Include="src\shell\ContainerExtract.h" />
     <ClInclude Include="src\shell\ShellFolder.h" />
     <ClInclude Include="src\shell\ShellIcon.h" />
+    <ClInclude Include="src\shell\ShellOverlay.h" />
     <ClInclude Include="src\shell\ShellClipboard.h" />
     <ClInclude Include="src\shell\ShellDragDrop.h" />
     <ClInclude Include="src\shell\ShellOpenWith.h" />

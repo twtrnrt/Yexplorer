@@ -453,4 +453,132 @@ int IconCache::GetDimmedIconIndex(int originalIndex, IconSize size)
     return newIndex;
 }
 
+// ============================================================================
+// 主图标 + overlay 角标合成
+// ============================================================================
+
+HICON IconCache::CreateCompositeIcon(HICON base, HICON overlay, int size)
+{
+    if (base == nullptr || overlay == nullptr || size <= 0)
+    {
+        return nullptr;
+    }
+
+    // 32 位带 alpha 的位图，保住主图标与角标的透明边缘
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth       = size;
+    bitmapInfo.bmiHeader.biHeight      = -size;
+    bitmapInfo.bmiHeader.biPlanes      = 1;
+    bitmapInfo.bmiHeader.biBitCount    = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void*    pixels   = nullptr;
+    HDC      screenDc = ::GetDC(nullptr);
+    HBITMAP  bitmap   = ::CreateDIBSection(screenDc, &bitmapInfo, DIB_RGB_COLORS, &pixels, nullptr, 0);
+
+    if (bitmap == nullptr || pixels == nullptr)
+    {
+        if (bitmap != nullptr)
+        {
+            ::DeleteObject(bitmap);
+        }
+        ::ReleaseDC(nullptr, screenDc);
+        return nullptr;
+    }
+
+    HDC     memoryDc  = ::CreateCompatibleDC(screenDc);
+    HBITMAP oldBitmap = static_cast<HBITMAP>(::SelectObject(memoryDc, bitmap));
+
+    // 先画主图标（满幅）
+    ::DrawIconEx(memoryDc, 0, 0, base, size, size, 0, nullptr, DI_NORMAL);
+
+    // overlay 角标贴左下角，边长约为主图标 1/4（对齐原生经验值）
+    int overlaySize = size / 4;
+    if (overlaySize < 8)
+    {
+        overlaySize = 8;
+    }
+    const int overlayX = size - overlaySize;
+    const int overlayY = size - overlaySize;
+    ::DrawIconEx(memoryDc, overlayX, overlayY, overlay, overlaySize, overlaySize,
+                 0, nullptr, DI_NORMAL);
+
+    ::SelectObject(memoryDc, oldBitmap);
+    ::DeleteDC(memoryDc);
+    ::ReleaseDC(nullptr, screenDc);
+
+    ICONINFO iconInfo = {};
+    iconInfo.fIcon    = TRUE;
+    iconInfo.hbmColor = bitmap;
+    iconInfo.hbmMask  = ::CreateBitmap(size, size, 1, 1, nullptr);
+
+    HICON result = ::CreateIconIndirect(&iconInfo);
+
+    if (iconInfo.hbmMask != nullptr)
+    {
+        ::DeleteObject(iconInfo.hbmMask);
+    }
+    ::DeleteObject(bitmap);
+
+    return result;
+}
+
+int IconCache::GetCompositeIconIndex(int baseIndex, HICON overlay, IconSize size)
+{
+    if (overlay == nullptr || baseIndex < 0)
+    {
+        return baseIndex;
+    }
+
+    const bool large = (size != IconSize::Small);
+
+    HIMAGELIST targetList = large ? m_hLargeImageList : m_hImageList;
+    auto&      compCache  = large ? m_largeOverlayCompositeCache : m_overlayCompositeCache;
+
+    if (!m_initialized || targetList == nullptr)
+    {
+        return baseIndex;
+    }
+
+    const auto key = std::make_pair(baseIndex, static_cast<const void*>(overlay));
+    auto cached = compCache.find(key);
+    if (cached != compCache.end())
+    {
+        return cached->second;
+    }
+
+    int sizeX = large ? 48 : 16;
+    int sizeY = sizeX;
+    ::ImageList_GetIconSize(targetList, &sizeX, &sizeY);
+
+    // baseIndex 可能是系统原始索引，也可能是已追加进列表的淡化索引，
+    // 统一从目标列表取图标。
+    HICON baseIcon = ::ImageList_GetIcon(targetList, baseIndex, ILD_TRANSPARENT);
+
+    if (baseIcon == nullptr)
+    {
+        return baseIndex;
+    }
+
+    HICON composite = CreateCompositeIcon(baseIcon, overlay, sizeX);
+    ::DestroyIcon(baseIcon);
+
+    if (composite == nullptr)
+    {
+        return baseIndex;
+    }
+
+    int newIndex = ::ImageList_ReplaceIcon(targetList, -1, composite);
+    ::DestroyIcon(composite);
+
+    if (newIndex < 0)
+    {
+        return baseIndex;
+    }
+
+    compCache[key] = newIndex;
+    return newIndex;
+}
+
 } // namespace shell

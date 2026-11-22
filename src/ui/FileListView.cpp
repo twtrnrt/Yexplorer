@@ -11,6 +11,7 @@
 #include "FileListView.h"
 
 #include "shell/ShellDragDrop.h"
+#include "shell/ShellOverlay.h"
 #include "core/Format.h"
 #include "core/Logger.h"
 #include "core/PinyinInitials.h"   // 汉字 → 拼音首字母（按字母跳转时匹配中文名）
@@ -693,6 +694,15 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
         (IsCutPath(entry.fullPath) || entry.isHidden || entry.isSystemFile))
     {
         iconIndex = m_iconCache->GetDimmedIconIndex(iconIndex, iconSize);
+    }
+
+    // 同步状态角标：叠在淡化层之上。overlayIndex 由后台判定写入，-1 表示未命中。
+    if (entry.overlayIndex >= 0)
+    {
+        const int overlayPixel = (iconSize == shell::IconCache::IconSize::Small) ? 16 : 48;
+        HICON overlayIcon = shell::OverlayManager::Instance().GetOverlayIcon(
+            static_cast<size_t>(entry.overlayIndex), overlayPixel);
+        iconIndex = m_iconCache->GetCompositeIconIndex(iconIndex, overlayIcon, iconSize);
     }
 
     return iconIndex;
