@@ -261,9 +261,9 @@ static uint64_t FileTimeValue(const FILETIME& time){
 }
 
 // 排序规则
-//   系统项永远排前面（「主文件夹」里先排此电脑/桌面/文档这些系统入口，
-//   再排桌面上的文件，跟资源管理器一致）
-//   文件夹永远排前面（和资源管理器一致，不受点哪一列影响）
+//   层级（升序）：系统项 → 文件夹 → 文件；降序整体镜像反过来：文件 → 文件夹 → 系统项。
+//   也就是说「系统项优先」「文件夹优先」这两条分组规则也随升降序反转，
+//   降序结果就是升序结果的完整逆序。
 //   column：0 名称 / 1 修改日期 / 2 类型 / 3 大小
 //   ascending：true 从小到大
 static bool CompareEntries(const shell::ShellEntry& left,
@@ -271,15 +271,16 @@ static bool CompareEntries(const shell::ShellEntry& left,
                            int  column,
                            bool ascending)
 {
-    // 系统项优先：这一条不受"点哪一列"影响，也不管是文件夹还是文件
+    // 系统项优先：升序系统项在前；降序反过来，非系统（桌面）项在前。
     if (left.isSystemItem != right.isSystemItem)
     {
-        return left.isSystemItem;
+        return ascending ? left.isSystemItem : !left.isSystemItem;
     }
 
+    // 文件夹优先：升序文件夹在前；降序反过来，文件在前。
     if (left.isFolder != right.isFolder)
     {
-        return left.isFolder;
+        return ascending ? left.isFolder : !left.isFolder;
     }
 
     // 驱动器按盘符字母排（C、D、E…），不按显示名：
