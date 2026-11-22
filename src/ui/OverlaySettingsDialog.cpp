@@ -221,18 +221,20 @@ void OverlaySettingsDialog::CreateControls()
         ::SetWindowSubclass(m_hList, &OverlaySettingsDialog::ListSubclassProc, 1,
                             reinterpret_cast<DWORD_PTR>(this));
 
-        // 原生 tooltip 控件：悬停 chip 时显示完整路径；工具区先按整个列表登记，
-        // 命中具体 chip 后由 UpdateTooltip 用 TTM_SETTOOLINFO 收窄到对应矩形
+        // 原生 tooltip 控件：悬停 chip 时显示完整路径。
+        // 用 track 模式由我们的鼠标移动消息手动激活/隐藏（不挂 TTF_SUBCLASS，
+        // 避免依赖系统自动跟踪导致要单击才弹出）。
         m_hTooltip = ::CreateWindowExW(0, TOOLTIPS_CLASSW, nullptr, WS_POPUP,
                                        0, 0, 0, 0, m_hWnd, nullptr,
                                        ::GetModuleHandleW(nullptr), nullptr);
         if (m_hTooltip != nullptr)
         {
             ::SendMessageW(m_hTooltip, TTM_SETMAXTIPWIDTH, 0, Scale(320));
+            ::SendMessageW(m_hTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 0);
 
             TOOLINFOW ti = {};
             ti.cbSize   = sizeof(ti);
-            ti.uFlags   = TTF_SUBCLASS;
+            ti.uFlags   = 0;
             ti.hwnd     = m_hList;
             ti.uId      = 1;
             ti.lpszText = const_cast<LPWSTR>(L"");
@@ -793,7 +795,7 @@ void OverlaySettingsDialog::UpdateRowHover(int x, int y)
     UpdateTooltip(hotRow, hotChip);
 }
 
-// 按当前命中的 chip 刷新 tooltip 文本与区域；未命中则隐藏
+// 按当前命中的 chip 刷新 tooltip 文本与位置；未命中则隐藏（track 手动模式）
 void OverlaySettingsDialog::UpdateTooltip(int row, int chip)
 {
     if (m_hTooltip == nullptr)
@@ -801,26 +803,53 @@ void OverlaySettingsDialog::UpdateTooltip(int row, int chip)
         return;
     }
 
+    TOOLINFOW ti = {};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd   = m_hList;
+    ti.uId    = 1;
+
+    // 未命中：若 tooltip 正在显示则隐藏
     if (row < 0 || chip < 0 ||
         row >= static_cast<int>(m_sets.size()) ||
         chip >= static_cast<int>(m_sets[row].paths.size()))
     {
-        ::SendMessageW(m_hTooltip, TTM_ACTIVATE, FALSE, 0);
+        if (m_tipActive)
+        {
+            ::SendMessageW(m_hTooltip, TTM_TRACKACTIVATE, FALSE,
+                           reinterpret_cast<LPARAM>(&ti));
+            m_tipActive = false;
+        }
+        m_tipRow = -1;
+        m_tipChip = -1;
         m_tipText.clear();
         return;
     }
 
     m_tipText = m_sets[row].paths[chip];
-
-    TOOLINFOW ti = {};
-    ti.cbSize   = sizeof(ti);
-    ti.uFlags   = TTF_SUBCLASS;
-    ti.hwnd     = m_hList;
-    ti.uId      = 1;
     ti.rect     = m_hits[row].chips[chip].chip;
     ti.lpszText = const_cast<LPWSTR>(m_tipText.c_str());
-    ::SendMessageW(m_hTooltip, TTM_SETTOOLINFOW, 0, reinterpret_cast<LPARAM>(&ti));
-    ::SendMessageW(m_hTooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+
+    const bool same = (m_tipRow == row && m_tipChip == chip);
+    if (!same)
+    {
+        m_tipRow = row;
+        m_tipChip = chip;
+        ::SendMessageW(m_hTooltip, TTM_SETTOOLINFOW, 0, reinterpret_cast<LPARAM>(&ti));
+        ::SendMessageW(m_hTooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+
+        // 首次进入该 chip：手动激活 tooltip（track 模式不经过系统初始延迟）
+        if (!m_tipActive)
+        {
+            ::SendMessageW(m_hTooltip, TTM_TRACKACTIVATE, TRUE,
+                           reinterpret_cast<LPARAM>(&ti));
+            m_tipActive = true;
+        }
+    }
+
+    // 定位到 chip 下沿（列表客户区坐标转屏幕坐标）
+    POINT pt = { ti.rect.left, ti.rect.bottom };
+    ::ClientToScreen(m_hList, &pt);
+    ::SendMessageW(m_hTooltip, TTM_TRACKPOSITION, 0, MAKELPARAM(pt.x, pt.y));
 }
 
 // 列表控件子类过程：转发鼠标移动 / 离开做悬停高亮，其余交给默认处理

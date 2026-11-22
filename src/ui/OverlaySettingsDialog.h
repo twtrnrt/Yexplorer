@@ -101,6 +101,9 @@ private:
     // chip 完整路径 tooltip（原生 ToolTip 控件，悬停 chip 时弹出）
     HWND  m_hTooltip = nullptr;
     std::wstring m_tipText;                // 当前 tooltip 文本（完整路径）
+    bool  m_tipActive = false;             // track 模式下 tooltip 当前是否已显示
+    int   m_tipRow = -1;                   // 当前 tooltip 对应的行（-1 = 无）
+    int   m_tipChip = -1;                  // 当前 tooltip 对应的 chip 序号
     void UpdateTooltip(int row, int chip); // 按命中的 chip 刷新/隐藏 tooltip
 
     static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
