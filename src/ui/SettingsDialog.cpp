@@ -29,6 +29,7 @@
 #include "ui/BackgroundHost.h"
 #include "ui/FlatDraw.h"
 #include "ui/OverlaySettingsDialog.h"
+#include "shell/ShellOverlay.h"
 
 namespace
 {
@@ -851,7 +852,12 @@ void SettingsDialog::OnOverlayConfigButton()
     }
 
     ui::OverlaySettingsDialog dialog(m_hWnd);
-    dialog.ShowModal();
+    if (dialog.ShowModal())
+    {
+        // 配置已写回：释放旧处理器与判定缓存，下次枚举按新配置重建
+        shell::OverlayManager::Instance().Shutdown();
+        m_overlayConfigDirty = true;
+    }
 }
 
 bool SettingsDialog::RestoreSystemIntegration()
@@ -1153,6 +1159,8 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             const bool enabled = IsChecked(m_hCheckOverlay);
             core::Settings::Instance().SetOverlayEnabled(enabled);
             core::Settings::Instance().Save();
+            // 开关变化：释放旧处理器与缓存，下次枚举按新状态重建
+            shell::OverlayManager::Instance().Shutdown();
             RefreshOverlayControls();
             return 0;
         }

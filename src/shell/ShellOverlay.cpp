@@ -126,6 +126,103 @@ std::wstring ReadClsidDllPath(const CLSID& clsid)
     return dll;
 }
 
+// 注册表扫描出的原始处理器项（尚未实例化 COM）
+struct RawHandler
+{
+    std::wstring regName;      // 注册表子键名
+    CLSID        clsid = {};
+    std::wstring dll;          // InprocServer32 DLL 路径（归并同族用）
+    std::wstring setId;       // 归并套标识（DLL 路径小写）
+    std::wstring displayName; // 套显示名
+};
+
+// 读 HKLM/HKCU 注册表，按名排序、前 15 上限，查 DLL 归并键；纯注册表操作，不碰 COM
+std::vector<RawHandler> ScanRegistry()
+{
+    struct RegEntry
+    {
+        std::wstring regName;
+        CLSID        clsid = {};
+    };
+
+    std::vector<RegEntry> regEntries;
+
+    const HKEY roots[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+    for (HKEY root : roots)
+    {
+        HKEY key = nullptr;
+        if (::RegOpenKeyExW(root, kOverlayRegPath, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        {
+            continue;
+        }
+
+        for (DWORD index = 0;; ++index)
+        {
+            wchar_t name[512] = {};
+            DWORD   nameLength = ARRAYSIZE(name);
+            if (::RegEnumKeyExW(key, index, name, &nameLength, nullptr, nullptr,
+                                nullptr, nullptr) != ERROR_SUCCESS)
+            {
+                break;
+            }
+
+            // 默认值 = 处理器 CLSID 字符串
+            wchar_t clsidStr[128] = {};
+            DWORD   size = sizeof(clsidStr);
+            DWORD   type = 0;
+            if (::RegQueryValueExW(key, nullptr, nullptr, &type,
+                                   reinterpret_cast<LPBYTE>(clsidStr), &size) != ERROR_SUCCESS ||
+                type != REG_SZ)
+            {
+                continue;
+            }
+
+            CLSID clsid = {};
+            if (::CLSIDFromString(clsidStr, &clsid) != S_OK)
+            {
+                continue;
+            }
+
+            regEntries.push_back(RegEntry{ name, clsid });
+        }
+
+        ::RegCloseKey(key);
+    }
+
+    // 按注册名字典序排序：前导空格越多 ASCII 越小、排越前（原生调顺序惯例）
+    std::sort(regEntries.begin(), regEntries.end(),
+              [](const RegEntry& a, const RegEntry& b) { return a.regName < b.regName; });
+
+    // 系统只取前 15 个
+    if (regEntries.size() > kMaxOverlayHandlers)
+    {
+        regEntries.resize(kMaxOverlayHandlers);
+    }
+
+    std::vector<RawHandler> raw;
+    for (const RegEntry& entry : regEntries)
+    {
+        RawHandler rawItem;
+        rawItem.regName = entry.regName;
+        rawItem.clsid   = entry.clsid;
+        rawItem.dll     = ReadClsidDllPath(entry.clsid);
+        rawItem.setId   = ToLower(rawItem.dll);
+
+        if (!rawItem.dll.empty())
+        {
+            rawItem.displayName = StripExtension(BaseName(rawItem.dll));
+        }
+        if (rawItem.displayName.empty())
+        {
+            rawItem.displayName = entry.regName;
+        }
+
+        raw.push_back(std::move(rawItem));
+    }
+
+    return raw;
+}
+
 } // namespace
 
 // ============================================================================
@@ -195,71 +292,10 @@ void OverlayManager::EnsureLoaded()
 
 void OverlayManager::EnumerateHandlers()
 {
-    struct RawEntry
+    const std::vector<RawHandler> raw = ScanRegistry();
+
+    for (const RawHandler& entry : raw)
     {
-        std::wstring regName;
-        CLSID        clsid = {};
-    };
-
-    std::vector<RawEntry> raw;
-
-    const HKEY roots[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
-    for (HKEY root : roots)
-    {
-        HKEY key = nullptr;
-        if (::RegOpenKeyExW(root, kOverlayRegPath, 0, KEY_READ, &key) != ERROR_SUCCESS)
-        {
-            continue;
-        }
-
-        for (DWORD index = 0;; ++index)
-        {
-            wchar_t name[512] = {};
-            DWORD   nameLength = ARRAYSIZE(name);
-            if (::RegEnumKeyExW(key, index, name, &nameLength, nullptr, nullptr,
-                                nullptr, nullptr) != ERROR_SUCCESS)
-            {
-                break;
-            }
-
-            // 默认值 = 处理器 CLSID 字符串
-            wchar_t clsidStr[128] = {};
-            DWORD   size = sizeof(clsidStr);
-            DWORD   type = 0;
-            if (::RegQueryValueExW(key, nullptr, nullptr, &type,
-                                   reinterpret_cast<LPBYTE>(clsidStr), &size) != ERROR_SUCCESS ||
-                type != REG_SZ)
-            {
-                continue;
-            }
-
-            CLSID clsid = {};
-            if (::CLSIDFromString(clsidStr, &clsid) != S_OK)
-            {
-                continue;
-            }
-
-            raw.push_back(RawEntry{ name, clsid });
-        }
-
-        ::RegCloseKey(key);
-    }
-
-    // 按注册名字典序排序：前导空格越多 ASCII 越小、排越前（原生调顺序惯例）
-    std::sort(raw.begin(), raw.end(),
-              [](const RawEntry& a, const RawEntry& b) { return a.regName < b.regName; });
-
-    // 系统只取前 15 个
-    if (raw.size() > kMaxOverlayHandlers)
-    {
-        raw.resize(kMaxOverlayHandlers);
-    }
-
-    for (const RawEntry& entry : raw)
-    {
-        std::wstring dll = ReadClsidDllPath(entry.clsid);
-        const std::wstring setId = ToLower(dll);
-
         wil::com_ptr<IOverlayIdentifier> handler;
         HRESULT hr = ::CoCreateInstance(entry.clsid, nullptr, CLSCTX_INPROC_SERVER,
                                         IID_IShellIconOverlayIdentifier,
@@ -272,19 +308,10 @@ void OverlayManager::EnumerateHandlers()
         }
 
         OverlayHandler info;
-        info.regName   = entry.regName;
-        info.setId     = setId;
-        info.handler   = handler;
-
-        // 套显示名：优先用 DLL 文件名去扩展名；取不到退回注册名
-        if (!dll.empty())
-        {
-            info.displayName = StripExtension(BaseName(dll));
-        }
-        if (info.displayName.empty())
-        {
-            info.displayName = entry.regName;
-        }
+        info.regName     = entry.regName;
+        info.setId       = entry.setId;
+        info.displayName = entry.displayName;
+        info.handler     = handler;
 
         // 取 overlay 图标信息（图标文件 + 资源索引）
         wchar_t iconFile[MAX_PATH] = {};
@@ -330,6 +357,62 @@ void OverlayManager::EnumerateHandlers()
     m_handlers.swap(ordered);
 
     Logger::Info(L"角标处理器枚举完成，共 " + std::to_wstring(m_handlers.size()) + L" 个");
+}
+
+std::vector<core::OverlaySet> OverlayManager::ListSets()
+{
+    const std::vector<RawHandler> raw = ScanRegistry();
+
+    // 按 setId 归并去重，保持注册表优先级顺序
+    std::vector<core::OverlaySet> sets;
+    std::unordered_map<std::wstring, bool> seen;
+    for (const RawHandler& entry : raw)
+    {
+        if (seen.count(entry.setId))
+        {
+            continue;
+        }
+        seen[entry.setId] = true;
+
+        core::OverlaySet set;
+        set.id        = entry.setId;
+        set.name      = entry.displayName;
+        set.allPaths  = true;
+        sets.push_back(std::move(set));
+    }
+
+    // 套用已存配置的名称 / 范围，并按配置出现顺序排前；注册表新发现的追加末尾
+    const auto& saved = core::Settings::Instance().OverlaySets();
+    std::vector<core::OverlaySet> ordered;
+    std::unordered_map<std::wstring, bool> used;
+
+    for (const core::OverlaySet& savedSet : saved)
+    {
+        const std::wstring key = ToLower(savedSet.id);
+        for (auto& set : sets)
+        {
+            if (set.id == key)
+            {
+                if (!savedSet.name.empty())
+                {
+                    set.name = savedSet.name;
+                }
+                set.allPaths = savedSet.allPaths;
+                set.paths    = savedSet.paths;
+                ordered.push_back(std::move(set));
+                used[key] = true;
+            }
+        }
+    }
+    for (auto& set : sets)
+    {
+        if (!used.count(set.id))
+        {
+            ordered.push_back(std::move(set));
+        }
+    }
+
+    return ordered;
 }
 
 // ============================================================================

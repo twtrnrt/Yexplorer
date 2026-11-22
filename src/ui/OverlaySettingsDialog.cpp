@@ -4,13 +4,16 @@
 //
 // 「同步状态角标」配置窗口的实现。界面说明见 OverlaySettingsDialog.h。
 //
-// 一期界面阶段：套列表先用占位数据，不接真实注册表枚举；勾选 / ↑↓ / chip 增删 /
-// 悬停路径先做通，界面定稿后再把数据源换成 ShellOverlay 管理器。
+// 「同步状态角标」配置窗口的实现。界面说明见 OverlaySettingsDialog.h。
+//
+// 套列表来自 ShellOverlay 管理器的注册表枚举（同族归并），已存配置的名称 / 范围
+// 会合并回去；勾选 / ↑↓ / chip 增删 / 悬停路径在此编辑，确定才写回。
 // ============================================================================
 
 #include "ui/OverlaySettingsDialog.h"
 
 #include "core/Logger.h"
+#include "shell/ShellOverlay.h"
 #include "ui/FlatDraw.h"
 
 #include <windows.h>
@@ -114,11 +117,12 @@ bool OverlaySettingsDialog::EnsureClassRegistered()
 
 bool OverlaySettingsDialog::ShowModal()
 {
-    // 从配置拷一份工作副本（改完点确定才写回，取消丢弃）
-    m_sets = core::Settings::Instance().OverlaySets();
+    // 从注册表枚举归并出真实套列表，并合并已存配置的名称 / 范围；
+    // 注册表一台处理器都没有时，退回已存配置（可能为空）。
+    m_sets = shell::OverlayManager::Instance().ListSets();
     if (m_sets.empty())
     {
-        FillPlaceholderSets();
+        m_sets = core::Settings::Instance().OverlaySets();
     }
     m_confirmed = false;
 
@@ -135,31 +139,6 @@ bool OverlaySettingsDialog::ShowModal()
     }
 
     return m_confirmed;
-}
-
-void OverlaySettingsDialog::FillPlaceholderSets()
-{
-    // 一期界面占位：后续接入注册表枚举后，这里换成真实处理器列表
-    m_sets.clear();
-
-    core::OverlaySet tortoise;
-    tortoise.id    = L"tortoise";
-    tortoise.name  = L"Tortoise（Git / SVN）";
-    tortoise.allPaths = true;
-    m_sets.push_back(std::move(tortoise));
-
-    core::OverlaySet oneDrive;
-    oneDrive.id    = L"onedrive";
-    oneDrive.name  = L"OneDrive";
-    oneDrive.allPaths = false;
-    oneDrive.paths  = { L"C:\\git" };
-    m_sets.push_back(std::move(oneDrive));
-
-    core::OverlaySet netDisk;
-    netDisk.id    = L"netdisk";
-    netDisk.name  = L"网盘同步";
-    netDisk.allPaths = false;
-    m_sets.push_back(std::move(netDisk));
 }
 
 void OverlaySettingsDialog::SaveNow()

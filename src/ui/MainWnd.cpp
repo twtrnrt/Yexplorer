@@ -2160,6 +2160,7 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
             const core::Settings& settings = core::Settings::Instance();
             const bool wasHidden = settings.ShowHiddenFiles();
             const bool wasSystem = settings.ShowSystemFiles();
+            const bool wasOverlay = settings.OverlayEnabled();
 
             SettingsDialog dialog;
             dialog.ShowModal(m_hWnd);
@@ -2169,7 +2170,9 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
             ApplyWindowModeFromSettings();
 
             if (wasHidden != settings.ShowHiddenFiles() ||
-                wasSystem != settings.ShowSystemFiles())
+                wasSystem != settings.ShowSystemFiles() ||
+                wasOverlay != settings.OverlayEnabled() ||
+                dialog.OverlayConfigDirty())
             {
                 RefreshCurrentFolder();
             }

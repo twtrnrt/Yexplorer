@@ -35,6 +35,9 @@ public:
 
     bool ShowModal(HWND owner);
 
+    // 角标配置弹窗点过确定（套范围 / 顺序有改动），主窗口关闭设置后据此刷新当前目录
+    bool OverlayConfigDirty() const { return m_overlayConfigDirty; }
+
 private:
     LRESULT HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
@@ -111,6 +114,7 @@ private:
     RECT  m_overlayConfigRect = {};
     bool  m_hotOverlayConfig = false;
     bool  m_pressedOverlayConfig = false;
+    bool  m_overlayConfigDirty = false;
 
     HFONT m_font        = nullptr;
     HFONT m_fontTitle   = nullptr;

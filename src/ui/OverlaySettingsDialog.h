@@ -68,9 +68,6 @@ private:
     // 工作副本 → 列表控件
     void ReloadList();
 
-    // 占位套：配置里还没有任何套时，先填几条示例供界面确认
-    void FillPlaceholderSets();
-
     // 行内可点区域（Layout / DrawRow 算好，NM_CLICK 命中用）
     struct RowHit
     {

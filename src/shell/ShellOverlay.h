@@ -28,6 +28,7 @@
 #include <unordered_map>
 
 #include "ShellFolder.h"       // ShellEntry
+#include "../core/Settings.h"  // core::OverlaySet
 
 namespace shell
 {
@@ -96,6 +97,12 @@ public:
 
     // 启用处理器列表（按优先级 + 配置顺序），供合成阶段取 overlay 图标
     const std::vector<OverlayHandler>& Handlers() const { return m_handlers; }
+
+    // ------------------------------------------------------------------
+    // 归并后的套列表（供配置窗口展示）：只读注册表归并同族，不在此实例化 COM。
+    // 已存配置的套沿用其名称 / 范围；新发现的套默认处理全部路径、追加末尾。
+    // ------------------------------------------------------------------
+    std::vector<core::OverlaySet> ListSets();
 
     // ------------------------------------------------------------------
     // 取某处理器在指定尺寸下的 overlay 小图标 HICON（管理器内按尺寸缓存）。
