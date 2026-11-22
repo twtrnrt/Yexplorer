@@ -200,6 +200,21 @@ int WINAPI wWinMain(HINSTANCE hInstance,
             Logger::Shutdown();
             return removed ? 0 : 1;
         }
+
+        // 一键恢复：提权实例里一次性删掉 System32 代理（认亲后才删）和 Listary 插件。
+        // 普通权限部分（自启项、默认关联、配置开关）由设置窗口在非提权下完成。
+        if (command == L"--restore-system")
+        {
+            // 返回值：0 = 成功或无需动；1 = 不是我们的而跳过（安全，不算失败）；2 = 真失败
+            const int proxyResult = shell::RunProxyCommandLine(true);
+            const bool listaryOk  = shell::RemoveListaryPlugin(true);
+
+            const bool failed = (proxyResult == 2) || !listaryOk;
+            Logger::Info(L"一键恢复提权操作结束：代理退出码=" + std::to_wstring(proxyResult) +
+                         L"，Listary=" + std::wstring(listaryOk ? L"成功" : L"失败"));
+            Logger::Shutdown();
+            return failed ? 1 : 0;
+        }
     }
 
     // ---------- 步骤 2：控件与 DPI ----------

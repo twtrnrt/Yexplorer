@@ -479,6 +479,12 @@ private:
 
 bool Settings::Save()
 {
+    // 清除模式：配置文件马上要被删掉，禁止再把内存状态写回去
+    if (m_discardOnExit)
+    {
+        return true;
+    }
+
     // 整个写入过程串行化：别的实例正在保存就等它写完（最多 5 秒）
     SettingsSaveLock saveLock;
 

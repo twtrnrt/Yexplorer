@@ -25,6 +25,7 @@
 #include "shell/DefaultManager.h"
 #include "shell/ExplorerProxy.h"
 #include "shell/ListaryIntegration.h"
+#include "shell/TraceCleanup.h"
 #include "ui/BackgroundHost.h"
 #include "ui/FlatDraw.h"
 
@@ -490,13 +491,21 @@ void SettingsDialog::Layout()
     place(m_hCheckListary,        686);
     place(m_hCheckShellWindow,    716);
 
-    // 关闭按钮
-    const int buttonWidth = Scale(88);
+    // 底部按钮：恢复/重置（左）+ 关闭（右）
+    const int closeWidth   = Scale(88);
+    const int restoreWidth = Scale(100);
     const int buttonHeight = Scale(30);
-    m_closeRect.left = clientRect.right - padding - buttonWidth;
+    const int buttonGap    = Scale(12);
+
+    m_closeRect.left = clientRect.right - padding - closeWidth;
     m_closeRect.top = clientRect.bottom - padding - buttonHeight;
-    m_closeRect.right = m_closeRect.left + buttonWidth;
+    m_closeRect.right = m_closeRect.left + closeWidth;
     m_closeRect.bottom = m_closeRect.top + buttonHeight;
+
+    m_restoreRect.right = m_closeRect.left - buttonGap;
+    m_restoreRect.left  = m_restoreRect.right - restoreWidth;
+    m_restoreRect.top    = m_closeRect.top;
+    m_restoreRect.bottom = m_closeRect.bottom;
 }
 
 bool SettingsDialog::IsChecked(HWND check)
@@ -799,6 +808,118 @@ void SettingsDialog::RefreshRegistrationChecks()
     }
 }
 
+bool SettingsDialog::RestoreSystemIntegration()
+{
+    bool ok = true;
+
+    // 1. 停掉后台宿主进程（Win+E 钩子挂在宿主里，随进程退出一并卸载）
+    ui::StopBackgroundHost();
+
+    // 2. 删开机自启注册表项（HKCU，不需要管理员）
+    ok = shell::SetAutoStart(false) && ok;
+
+    // 3. 还原文件夹/磁盘的系统默认关联（按注册前的备份原值写回）
+    ok = shell::RestoreSystemFileManager() && ok;
+
+    // 4. 一次 UAC 提权：删 System32 代理（认亲后才删）+ 删 Listary 插件
+    const bool elevatedOk = shell::ElevatedRunSelf(L"--restore-system", m_hWnd);
+    ok = elevatedOk && ok;
+
+    // 5. 三个集成开关置关并落盘；个人偏好（固定项/视图/账本等）不动
+    core::Settings& settings = core::Settings::Instance();
+    settings.SetBackgroundStartup(false);
+    settings.SetTakeOverWinE(false);
+    settings.SetShellWindowIntegration(false);
+    settings.Save();
+
+    RefreshQuickStart();
+    RefreshRegistrationChecks();
+    ::InvalidateRect(m_hWnd, nullptr, TRUE);
+
+    return ok;
+}
+
+void SettingsDialog::PurgeAllTracesAndExit()
+{
+    // 先标记：退出时不许再把内存配置写回即将被删掉的配置文件
+    core::Settings::Instance().DiscardOnExit();
+
+    // 删除配置目录、自己的注册表键、解压缓存（软件本体不动）
+    const bool cleaned = shell::DeleteAllUserTraces();
+
+    // 关掉设置窗口（模态循环随即结束）
+    ::DestroyWindow(m_hWnd);
+
+    // 通知后台宿主退出；若本进程就是宿主，StopBackground 会把热窗口的
+    // 「关闭即隐藏」标志去掉，下面的 WM_CLOSE 走正常销毁退出
+    ui::StopBackgroundHost();
+
+    const std::wstring message = cleaned
+        ? L"已清除本软件在电脑上的全部痕迹，重启后为全新状态。\n程序即将退出。"
+        : L"部分个人数据清理失败，详情见日志文件。\n程序即将退出。";
+    ::MessageBoxW(nullptr, message.c_str(), L"清除完成",
+                  cleaned ? MB_ICONINFORMATION | MB_OK : MB_ICONWARNING | MB_OK);
+
+    // 通知主窗口关闭；WM_CLOSE 里的 SaveWindowState 因 DiscardOnExit 不会落盘
+    if (m_hOwner != nullptr)
+    {
+        ::PostMessageW(m_hOwner, WM_CLOSE, 0, 0);
+    }
+    else
+    {
+        ::PostQuitMessage(0);
+    }
+}
+
+void SettingsDialog::OnRestoreButton()
+{
+    // 第一弹：选择恢复方式（是=仅恢复设置，否=清除所有痕迹，取消=放弃）
+    const std::wstring prompt =
+        L"请选择恢复方式：\n\n"
+        L"【是】仅恢复系统设置\n"
+        L"撤销默认文件管理器、System32 代理、Listary 插件、开机自启、Win+E 接管、"
+        L"Shell 窗口集成；保留固定项、视图记忆、打开方式账本等个人数据。\n\n"
+        L"【否】清除所有痕迹\n"
+        L"在上面这些之外，再删除本软件的配置、模板和缓存，只保留软件本体，"
+        L"重启后为全新状态。\n\n"
+        L"【取消】不做任何改动。";
+
+    const INT_PTR choice = ::MessageBoxW(m_hWnd, prompt.c_str(), L"恢复 / 重置",
+                                          MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (choice == IDCANCEL)
+    {
+        return;
+    }
+
+    const bool purgeAll = (choice == IDNO);
+
+    // 第二弹：二次确认
+    const std::wstring confirm = purgeAll
+        ? L"将撤销全部系统集成，并删除配置、模板和缓存等全部个人数据，只保留软件本体。\n"
+          L"此操作不可恢复，确定继续吗？"
+        : L"将撤销默认管理器、代理、Listary 插件、自启、Win+E 和 Shell 集成，"
+          L"个人数据保留。\n确定继续吗？";
+
+    const UINT confirmFlags = MB_OKCANCEL | (purgeAll ? MB_ICONWARNING : MB_ICONQUESTION);
+    if (::MessageBoxW(m_hWnd, confirm.c_str(), L"确认", confirmFlags) != IDOK)
+    {
+        return;
+    }
+
+    const bool systemOk = RestoreSystemIntegration();
+
+    if (purgeAll)
+    {
+        PurgeAllTracesAndExit();
+        return;
+    }
+
+    ::MessageBoxW(m_hWnd,
+                  systemOk ? L"系统设置已恢复。" : L"部分项目恢复失败，详情见日志文件。",
+                  L"恢复结果",
+                  systemOk ? MB_ICONINFORMATION | MB_OK : MB_ICONWARNING | MB_OK);
+}
+
 void SettingsDialog::Draw(HDC dc)
 {
     RECT clientRect = {};
@@ -885,6 +1006,7 @@ void SettingsDialog::Draw(HDC dc)
     }
 
     ::SelectObject(dc, oldFont);
+    DrawButton(dc, m_restoreRect, L"恢复/重置", m_hotRestore, m_pressedRestore, true);
     DrawButton(dc, m_closeRect, L"关闭", m_hotClose, m_pressedClose, true);
 }
 
@@ -995,12 +1117,18 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
     case WM_MOUSEMOVE:
     {
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        const bool hotClose = (::PtInRect(&m_closeRect, pt) != FALSE);
+        const bool hotClose   = (::PtInRect(&m_closeRect, pt) != FALSE);
+        const bool hotRestore = (::PtInRect(&m_restoreRect, pt) != FALSE);
 
         if (hotClose != m_hotClose)
         {
             m_hotClose = hotClose;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
+        }
+        if (hotRestore != m_hotRestore)
+        {
+            m_hotRestore = hotRestore;
+            ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
         }
 
         if (!m_trackingLeave)
@@ -1024,6 +1152,12 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedClose = false;
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
         }
+        if (m_hotRestore || m_pressedRestore)
+        {
+            m_hotRestore     = false;
+            m_pressedRestore = false;
+            ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
+        }
         return 0;
 
     case WM_LBUTTONDOWN:
@@ -1035,6 +1169,13 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             m_pressedClose = true;
             ::SetCapture(hWnd);
             ::InvalidateRect(hWnd, &m_closeRect, FALSE);
+            return 0;
+        }
+        if (::PtInRect(&m_restoreRect, pt))
+        {
+            m_pressedRestore = true;
+            ::SetCapture(hWnd);
+            ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
             return 0;
         }
         return 0;
@@ -1053,6 +1194,18 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             if (inside)
             {
                 ::DestroyWindow(hWnd);
+            }
+            return 0;
+        }
+        if (m_pressedRestore)
+        {
+            m_pressedRestore = false;
+            ::ReleaseCapture();
+            const bool inside = (::PtInRect(&m_restoreRect, pt) != FALSE);
+            ::InvalidateRect(hWnd, &m_restoreRect, FALSE);
+            if (inside)
+            {
+                OnRestoreButton();
             }
             return 0;
         }

@@ -39,4 +39,10 @@ bool RemoveListaryPlugin(bool restartListary);
 bool InstallListaryPluginElevated(HWND owner);
 bool RemoveListaryPluginElevated(HWND owner);
 
+// 以管理员身份重启自身执行给定命令行参数，等提权实例结束。
+// parameters：传给新实例的命令行（如 L"--restore-system"）。
+// 返回 true 表示提权实例退出码为 0；UAC 被拒/启动失败/退出码非 0 都返回 false，
+// 原因已在内部弹窗告知用户。
+bool ElevatedRunSelf(const std::wstring& parameters, HWND owner);
+
 } // namespace shell

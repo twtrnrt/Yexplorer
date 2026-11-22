@@ -139,6 +139,10 @@ public:
     // 写回磁盘。先写 .tmp 再替换，写到一半出错也不会把原文件弄坏。
     bool Save();
 
+    // 标记"即将清除全部配置、退出程序"：之后所有 Save() 都直接返回成功、不落盘，
+    // 避免退出时把内存里的旧配置又写回刚删掉的配置文件。
+    void DiscardOnExit() { m_discardOnExit = true; }
+
     const std::vector<PinnedItem>& PinnedItems() const { return m_pinnedItems; }
 
     // 加一条固定项。同路径（忽略大小写）已经有了就不重复加，返回 false。
@@ -313,6 +317,9 @@ private:
 
     // 「打开方式」账本（按扩展名分组）
     std::vector<OpenWithEntry> m_openWith;
+
+    // 一键恢复-清除模式：置位后 Save() 不再写盘（见 DiscardOnExit）
+    bool m_discardOnExit = false;
 };
 
 } // namespace core

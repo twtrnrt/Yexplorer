@@ -160,6 +160,7 @@
     <ClCompile Include="src\shell\DefaultManager.cpp" />
     <ClCompile Include="src\shell\ExplorerProxy.cpp" />
     <ClCompile Include="src\shell\ListaryIntegration.cpp" />
+    <ClCompile Include="src\shell\TraceCleanup.cpp" />
     <ClCompile Include="src\shell\AutoStart.cpp" />
     <ClCompile Include="src\shell\ShellOperations.cpp" />
     <ClCompile Include="src\ui\AddressBar.cpp" />
@@ -207,6 +208,7 @@
     <ClInclude Include="src\shell\ExplorerProxy.h" />
     <ClInclude Include="src\shell\ShellOperations.h" />
     <ClInclude Include="src\shell\ListaryIntegration.h" />
+    <ClInclude Include="src\shell\TraceCleanup.h" />
     <ClInclude Include="src\ui\AddressBar.h" />
     <ClInclude Include="src\ui\FileListView.h" />
     <ClInclude Include="src\ui\FlatButton.h" />

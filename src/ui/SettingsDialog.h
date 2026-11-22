@@ -66,6 +66,16 @@ private:
     void OnRegistrationToggle(int controlId);
     void RefreshRegistrationChecks();
 
+    // 「恢复/重置」按钮：弹选择框（仅恢复设置 / 清除所有痕迹），确认后执行
+    void OnRestoreButton();
+
+    // 模式一：撤销对系统的全部集成改动（自启、默认关联、代理、Listary、
+    // 后台宿主、Win+E、Shell 窗口），保留个人数据。返回提权部分是否成功。
+    bool RestoreSystemIntegration();
+
+    // 模式二：在模式一基础上删除全部个人痕迹，然后退出程序。
+    void PurgeAllTracesAndExit();
+
     static bool IsChecked(HWND check);
     static void SetChecked(HWND check, bool checked);
 
@@ -99,6 +109,11 @@ private:
     RECT  m_closeRect  = {};
     bool  m_hotClose   = false;
     bool  m_pressedClose = false;
+
+    // 「恢复/重置」按钮（自绘，位于关闭按钮左侧）
+    RECT  m_restoreRect = {};
+    bool  m_hotRestore  = false;
+    bool  m_pressedRestore = false;
 
     bool  m_lastActionFailed = false;
 

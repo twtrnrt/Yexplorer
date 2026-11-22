@@ -151,8 +151,9 @@ std::wstring FindListaryDirectory()
     return std::wstring();
 }
 
-// 让正在运行的 Listary 重启，插件才会被重新扫描
-void RestartListary(const std::wstring& listaryDirectory)
+// 结束所有正在运行的 Listary 进程（没在跑就直接返回）。
+// 卸载插件前必须先停：插件 DLL 已被 Listary 加载占用，不退出删不掉文件。
+void StopListary()
 {
     std::vector<DWORD> pids;
 
@@ -188,7 +189,16 @@ void RestartListary(const std::wstring& listaryDirectory)
 
     if (!pids.empty())
     {
-        ::Sleep(500);
+        ::Sleep(500);   // 等进程彻底退出、释放 DLL 占用
+    }
+}
+
+// 按安装目录把 Listary 重新拉起来；目录为空（没装 Listary）就跳过。
+void StartListary(const std::wstring& listaryDirectory)
+{
+    if (listaryDirectory.empty())
+    {
+        return;
     }
 
     const std::wstring exe = JoinPath(listaryDirectory, L"Listary.exe");
@@ -208,6 +218,13 @@ void RestartListary(const std::wstring& listaryDirectory)
     {
         Logger::Warn(L"Listary 重启失败（错误码 " + std::to_wstring(::GetLastError()) + L"）");
     }
+}
+
+// 让正在运行的 Listary 重启，插件才会被重新扫描（安装/更新后用）
+void RestartListary(const std::wstring& listaryDirectory)
+{
+    StopListary();
+    StartListary(listaryDirectory);
 }
 
 } // namespace
@@ -314,29 +331,32 @@ bool RemoveListaryPlugin(bool restartListary)
 
     const std::wstring directory = JoinPath(JoinPath(listary, L"FileAppPlugins"), L"Yexplorer");
 
+    // 先停 Listary，释放已加载的插件 DLL，否则文件被占用、目录删不干净。
+    // 无论删除成功与否，最后都把 Listary 拉起来，保持用户原来的运行状态。
+    StopListary();
+
     std::error_code error;
     std::filesystem::remove_all(directory, error);
+    const bool removed = !error;
     if (error)
     {
         Logger::Warn(L"Listary 插件删除失败：" + directory + L"，错误=" +
                      std::to_wstring(error.value()));
-        return false;
     }
-
-    Logger::Info(L"Listary 插件已删除：" + directory);
+    else
+    {
+        Logger::Info(L"Listary 插件已删除：" + directory);
+    }
 
     if (restartListary)
     {
-        RestartListary(listary);
+        StartListary(listary);
     }
-    return true;
+    return removed;
 }
 
-namespace
-{
-
 // 以管理员身份重新启动本程序，执行一个内部命令并等它结束。
-bool RunSelfElevated(const wchar_t* parameters, HWND owner)
+bool ElevatedRunSelf(const std::wstring& parameters, HWND owner)
 {
     wchar_t exe[MAX_PATH * 2] = {};
     const DWORD length = ::GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
@@ -350,7 +370,7 @@ bool RunSelfElevated(const wchar_t* parameters, HWND owner)
     info.fMask        = SEE_MASK_NOCLOSEPROCESS;
     info.lpVerb       = L"runas";
     info.lpFile       = exe;
-    info.lpParameters = parameters;
+    info.lpParameters = parameters.c_str();
     info.nShow        = SW_SHOWNORMAL;
 
     if (!::ShellExecuteExW(&info))
@@ -386,16 +406,14 @@ bool RunSelfElevated(const wchar_t* parameters, HWND owner)
     return true;
 }
 
-} // namespace
-
 bool InstallListaryPluginElevated(HWND owner)
 {
-    return RunSelfElevated(L"--install-listary-plugin", owner);
+    return ElevatedRunSelf(L"--install-listary-plugin", owner);
 }
 
 bool RemoveListaryPluginElevated(HWND owner)
 {
-    return RunSelfElevated(L"--remove-listary-plugin", owner);
+    return ElevatedRunSelf(L"--remove-listary-plugin", owner);
 }
 
 } // namespace shell
