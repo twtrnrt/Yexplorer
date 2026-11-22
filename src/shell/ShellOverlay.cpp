@@ -452,19 +452,15 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
         return -1;
     }
 
-    // 已有 PIDL 直接用；物理文件/文件夹条目 pidl 留空，这里按完整路径临时解析一个
-    // 绝对 PIDL。多数角标处理器（Git/SVN/网盘）主要依据 PIDL 判定，传 nullptr 会不命中。
-    PIDLIST_ABSOLUTE pidlFromPath = nullptr;
-    PCIDLIST_ABSOLUTE pidl = nullptr;
-    if (!entry.pidl.empty())
+    // IsMemberOf 第二参是 DWORD 文件属性（目录 / 隐藏 / 系统等位），不是 PIDL。
+    // 按完整路径取真实属性；取不到（虚拟项、权限不足等）传 0 兜底。
+    DWORD dwAttrib = 0;
+    if (!entry.fullPath.empty())
     {
-        pidl = reinterpret_cast<PCIDLIST_ABSOLUTE>(entry.pidl.data());
-    }
-    else if (!entry.fullPath.empty())
-    {
-        if (::SHParseDisplayName(entry.fullPath.c_str(), nullptr, &pidlFromPath, 0, nullptr) == S_OK)
+        const DWORD attrs = ::GetFileAttributesW(entry.fullPath.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES)
         {
-            pidl = pidlFromPath;
+            dwAttrib = attrs;
         }
     }
 
@@ -483,7 +479,7 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
             continue;
         }
 
-        HRESULT hr = set.handler->IsMemberOf(entry.fullPath.c_str(), pidl);
+        HRESULT hr = set.handler->IsMemberOf(entry.fullPath.c_str(), dwAttrib);
 
         // S_OK = 命中；其它成功码（S_FALSE）或失败都按未命中处理
         if (hr == S_OK)
@@ -491,11 +487,6 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
             hit = static_cast<int>(i);
             break;
         }
-    }
-
-    if (pidlFromPath)
-    {
-        ::ILFree(pidlFromPath);
     }
 
     return hit;

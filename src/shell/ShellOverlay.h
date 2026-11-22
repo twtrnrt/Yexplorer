@@ -34,18 +34,17 @@ namespace shell
 {
 
 // ---------------------------------------------------------------------------
-// 角标处理器接口（自定义签名）
+// 角标处理器接口
 //
-// SDK 头文件把 IShellIconOverlayIdentifier::IsMemberOf 的第二参数声明成了
-// DWORD dwAttrib，但真实运行时传的是绝对 PIDL 指针；64 位下按 DWORD 传会截断
-// 指针。这里按真实 vtable 顺序（IsMemberOf → GetOverlayInfo → GetPriority）
-// 自定义一份签名正确的接口，IID 与系统接口一致。
+// 与系统 IShellIconOverlayIdentifier 同 vtable 顺序（IsMemberOf → GetOverlayInfo
+// → GetPriority），IID 一致。IsMemberOf 第二参是 DWORD 文件属性
+// （FILE_ATTRIBUTE_DIRECTORY / HIDDEN / SYSTEM 等位），不是 PIDL。
 // ---------------------------------------------------------------------------
 MIDL_INTERFACE("0c6c4200-c589-11d0-999a-00c04fd655e1")
 IOverlayIdentifier : public IUnknown
 {
     virtual HRESULT STDMETHODCALLTYPE IsMemberOf(LPCWSTR pwszPath,
-                                                 PCIDLIST_ABSOLUTE pidl) = 0;
+                                                 DWORD dwAttrib) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetOverlayInfo(LPWSTR pwszIconFile, int cchMax,
                                                       int* pIndex, DWORD* pdwFlags) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetPriority(int* pPriority) = 0;
