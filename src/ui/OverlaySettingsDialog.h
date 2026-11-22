@@ -69,13 +69,19 @@ private:
     void ReloadList();
 
     // 行内可点区域（Layout / DrawRow 算好，NM_CLICK 命中用）
+    struct ChipHit
+    {
+        RECT chip  = {};   // 整个 chip 矩形（悬停变色用）
+        RECT close = {};   // 右侧 × 关闭区（只有点这里才删除）
+    };
+
     struct RowHit
     {
         RECT up    = {};   // ↑ 按钮
         RECT down  = {};   // ↓ 按钮
         RECT check = {};   // 显示范围复选框
         RECT add   = {};   // 末尾「+」按钮
-        std::vector<RECT> chips;   // 每个路径 chip（与 paths 一一对应）
+        std::vector<ChipHit> chips;   // 每个路径 chip（与 paths 一一对应）
     };
 
     std::vector<RowHit> m_hits;
@@ -86,10 +92,16 @@ private:
     void RemovePath(int index, int chip);  // chip 上的 × 删除
 
     // 行内按钮悬停跟踪（子类化列表控件后由鼠标消息驱动）
-    enum HotPart { HotNone = 0, HotUp = 1, HotDown = 2, HotAdd = 3 };
+    enum HotPart { HotNone = 0, HotUp = 1, HotDown = 2, HotAdd = 3, HotChip = 4 };
     int  m_hotRow  = -1;   // 悬停在第几行（-1 = 无）
     int  m_hotPart = HotNone; // 悬停该行的哪个按钮
+    int  m_hotChip = -1;  // 悬停该行第几个 chip（仅 HotChip 时有效）
     void UpdateRowHover(int x, int y);     // 根据列表客户区坐标刷新悬停态
+
+    // chip 完整路径 tooltip（原生 ToolTip 控件，悬停 chip 时弹出）
+    HWND  m_hTooltip = nullptr;
+    std::wstring m_tipText;                // 当前 tooltip 文本（完整路径）
+    void UpdateTooltip(int row, int chip); // 按命中的 chip 刷新/隐藏 tooltip
 
     static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
                                              LPARAM lParam, UINT_PTR id, DWORD_PTR refData);

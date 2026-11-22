@@ -221,6 +221,24 @@ void OverlaySettingsDialog::CreateControls()
         ::SetWindowSubclass(m_hList, &OverlaySettingsDialog::ListSubclassProc, 1,
                             reinterpret_cast<DWORD_PTR>(this));
 
+        // 原生 tooltip 控件：悬停 chip 时显示完整路径；工具区先按整个列表登记，
+        // 命中具体 chip 后由 UpdateTooltip 用 TTM_SETTOOLINFO 收窄到对应矩形
+        m_hTooltip = ::CreateWindowExW(0, TOOLTIPS_CLASSW, nullptr, WS_POPUP,
+                                       0, 0, 0, 0, m_hWnd, nullptr,
+                                       ::GetModuleHandleW(nullptr), nullptr);
+        if (m_hTooltip != nullptr)
+        {
+            ::SendMessageW(m_hTooltip, TTM_SETMAXTIPWIDTH, 0, Scale(320));
+
+            TOOLINFOW ti = {};
+            ti.cbSize   = sizeof(ti);
+            ti.uFlags   = TTF_SUBCLASS;
+            ti.hwnd     = m_hList;
+            ti.uId      = 1;
+            ti.lpszText = const_cast<LPWSTR>(L"");
+            ::SendMessageW(m_hTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+        }
+
         LVCOLUMNW column = {};
         column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         column.fmt  = LVCFMT_LEFT;
@@ -253,6 +271,8 @@ void OverlaySettingsDialog::ReloadList()
     m_hits.assign(m_sets.size(), RowHit{});
     m_hotRow  = -1;
     m_hotPart = HotNone;
+    m_hotChip = -1;
+    UpdateTooltip(-1, -1);
 
     for (int i = 0; i < static_cast<int>(m_sets.size()); ++i)
     {
@@ -376,10 +396,16 @@ void OverlaySettingsDialog::Draw(HDC dc)
                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
-    // 底部按钮
-    DrawFlatButton(dc, m_buttonRects[ButtonCancel], L"取消", m_font, {});
+    // 底部按钮：悬停 / 按下状态由 m_hotButton / m_pressedButton 驱动
+    ui::FlatButtonVisual cancelVisual;
+    cancelVisual.hot     = (m_hotButton == ButtonCancel);
+    cancelVisual.pressed = (m_pressedButton == ButtonCancel);
+    DrawFlatButton(dc, m_buttonRects[ButtonCancel], L"取消", m_font, cancelVisual);
+
     ui::FlatButtonVisual okVisual;
     okVisual.primary = true;
+    okVisual.hot     = (m_hotButton == ButtonOk);
+    okVisual.pressed = (m_pressedButton == ButtonOk);
     DrawFlatButton(dc, m_buttonRects[ButtonOk], L"确定", m_font, okVisual);
 }
 
@@ -570,11 +596,17 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
         RECT chip = { cursorX, centerY - chipHeight / 2,
                       cursorX + chipWidth, centerY - chipHeight / 2 + chipHeight };
 
-        // chip 底
-        ui::DrawBorderedRect(dc, chip, RGB(243, 245, 248), RGB(206, 212, 220));
-
-        // × 区（右侧固定 14px）
+        // × 区（右侧固定 14px）；只有点中这一块才删除
         RECT xRect = { chip.right - Scale(14), chip.top, chip.right, chip.bottom };
+
+        // 悬停该 chip 时换高亮底色 / 边框
+        const bool chipHot = (m_hotRow == index && m_hotPart == HotChip && m_hotChip == i);
+        const COLORREF chipFace   = chipHot ? ui::kButtonHotFace   : RGB(243, 245, 248);
+        const COLORREF chipBorder = chipHot ? ui::kButtonHotBorder : RGB(206, 212, 220);
+
+        // chip 底
+        ui::DrawBorderedRect(dc, chip, chipFace, chipBorder);
+
         ::SetTextColor(dc, kHintTextColor);
         ::DrawTextW(dc, L"×", -1, &xRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
@@ -588,7 +620,10 @@ void OverlaySettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index, bool
                         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
 
-        hit.chips.push_back(chip);
+        ChipHit hitItem;
+        hitItem.chip  = chip;
+        hitItem.close = xRect;
+        hit.chips.push_back(hitItem);
         cursorX = chip.right + chipGap;
     }
 
@@ -710,12 +745,13 @@ void OverlaySettingsDialog::RemovePath(int index, int chip)
     ::UpdateWindow(m_hList);
 }
 
-// 根据列表客户区坐标刷新行内按钮悬停态；命中变化时重绘列表
+// 根据列表客户区坐标刷新行内按钮悬停态；命中变化时重绘列表并同步 tooltip
 void OverlaySettingsDialog::UpdateRowHover(int x, int y)
 {
     const POINT pt{ x, y };
     int hotRow  = -1;
     int hotPart = HotNone;
+    int hotChip = -1;
 
     for (int i = 0; i < static_cast<int>(m_hits.size()); ++i)
     {
@@ -732,14 +768,59 @@ void OverlaySettingsDialog::UpdateRowHover(int x, int y)
         {
             hotRow = i; hotPart = HotAdd; break;
         }
+        for (int c = 0; c < static_cast<int>(hit.chips.size()); ++c)
+        {
+            if (::PtInRect(&hit.chips[c].chip, pt))
+            {
+                hotRow = i; hotPart = HotChip; hotChip = c; break;
+            }
+        }
+        if (hotRow != -1)
+        {
+            break;
+        }
     }
 
-    if (hotRow != m_hotRow || hotPart != m_hotPart)
+    const bool changed = (hotRow != m_hotRow || hotPart != m_hotPart || hotChip != m_hotChip);
+    if (changed)
     {
         m_hotRow  = hotRow;
         m_hotPart = hotPart;
+        m_hotChip = hotChip;
         ::InvalidateRect(m_hList, nullptr, FALSE);
     }
+
+    UpdateTooltip(hotRow, hotChip);
+}
+
+// 按当前命中的 chip 刷新 tooltip 文本与区域；未命中则隐藏
+void OverlaySettingsDialog::UpdateTooltip(int row, int chip)
+{
+    if (m_hTooltip == nullptr)
+    {
+        return;
+    }
+
+    if (row < 0 || chip < 0 ||
+        row >= static_cast<int>(m_sets.size()) ||
+        chip >= static_cast<int>(m_sets[row].paths.size()))
+    {
+        ::SendMessageW(m_hTooltip, TTM_ACTIVATE, FALSE, 0);
+        m_tipText.clear();
+        return;
+    }
+
+    m_tipText = m_sets[row].paths[chip];
+
+    TOOLINFOW ti = {};
+    ti.cbSize   = sizeof(ti);
+    ti.uFlags   = TTF_SUBCLASS;
+    ti.hwnd     = m_hList;
+    ti.uId      = 1;
+    ti.rect     = m_hits[row].chips[chip].chip;
+    ti.lpszText = const_cast<LPWSTR>(m_tipText.c_str());
+    ::SendMessageW(m_hTooltip, TTM_SETTOOLINFOW, 0, reinterpret_cast<LPARAM>(&ti));
+    ::SendMessageW(m_hTooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
 }
 
 // 列表控件子类过程：转发鼠标移动 / 离开做悬停高亮，其余交给默认处理
@@ -766,8 +847,10 @@ LRESULT CALLBACK OverlaySettingsDialog::ListSubclassProc(HWND hWnd, UINT msg, WP
             {
                 self->m_hotRow  = -1;
                 self->m_hotPart = HotNone;
+                self->m_hotChip = -1;
                 ::InvalidateRect(hWnd, nullptr, FALSE);
             }
+            self->UpdateTooltip(-1, -1);
         }
         else if (msg == WM_NCDESTROY)
         {
@@ -865,9 +948,10 @@ LRESULT OverlaySettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, LPAR
             }
             else
             {
+                // 只有点中 chip 右侧 × 区才删除；点 chip 文字区不动作
                 for (int i = 0; i < static_cast<int>(hit.chips.size()); ++i)
                 {
-                    if (::PtInRect(&hit.chips[i], pt))
+                    if (::PtInRect(&hit.chips[i].close, pt))
                     {
                         RemovePath(index, i);
                         break;
@@ -975,6 +1059,11 @@ LRESULT OverlaySettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, LPAR
         return 0;
 
     case WM_DESTROY:
+        if (m_hTooltip != nullptr)
+        {
+            ::DestroyWindow(m_hTooltip);
+            m_hTooltip = nullptr;
+        }
         m_hWnd = nullptr;
         return 0;
     }
