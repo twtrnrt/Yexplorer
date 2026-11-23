@@ -680,15 +680,23 @@ void OverlayManager::WorkerLoop()
         {
             TaskKind kind = TaskKind::Annotate;
             std::vector<ShellEntry>* entries = nullptr;
+            const std::vector<std::wstring>* paths = nullptr;
+            std::vector<int>* hits = nullptr;
             {
                 std::lock_guard<std::mutex> lock(m_taskMutex);
                 kind    = m_taskKind;
                 entries = m_taskEntries;
+                paths   = m_taskPaths;
+                hits    = m_taskHits;
             }
 
             if (kind == TaskKind::Shutdown)
             {
                 RunShutdownOnWorker();
+            }
+            else if (kind == TaskKind::ResolvePaths && paths != nullptr && hits != nullptr)
+            {
+                RunResolvePathsOnWorker(*paths, *hits);
             }
             else if (entries != nullptr)
             {
@@ -708,17 +716,23 @@ void OverlayManager::WorkerLoop()
     m_workerThreadId = 0;
 }
 
-void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries)
+void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries,
+                                     const std::vector<std::wstring>* paths,
+                                     std::vector<int>* hits)
 {
-    // 同一时刻只允许一个任务在飞：枚举线程的 Annotate 与 UI 线程的 Shutdown
-    // 可能并发，撞车会互相覆盖任务字段
+    // 同一时刻只允许一个任务在飞：枚举线程的 Annotate / 导航栏的 ResolvePaths /
+    // UI 线程的 Shutdown 可能并发，撞车会互相覆盖任务字段
     std::lock_guard<std::mutex> postLock(m_postMutex);
 
     if (!StartWorkerThread())
     {
         // 常驻线程起不来（事件 / 线程创建失败，极罕见）：退回在调用方线程直接做，
         // 行为退化成加固前，但功能不丢
-        if (kind == TaskKind::Annotate && entries != nullptr)
+        if (kind == TaskKind::ResolvePaths && paths != nullptr && hits != nullptr)
+        {
+            RunResolvePathsOnWorker(*paths, *hits);
+        }
+        else if (kind == TaskKind::Annotate && entries != nullptr)
         {
             RunAnnotateOnWorker(*entries);
         }
@@ -733,18 +747,22 @@ void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* ent
         std::lock_guard<std::mutex> lock(m_taskMutex);
         m_taskKind    = kind;
         m_taskEntries = entries;
+        m_taskPaths   = paths;
+        m_taskHits    = hits;
     }
 
     ::ResetEvent(m_doneEvent);
     ::SetEvent(m_taskEvent);
 
-    // 同步等结果。调用方是后台枚举线程或 UI 线程，等的是同一批条目的判定结果；
-    // 线程间靠完成事件建立先后关系，等待期间调用方不会碰 entries。
+    // 同步等结果。调用方是后台线程或 UI 线程，等的是同一批条目的判定结果；
+    // 线程间靠完成事件建立先后关系，等待期间调用方不会碰 entries / paths / hits。
     ::WaitForSingleObject(m_doneEvent, INFINITE);
 
     {
         std::lock_guard<std::mutex> lock(m_taskMutex);
         m_taskEntries = nullptr;
+        m_taskPaths   = nullptr;
+        m_taskHits    = nullptr;
     }
 }
 
@@ -1170,6 +1188,42 @@ void OverlayManager::RunAnnotateOnWorker(std::vector<ShellEntry>& entries)
         {
             entry.overlayIndex = ResolveEntry(entry);
         }
+    }
+}
+
+// ============================================================================
+// 单批路径判定（导航栏等少量、固定路径的场景）
+// ============================================================================
+
+std::vector<int> OverlayManager::ResolvePaths(const std::vector<std::wstring>& paths)
+{
+    std::vector<int> results(paths.size(), -1);
+
+    // 总开关关着：等价未做本功能，全部按未命中返回
+    if (paths.empty() || !core::Settings::Instance().OverlayEnabled())
+    {
+        return results;
+    }
+
+    PostTaskAndWait(TaskKind::ResolvePaths, nullptr, &paths, &results);
+    return results;
+}
+
+void OverlayManager::RunResolvePathsOnWorker(const std::vector<std::wstring>& paths,
+                                             std::vector<int>& results)
+{
+    // 只允许在常驻 STA 线程执行
+    EnsureLoaded();
+    results.assign(paths.size(), -1);
+
+    for (size_t i = 0; i < paths.size(); ++i)
+    {
+        // 借主列表同一套判定（含范围过滤、异常拦截、失败熔断），
+        // 只是构造一个「只有路径」的临时条目；不写 m_resultCache，
+        // 那个缓存是"切目录就清"的语义，别让它被导航栏的路径占满
+        ShellEntry probe;
+        probe.fullPath = paths[i];
+        results[i] = ResolveEntry(probe);
     }
 }
 

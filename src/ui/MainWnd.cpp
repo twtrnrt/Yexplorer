@@ -2174,6 +2174,13 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
                 wasOverlay != settings.OverlayEnabled() ||
                 dialog.OverlayConfigDirty())
             {
+                // 总开关或角标配置变了：导航栏的角标也要按新规则重算一遍，
+                // 否则会一直挂着旧的角标（主列表那边由 RefreshCurrentFolder 负责）
+                if (wasOverlay != settings.OverlayEnabled() || dialog.OverlayConfigDirty())
+                {
+                    m_navigationPane.RefreshOverlay();
+                }
+
                 RefreshCurrentFolder();
             }
             return true;
