@@ -156,6 +156,8 @@
     <ClCompile Include="src\shell\ShellOverlay.cpp" />
     <ClCompile Include="src\shell\ContextMenuData.cpp" />
     <ClCompile Include="src\shell\ContextMenuCollector.cpp" />
+    <ClCompile Include="src\shell\MenuCensus.cpp" />
+    <ClCompile Include="src\shell\MenuConfig.cpp" />
     <ClCompile Include="src\shell\ShellClipboard.cpp" />
     <ClCompile Include="src\shell\ShellDragDrop.cpp" />
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
@@ -208,6 +210,8 @@
     <ClInclude Include="src\shell\ShellOverlay.h" />
     <ClInclude Include="src\shell\ContextMenuData.h" />
     <ClInclude Include="src\shell\ContextMenuCollector.h" />
+    <ClInclude Include="src\shell\MenuCensus.h" />
+    <ClInclude Include="src\shell\MenuConfig.h" />
     <ClInclude Include="src\shell\ShellClipboard.h" />
     <ClInclude Include="src\shell\ShellDragDrop.h" />
     <ClInclude Include="src\shell\ShellOpenWith.h" />
