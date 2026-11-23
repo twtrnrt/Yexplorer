@@ -13,4 +13,8 @@
 - 发布**一次做完**：改版本号 → 全量构建 → 打包 → 冒烟 → 提交 → 打附注 tag → push；
 - **不要 `git push --tags`**（`v1.6.0` 本地/远端不一致），tag 要显式推 `git push origin vX.Y.Z`；
 - 不要 `git push -f`、不要 `--no-verify`；
+- **提交前必须先确认当前分支**（`git branch --show-current`）：本仓库存在并行工作（别人会在同一工作区
+  `git checkout` 到 `feature/*` 分支改代码），当前分支可能在你不知情时就变了，`git commit` 会跟着当前分支走。
+  2026-11-23 就因此把一条文档提交落到了 `feature/menu-config` 上（事后用 revert 收拾）。提交前还要看一眼
+  `git status --short`：**工作区出现不是自己改的 `M` 文件，说明有人在里面干活，此时不要切分支、不要 reset**；
 - 测试会读写 `%APPDATA%\FileExplorer\settings.json`：先备份，测完还原。
