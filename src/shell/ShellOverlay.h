@@ -66,6 +66,14 @@ struct OverlayHandler
     // 显示范围（从配置对齐；allPaths=true 时 paths 忽略）
     bool                      allPaths = true;
     std::vector<std::wstring> paths;
+
+    // ---- 稳定性保护（二期 3C 失败熔断）----
+    // 第三方处理器质量参差，个别在 IsMemberOf 里会访问违例甚至拖死。
+    // failureCount 记「连续失败/崩溃次数」，只要有一次正常应答（命中或 S_FALSE）
+    // 就清零；达到阈值即 disabled=true，本次会话不再向这套发判定请求，
+    // 避免一套坏处理器反复拖慢枚举、反复触发崩溃。
+    int  failureCount = 0;      // 连续失败计数（failure count，成功一次即清零）
+    bool disabled     = false;  // 已熔断（disabled，本次会话不再询问这套）
 };
 
 class OverlayManager
@@ -122,6 +130,15 @@ private:
 
     // 单个条目按顺序询问处理器，返回命中下标；未命中返回 -1
     int  ResolveEntry(const ShellEntry& entry);
+
+    // ------------------------------------------------------------------
+    // 失败记账（二期 3C 失败熔断）：
+    //   NoteHandlerFailure 累计一次失败，达到阈值把该套置为 disabled 并记日志；
+    //   NoteHandlerSuccess 一次正常应答即清零，避免偶发失败累积成误熔断。
+    //   reason 只用于日志，不参与判定。
+    // ------------------------------------------------------------------
+    void NoteHandlerFailure(size_t index, const std::wstring& reason);
+    void NoteHandlerSuccess(size_t index);
 
 private:
     bool m_loaded = false;

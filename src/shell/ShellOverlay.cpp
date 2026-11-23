@@ -34,6 +34,63 @@ constexpr const wchar_t* kOverlayRegPath =
 // 系统只取前 15 个处理器（与原生资源管理器一致）
 constexpr int kMaxOverlayHandlers = 15;
 
+// 同一套处理器连续失败 / 崩溃多少次后熔断（本次会话不再询问）。
+// 取 3 的原因：一次目录枚举会按文件逐个问同一套处理器，真坏的处理器几次就暴露；
+// 偶发的单次失败由 NoteHandlerSuccess 清零，不会累积成误熔断。
+constexpr int kHandlerFailureLimit = 3;
+
+// ---------------------------------------------------------------------------
+// 异常保护调用壳：IsMemberOf
+//
+// 为什么要单独成一个函数：
+//   MSVC 不允许在「需要对象展开」（函数里有局部 C++ 对象需要析构）的函数里
+//   直接用 __try/__except，会报 C2712。这个壳只转发裸接口指针、路径和 DWORD，
+//   不涉及任何需要析构的 C++ 对象，所以可以安全地使用结构化异常。
+//   noinline 是必须的：一旦被内联进调用者，C2712 的限制就会转移到调用者身上。
+//
+// 返回值：处理器自身返回的 HRESULT；其中发生崩溃时返回 E_FAIL，
+//         并把 *crashed 置 true，由调用方按「这套坏了」处理。
+// 栈溢出（EXCEPTION_STACK_OVERFLOW）不能就地恢复，继续向外抛，不做兜底。
+// ---------------------------------------------------------------------------
+__declspec(noinline)
+HRESULT IsMemberOfGuarded(IOverlayIdentifier* handler, LPCWSTR path,
+                          DWORD attrib, bool* crashed)
+{
+    *crashed = false;
+    __try
+    {
+        return handler->IsMemberOf(path, attrib);
+    }
+    __except (::GetExceptionCode() == EXCEPTION_STACK_OVERFLOW
+                  ? EXCEPTION_CONTINUE_SEARCH
+                  : EXCEPTION_EXECUTE_HANDLER)
+    {
+        *crashed = true;
+    }
+    return E_FAIL;
+}
+
+// ---------------------------------------------------------------------------
+// 异常保护调用壳：GetOverlayInfo（理由同上，单独成函数避开 C2712）
+// ---------------------------------------------------------------------------
+__declspec(noinline)
+HRESULT GetOverlayInfoGuarded(IOverlayIdentifier* handler, LPWSTR iconFile,
+                              int cchMax, int* index, DWORD* flags, bool* crashed)
+{
+    *crashed = false;
+    __try
+    {
+        return handler->GetOverlayInfo(iconFile, cchMax, index, flags);
+    }
+    __except (::GetExceptionCode() == EXCEPTION_STACK_OVERFLOW
+                  ? EXCEPTION_CONTINUE_SEARCH
+                  : EXCEPTION_EXECUTE_HANDLER)
+    {
+        *crashed = true;
+    }
+    return E_FAIL;
+}
+
 // 小写化宽字符串（用于路径 / 归并键比较，忽略大小写）
 std::wstring ToLower(std::wstring text)
 {
@@ -512,10 +569,19 @@ void OverlayManager::EnumerateHandlers()
         info.handler     = handler;
 
         // 取 overlay 图标信息（图标文件 + 资源索引）
+        // 外层包异常保护：读取图标信息属于第三方代码，崩了就跳过这套，
+        // 不把主进程带走（这套即使能判定也取不到图标，留着没意义）。
         wchar_t iconFile[MAX_PATH] = {};
         int     iconIndex = 0;
         DWORD   flags = 0;
-        hr = handler->GetOverlayInfo(iconFile, ARRAYSIZE(iconFile), &iconIndex, &flags);
+        bool    iconCrashed = false;
+        hr = GetOverlayInfoGuarded(handler.get(), iconFile, ARRAYSIZE(iconFile),
+                                   &iconIndex, &flags, &iconCrashed);
+        if (iconCrashed)
+        {
+            Logger::Warn(L"角标处理器读取图标信息时崩溃，已跳过这套：" + entry.regName);
+            continue;
+        }
         if (SUCCEEDED(hr))
         {
             info.iconFile  = iconFile;
@@ -664,8 +730,9 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
     int hit = -1;
     for (size_t i = 0; i < m_handlers.size(); ++i)
     {
-        const OverlayHandler& set = m_handlers[i];
-        if (set.handler == nullptr)
+        // 需要写回失败计数 / 熔断标记，这里不能是 const 引用
+        OverlayHandler& set = m_handlers[i];
+        if (set.handler == nullptr || set.disabled)
         {
             continue;
         }
@@ -676,17 +743,79 @@ int OverlayManager::ResolveEntry(const ShellEntry& entry)
             continue;
         }
 
-        HRESULT hr = set.handler->IsMemberOf(entry.fullPath.c_str(), dwAttrib);
+        // 过保护壳调用：处理器代码里的访问违例等崩溃会被就地拦下，
+        // 只把这一套记为失败并按未命中处理，主进程继续跑。
+        bool    crashed = false;
+        HRESULT hr = IsMemberOfGuarded(set.handler.get(), entry.fullPath.c_str(),
+                                      dwAttrib, &crashed);
+        if (crashed)
+        {
+            NoteHandlerFailure(i, L"IsMemberOf 访问违例等异常");
+            continue;
+        }
 
-        // S_OK = 命中；其它成功码（S_FALSE）或失败都按未命中处理
+        // S_OK = 命中
         if (hr == S_OK)
         {
+            NoteHandlerSuccess(i);
             hit = static_cast<int>(i);
             break;
         }
+
+        // S_FALSE = 处理器正常应答「不是我」，不是故障：清零失败计数
+        if (hr == S_FALSE)
+        {
+            NoteHandlerSuccess(i);
+            continue;
+        }
+
+        // 其它（失败码或非标准成功码）：按未命中处理，同时记一次故障，
+        // 连续多次即熔断，避免一套坏处理器被每个文件都问一遍
+        NoteHandlerFailure(i, L"IsMemberOf 返回 " + Logger::FormatHresult(hr));
     }
 
     return hit;
+}
+
+// ============================================================================
+// 失败记账与熔断（二期 3C）
+// ============================================================================
+
+void OverlayManager::NoteHandlerFailure(size_t index, const std::wstring& reason)
+{
+    if (index >= m_handlers.size())
+    {
+        return;
+    }
+
+    OverlayHandler& set = m_handlers[index];
+    ++set.failureCount; // 熔断后该套被跳过、不再进本函数，计数不会无限增长
+
+    if (set.failureCount >= kHandlerFailureLimit)
+    {
+        // 达到阈值：熔断。本次会话不再向这套发判定请求。
+        if (!set.disabled)
+        {
+            set.disabled = true;
+            Logger::Warn(L"角标处理器连续失败 " + std::to_wstring(set.failureCount) +
+                         L" 次，已熔断本次会话不再询问：" + set.displayName + L"（" +
+                         set.regName + L"），最近一次原因：" + reason);
+        }
+        return;
+    }
+
+    Logger::Warn(L"角标处理器判定失败（第 " + std::to_wstring(set.failureCount) +
+                 L" 次）：" + set.displayName + L"（" + set.regName +
+                 L"），原因：" + reason);
+}
+
+void OverlayManager::NoteHandlerSuccess(size_t index)
+{
+    if (index < m_handlers.size())
+    {
+        // 只要有一次正常应答就清零，偶发失败不会累积成误熔断
+        m_handlers[index].failureCount = 0;
+    }
 }
 
 void OverlayManager::Annotate(std::vector<ShellEntry>& entries)
