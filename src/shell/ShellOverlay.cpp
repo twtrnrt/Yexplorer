@@ -31,8 +31,20 @@ namespace
 constexpr const wchar_t* kOverlayRegPath =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ShellIconOverlayIdentifiers";
 
-// 系统只取前 15 个处理器（与原生资源管理器一致）
-constexpr int kMaxOverlayHandlers = 15;
+// 读取处理器数量的保护上限。
+//
+// 这里**故意不是**系统那个 15：
+//   · 15 是 Explorer 自己的硬限制——shell32 的角标图标位图只有 15 个槽（index 0~14），
+//     排在 16 位以后的处理器系统连问都不会问，所以原生资源管理器里它们永远不显示。
+//     典型例子：一台机器装了 OneDrive（占 7 槽）＋ OneDrive 新版工作区扩展（又 7 槽）
+//     ＋ Adobe Creative Cloud（3 槽），TortoiseSVN 的 9 个槽就被挤到 18~26 位，
+//     于是资源管理器里 SVN 仓库一个角标都没有。
+//   · 那个限制是「画图标」的限制，不是「问处理器」的限制。本程序自己取图标、自己合成角标，
+//     不用系统那 15 个图标槽，所以没必要跟着一起瞎——后面的处理器照样能问、能显示。
+//
+// 保留一个宽松上限，只是为了防注册表被塞进上百个垃圾项时枚举失控 / 配置列表长得没法看，
+// 属于兜底保护，不是业务规则。
+constexpr int kMaxOverlayHandlers = 64;
 
 // 同一套处理器连续失败 / 崩溃多少次后熔断（本次会话不再询问）。
 // 取 3 的原因：一次目录枚举会按文件逐个问同一套处理器，真坏的处理器几次就暴露；
@@ -436,7 +448,7 @@ bool IsBlockedHandler(const CLSID& clsid, const std::wstring& dllPath)
     return false;
 }
 
-// 读 HKLM/HKCU 注册表，按名排序、前 15 上限，查 DLL 归并键；纯注册表操作，不碰 COM
+// 读 HKLM/HKCU 注册表，按名排序、兜底上限、查 DLL 归并键；纯注册表操作，不碰 COM
 std::vector<RawHandler> ScanRegistry()
 {
     struct RegEntry
@@ -502,7 +514,7 @@ std::vector<RawHandler> ScanRegistry()
     std::sort(regEntries.begin(), regEntries.end(),
               [](const RegEntry& a, const RegEntry& b) { return a.regName < b.regName; });
 
-    // 系统只取前 15 个
+    // 兜底保护：注册表真被塞进上百个项时截断，正常机器远远到不了（当前最多见到 31 个）
     if (regEntries.size() > kMaxOverlayHandlers)
     {
         regEntries.resize(kMaxOverlayHandlers);
@@ -524,9 +536,8 @@ std::vector<RawHandler> ScanRegistry()
         rawItem.displayName = BuildDisplayName(entry.regName, entry.clsid, rawItem.dll);
 
         // 用途黑名单：非同步 / 非版本控制类直接跳过，不进配置列表也不参与判定。
-        // 注意：这一步排在「前 15 槽位截断」之后是有意的——保持与原生资源管理器
-        // 一致（系统也只认前 15 个槽位），不让第 16 位以后的处理器因为我们过滤了
-        // 黑名单项而"补位"显示出来。
+        // 位置说明：过滤排在「注册名排序」之后、截断之前无所谓顺序——过滤只是少一项，
+        // 不会让后面的处理器顶替谁的位置（现在也不按 15 分档，见 kMaxOverlayHandlers 注释）。
         if (IsBlockedHandler(entry.clsid, rawItem.dll))
         {
             Logger::Info(L"角标处理器按用途黑名单跳过：" + rawItem.regName + L"（" +
