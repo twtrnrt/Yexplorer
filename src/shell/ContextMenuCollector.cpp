@@ -428,6 +428,20 @@ bool RenderRow(HWND host,
         HRESULT hr = cm3->HandleMenuMsg2(WM_DRAWITEM, 0,
                                          reinterpret_cast<LPARAM>(&draw), nullptr);
         drawn = SUCCEEDED(hr) && !LooksBlank(bits, width, height);
+
+        // 有些老扩展只实现了 IContextMenu2::HandleMenuMsg（不认 HandleMenuMsg2），
+        // 比如 7-Zip：它的项是 owner-draw，文字要靠它自己画才正确。
+        if (!drawn)
+        {
+            wil::com_ptr<IContextMenu2> cm2;
+            if (SUCCEEDED(cm3->QueryInterface(IID_PPV_ARGS(cm2.put()))) && cm2 != nullptr)
+            {
+                // 重画一遍：先清回白底，免得留下半张图
+                ::FillRect(memDc, &full, static_cast<HBRUSH>(::GetStockObject(WHITE_BRUSH)));
+                cm2->HandleMenuMsg(WM_DRAWITEM, 0, reinterpret_cast<LPARAM>(&draw));
+                drawn = !LooksBlank(bits, width, height);
+            }
+        }
     }
 
     // 扩展没画（或者没实现 WM_DRAWITEM）：自己兜底画图标 + 文字
