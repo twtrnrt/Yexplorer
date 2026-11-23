@@ -164,6 +164,23 @@ std::wstring ExtSummary(const std::vector<std::wstring>& exts, size_t allCount)
     return text;
 }
 
+// 悬停提示用的扩展名清单：列出前若干个，超出部分用「… 共 N 种」收尾
+std::wstring ExtHoverText(const std::vector<std::wstring>& exts, size_t allCount, size_t limit)
+{
+    if (exts.empty()) return L"不限扩展名";
+
+    std::wstring text;
+    for (size_t i = 0; i < exts.size() && i < limit; ++i)
+    {
+        if (i > 0) text += L" ";
+        text += exts[i];
+    }
+    if (exts.size() > limit) text += L" …";
+    text += L"　共 " + std::to_wstring(exts.size()) + L" 种";
+    if (allCount > 0 && exts.size() >= allCount) text += L"（全部文件）";
+    return text;
+}
+
 } // namespace
 
 // ============================================================================
@@ -1692,6 +1709,71 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wPa
     {
         NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
         if (header == nullptr) break;
+
+        if (header->hwndFrom == m_hSysTree && header->code == TVN_GETINFOTIP)
+        {
+            // 悬停提示：把这一项/这一类的扩展名范围摊开给用户看
+            NMTVGETINFOTIPW* tip = reinterpret_cast<NMTVGETINFOTIPW*>(lParam);
+            if (tip == nullptr || tip->pszText == nullptr) return 0;
+
+            // 树控件的 infotip 不给 lItemParam，自己按 hItem 取树项的 lParam
+            int nodeIndex = -1;
+            TVITEMW item = {};
+            item.mask  = TVIF_PARAM;
+            item.hItem = tip->hItem;
+            if (::SendMessageW(m_hSysTree, TVM_GETITEMW, 0, reinterpret_cast<LPARAM>(&item)))
+            {
+                nodeIndex = static_cast<int>(item.lParam) - 1;
+            }
+
+            std::wstring text;
+            if (nodeIndex >= 0 && nodeIndex < static_cast<int>(m_sysNodes.size()))
+            {
+                const SysNode& node = m_sysNodes[nodeIndex];
+
+                size_t allCount = 0;
+                for (const shell::CensusExtension& ext : m_report.extensions)
+                {
+                    if (ext.ok) ++allCount;
+                }
+
+                if (node.kind == SysNode::Group &&
+                    node.groupIndex >= 0 &&
+                    node.groupIndex < static_cast<int>(m_report.fileGroups.size()))
+                {
+                    const shell::CensusMenuGroup& group = m_report.fileGroups[node.groupIndex];
+                    text = L"这一类适用于：" + ExtHoverText(group.exts, allCount, 10) +
+                           L"　共 " + std::to_wstring(group.items.size()) + L" 个顶层项";
+                }
+                else if (node.systemNode != nullptr)
+                {
+                    const std::wstring name = node.systemNode->text.empty()
+                                                  ? L"（无文字）" : node.systemNode->text;
+                    text = name + L"：" + ExtHoverText(node.systemNode->exts, allCount, 10);
+                }
+                else if (node.kind == SysNode::Scene)
+                {
+                    if (node.scene == shell::SceneFile)
+                    {
+                        text = L"单选文件：共 " + std::to_wstring(m_report.fileGroups.size()) +
+                               L" 类范围组，拖任意一类或其中一项到右侧即可";
+                    }
+                    else
+                    {
+                        text = SceneName(node.scene) + L"：这一类对象上的全部菜单（已合并各软件）";
+                    }
+                }
+                else if (node.kind == SysNode::Software)
+                {
+                    text = L"系统：合并本机所有右键菜单，单选文件按扩展名范围分为 " +
+                           std::to_wstring(m_report.fileGroups.size()) + L" 类";
+                }
+            }
+
+            ::wcsncpy_s(tip->pszText, static_cast<size_t>(tip->cchTextMax),
+                        text.c_str(), _TRUNCATE);
+            return 0;
+        }
 
         if (header->hwndFrom == m_hSysTree && header->code == TVN_BEGINDRAG)
         {
