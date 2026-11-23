@@ -119,16 +119,20 @@ bool ContextMenuSettingsDialog::EnsureClassRegistered()
 
 void ContextMenuSettingsDialog::ShowModal()
 {
-    // 先读缓存；没有缓存（或版本不符）就现场采一次
-    if (!shell::LoadCache(m_report) || m_report.scenes.empty())
-    {
-        shell::CollectScenes(m_report);
-        shell::SaveCache(m_report);
-    }
+    // 先读缓存（缓存里有上次采集的图和文字，秒开）；
+    // 没有缓存时先把窗口显示出来，再在消息循环里采集，避免"点了按钮半天没反应"。
+    const bool hasCache = shell::LoadCache(m_report) && !m_report.scenes.empty();
 
     if (!CreateDialogWindow())
     {
         return;
+    }
+
+    if (!hasCache)
+    {
+        ::SetWindowTextW(m_hStatus, L"正在从系统采集右键菜单，请稍候…");
+        ::UpdateWindow(m_hWnd);
+        ::PostMessageW(m_hWnd, WM_APP + 1, 0, 0);   // 交给消息循环去采集
     }
 
     RunModalLoop(m_hOwner, m_hList);
@@ -586,8 +590,24 @@ void ContextMenuSettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index)
 
 void ContextMenuSettingsDialog::Refresh()
 {
+    // 采集要几秒，先把提示画上去，并临时禁用刷新按钮，避免连点
+    if (m_hStatus != nullptr)
+    {
+        ::SetWindowTextW(m_hStatus, L"正在从系统采集右键菜单，请稍候…");
+    }
+    if (m_hRefresh != nullptr)
+    {
+        ::EnableWindow(m_hRefresh, FALSE);
+    }
+    ::UpdateWindow(m_hWnd);
+
     shell::CollectScenes(m_report);
     shell::SaveCache(m_report);
+
+    if (m_hRefresh != nullptr)
+    {
+        ::EnableWindow(m_hRefresh, TRUE);
+    }
 
     // 样本下拉重新填（采集后文件场景数量固定，但保持同步）
     if (m_hCombo != nullptr)
@@ -699,6 +719,11 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, 
             return 0;
         }
         break;
+
+    case WM_APP + 1:
+        // 窗口已经显示出来了，这里再真正去采集
+        Refresh();
+        return 0;
 
     case WM_CLOSE:
         ::DestroyWindow(m_hWnd);
