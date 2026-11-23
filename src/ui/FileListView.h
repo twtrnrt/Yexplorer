@@ -252,6 +252,9 @@ public:
     // 单行改名框（小图标 / 列表）：输入内容变长时把框跟着往右加宽
     void GrowRenameEditWidth();
 
+    // 详细信息 / 大图标视图由控件自己进入改名时，补设"只选主文件名、不选扩展名"
+    void SelectMainNameInEdit();
+
     // 是否正在原地改名（列表上有个编辑框挂着）
     // 目录监视触发的自动刷新要避开这个时刻，否则编辑框会被冲掉
     bool IsEditingLabel() const { return m_editingLabel; }

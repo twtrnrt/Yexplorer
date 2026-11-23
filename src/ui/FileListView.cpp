@@ -58,12 +58,36 @@ static const DWORD kTypeAheadTimeoutMs = 500;
 
 static const UINT kMsgFinishTileRename = WM_APP + 101;
 
+// 详细信息 / 大图标视图由「列表控件自己」进入改名时，补设"只选主文件名"的消息。
+// 控件建编辑框是在 LVN_BEGINLABELEDIT 返回之后，此刻拿不到句柄，所以排到队列后面再做。
+static const UINT kMsgSelectMainName = WM_APP + 102;
+
 // 单行改名框（小图标 / 列表）的宽度 = 文字实际宽 + 这个值。
 // 里面包含：左右内边距各 3px、边框与光标位置约 5px，再按用户要求向右多留 9px。
 static const int kRenameEditExtraWidth = 17;
 
 // 单行改名框的高度：列表视图的行距也是 24（和小图标一致），框正好贴满一行
 static const int kRenameEditHeight = 24;
+
+// 改名时编辑框该选中到哪个位置：只选主文件名，不选扩展名（和资源管理器一致）。
+//   · 文件夹：整个名字都选中（文件夹名里的点不是扩展名）
+//   · 以点开头的名字（.gitignore / .bashrc）：rfind 找到的点在 0 位，按"没有扩展名"处理，
+//     否则会一个字符都不选
+static int MainNameSelectEnd(const std::wstring& name, bool isFolder)
+{
+    int selectEnd = static_cast<int>(name.size());
+
+    if (!isFolder)
+    {
+        const size_t dot = name.rfind(L'.');
+        if (dot != std::wstring::npos && dot > 0)
+        {
+            selectEnd = static_cast<int>(dot);
+        }
+    }
+
+    return selectEnd;
+}
 
 // 这个项要不要参与"淡化"（变灰 / 半透明）。
 //
@@ -1855,17 +1879,41 @@ void FileListView::BeginRenameSelected()
 
     // ---- 只选中主文件名、不选扩展名（和资源管理器一致）----
     // 控件的编辑框默认是全选的（连扩展名一起），这里改回来
-    int selectEnd = static_cast<int>(entry.name.size());
-    if (!entry.isFolder)
+    ::SendMessageW(edit, EM_SETSEL, 0,
+                   static_cast<LPARAM>(MainNameSelectEnd(entry.name, entry.isFolder)));
+}
+
+// ---------------------------------------------------------------------------
+// 详细信息 / 大图标视图：控件自己进入改名后，把选中范围改回"只选主文件名"
+//
+// F2 与右键「重命名」都走 BeginRenameSelected，那里能直接拿到编辑框、当场设选中范围。
+// 但「单击已经选中的那一项的名字」是列表控件自己的行为（LVS_EDITLABELS 内建），
+// 编辑框由控件创建、默认全选（连扩展名一起），我们插不进去。所以 LVN_BEGINLABELEDIT
+// 里只投递一条消息，等控件把编辑框建好、这条消息出队时再改。
+// ---------------------------------------------------------------------------
+void FileListView::SelectMainNameInEdit()
+{
+    if (m_hWnd == nullptr || m_result == nullptr)
     {
-        const size_t dot = entry.name.rfind(L'.');
-        if (dot != std::wstring::npos && dot > 0)
-        {
-            selectEnd = static_cast<int>(dot);
-        }
+        return;
     }
 
-    ::SendMessageW(edit, EM_SETSEL, 0, static_cast<LPARAM>(selectEnd));
+    HWND edit = ListView_GetEditControl(m_hWnd);
+    if (edit == nullptr)
+    {
+        return;   // 编辑框已经不在了（比如刚弹出就被点了别处），什么都不用做
+    }
+
+    const int index = m_editingIndex;
+    if (index < 0 || index >= static_cast<int>(m_result->entries.size()))
+    {
+        return;
+    }
+
+    const shell::ShellEntry& entry = m_result->entries[static_cast<size_t>(index)];
+
+    ::SendMessageW(edit, EM_SETSEL, 0,
+                   static_cast<LPARAM>(MainNameSelectEnd(entry.name, entry.isFolder)));
 }
 
 // ============================================================================
@@ -2319,6 +2367,12 @@ LRESULT CALLBACK FileListView::ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM 
     {
         // 平铺改名框失焦后排队回来的收尾（提交）
         self->FinishTileRename(true);
+        return 0;
+    }
+    else if (msg == kMsgSelectMainName && self != nullptr)
+    {
+        // 控件自己进入改名后，补设"只选主文件名、不选扩展名"
+        self->SelectMainNameInEdit();
         return 0;
     }
     else if (msg == WM_COMMAND && self != nullptr && self->m_hEdit != nullptr &&
@@ -2990,6 +3044,14 @@ LRESULT FileListView::HandleNotify(LPARAM lParam)
         // 平铺是自绘的，控件不知道名字画在哪儿，没法自己把字擦掉。
         // 记下正在编辑的行号，DrawTile 见到这一行就不画名字，把位置让给编辑框。
         m_editingIndex = index;
+
+        // 详细信息 / 大图标视图这里是控件自己建的编辑框（「单击已选中项的名字」进改名），
+        // 默认全选、连扩展名一起。此刻编辑框还没建出来，投递一条消息等它建好再改选中范围。
+        // 平铺 / 小图标 / 列表走的是 BeginTileRename 自建的框，那边当场就设好了，不用管。
+        if (m_viewMode == ViewMode::Details || m_viewMode == ViewMode::LargeIcon)
+        {
+            ::PostMessageW(m_hWnd, kMsgSelectMainName, 0, 0);
+        }
 
         return FALSE;      // 返回假 = 允许编辑
     }
