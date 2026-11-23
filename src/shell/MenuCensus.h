@@ -67,6 +67,18 @@ struct CensusCluster
     std::wstring sampleExt;                   // 代表扩展名
 };
 
+// 「系统」品牌的合并菜单节点：
+// 系统菜单在每个扩展名上其实只有少量差异，界面上不再按扩展名分簇，
+// 而是把"同级 + 同文字 + 同命令"的项合并成一个节点，记住它覆盖的扩展名。
+struct CensusSystemNode
+{
+    std::wstring text;                        // 菜单文字（模板化后）
+    std::wstring verb;                        // 命令（忽略大小写比较）
+    std::wstring iconFile;                    // 图标（取第一个有图的）
+    std::vector<std::wstring> exts;           // 这个节点在哪些扩展名上出现（并集）
+    std::vector<CensusSystemNode> children;   // 子菜单
+};
+
 // 一次普查的完整结果
 struct CensusReport
 {
@@ -74,6 +86,7 @@ struct CensusReport
     std::vector<CensusExtension> extensions;   // 各扩展名
     std::vector<CensusScene> scenes;           // 多选 / 文件夹 / 空白区
     std::vector<CensusCluster> clusters;       // 文件场景下按软件分簇
+    std::vector<CensusSystemNode> systemMenu;  // 系统品牌合并后的菜单（不分簇）
 
     // 便捷查询
     int BrokenCount() const;                   // 采集失败的扩展名数
@@ -86,6 +99,10 @@ bool SaveCensus(const CensusReport& report);
 
 // 根据 extensions 重新计算 clusters（每次普查后调用）
 void BuildClusters(CensusReport& report);
+
+// 根据 extensions 重新计算「系统」品牌的合并菜单（每次普查后调用）
+// 合并键 = 同级同父 + 文字 + 命令（命令忽略大小写）
+void BuildSystemMenu(CensusReport& report);
 
 // 寄存器"印记"：用来判断是否需要重新普查（注册表键的修改时间 + 扩展名清单）
 std::wstring RegistryStamp();

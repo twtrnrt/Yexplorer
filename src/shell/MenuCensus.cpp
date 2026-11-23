@@ -24,6 +24,7 @@
 #include <cwctype>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -742,6 +743,7 @@ void BuildClusters(CensusReport& report)
         if (!ext.ok) continue;
         for (const std::wstring& brand : knownBrands)
         {
+            if (brand == L"系统") continue;   // 系统品牌走 BuildSystemMenu（合并成一份菜单，不分簇）
             const std::wstring signature = BrandSignature(ext.items, brand);
             if (signature.empty()) continue;   // 这一家在这类文件上没菜单
 
@@ -829,6 +831,154 @@ void BuildClusters(CensusReport& report)
                   if (a.brand != b.brand) return a.brand < b.brand;
                   return a.exts.size() > b.exts.size();
               });
+}
+
+// ---------------------------------------------------------------------------
+// 系统品牌合并菜单
+// ---------------------------------------------------------------------------
+namespace
+{
+
+std::wstring LowerText(const std::wstring& text)
+{
+    std::wstring lowered = text;
+    for (wchar_t& ch : lowered)
+    {
+        ch = static_cast<wchar_t>(::towlower(ch));
+    }
+    return lowered;
+}
+
+} // namespace
+
+void BuildSystemMenu(CensusReport& report)
+{
+    report.systemMenu.clear();
+
+    // 代表样本优先用最常见的类型，保证系统菜单的顺序看起来眼熟；
+    // 其余扩展名按字母序补在后面（只影响"先看到哪些项"，不影响合并结果）。
+    static const wchar_t* const kPreferred[] = { L".txt", L".docx", L".jpg", L".png", L".zip", L".pdf" };
+
+    std::vector<const CensusExtension*> ordered;
+    for (const wchar_t* ext : kPreferred)
+    {
+        for (const CensusExtension& candidate : report.extensions)
+        {
+            if (candidate.ok && candidate.ext == ext) { ordered.push_back(&candidate); break; }
+        }
+    }
+    for (const CensusExtension& candidate : report.extensions)
+    {
+        if (!candidate.ok) continue;
+        bool already = false;
+        for (const CensusExtension* existing : ordered)
+        {
+            if (existing->ext == candidate.ext) { already = true; break; }
+        }
+        if (!already) ordered.push_back(&candidate);
+    }
+
+    // 第一步：先把所有项拍平成「索引 + 父索引」的列表。
+    // 用索引而不是指针，是因为 vector 扩容会把指针全部搞失效。
+    struct Flat
+    {
+        std::wstring text;
+        std::wstring verb;
+        std::wstring iconFile;
+        std::vector<std::wstring> exts;
+        int parent = -1;       // 父节点在 Flat 列表里的下标，-1 = 顶层
+    };
+
+    std::vector<Flat> flat;
+    std::map<std::wstring, int> byKey;   // 合并键 → Flat 下标
+    std::vector<int> stack;              // 层级 → 当前节点下标
+
+    for (const CensusExtension* ext : ordered)
+    {
+        stack.clear();
+
+        for (const CensusItem& item : ext->items)
+        {
+            if (item.separator) continue;
+            if (item.brand != L"系统") continue;
+
+            const int level = item.level;
+            int parent = -1;
+            if (level > 0 && static_cast<int>(stack.size()) >= level)
+            {
+                parent = stack[level - 1];
+            }
+
+            // 合并键：同级同父 + 文字 + 命令（命令忽略大小写）
+            std::wstring key = std::to_wstring(parent);
+            key.push_back(L'\x1f');
+            key += LowerText(item.text);
+            key.push_back(L'\x1f');
+            key += LowerText(item.verb);
+
+            int index = -1;
+            auto found = byKey.find(key);
+            if (found != byKey.end())
+            {
+                index = found->second;
+                Flat& existing = flat[index];
+                if (existing.iconFile.empty() && !item.iconFile.empty())
+                {
+                    existing.iconFile = item.iconFile;
+                }
+                bool known = false;
+                for (const std::wstring& knownExt : existing.exts)
+                {
+                    if (knownExt == ext->ext) { known = true; break; }
+                }
+                if (!known) existing.exts.push_back(ext->ext);
+            }
+            else
+            {
+                Flat fresh;
+                fresh.text     = item.text;
+                fresh.verb     = item.verb;
+                fresh.iconFile = item.iconFile;
+                fresh.parent   = parent;
+                fresh.exts.push_back(ext->ext);
+                flat.push_back(std::move(fresh));
+                index = static_cast<int>(flat.size()) - 1;
+                byKey[key] = index;
+            }
+
+            stack.resize(static_cast<size_t>(level) + 1, -1);
+            stack[level] = index;
+        }
+    }
+
+    // 第二步：把拍平列表按父子关系装回树（childrenByParent 按创建顺序，菜单顺序保持原样）
+    std::vector<std::vector<int>> childrenByParent(flat.size());
+    std::vector<int> roots;
+    for (int i = 0; i < static_cast<int>(flat.size()); ++i)
+    {
+        if (flat[i].parent >= 0) childrenByParent[flat[i].parent].push_back(i);
+        else roots.push_back(i);
+    }
+
+    // 递归装树（层级最多个位数，不会爆栈）
+    std::function<CensusSystemNode(int)> buildNode = [&](int index) -> CensusSystemNode
+    {
+        CensusSystemNode node;
+        node.text     = flat[index].text;
+        node.verb     = flat[index].verb;
+        node.iconFile = flat[index].iconFile;
+        node.exts     = flat[index].exts;
+        for (int child : childrenByParent[index])
+        {
+            node.children.push_back(buildNode(child));
+        }
+        return node;
+    };
+
+    for (int root : roots)
+    {
+        report.systemMenu.push_back(buildNode(root));
+    }
 }
 
 // -------------------------------------------------------------------------------------------------------------------------------------------
@@ -933,6 +1083,7 @@ bool LoadCensus(CensusReport& report)
     }
 
     BuildClusters(report);
+    BuildSystemMenu(report);
     return true;
 }
 

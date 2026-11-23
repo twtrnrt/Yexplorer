@@ -72,6 +72,9 @@ private:
         int          clusterItemIndex = -1;    // Item 节点：簇内条目下标
         int          sceneItemIndex = -1;      // Item 节点（非文件场景）：场景条目下标
         unsigned int itemScene = 0;            // Item 节点：所属场景位
+        // 「系统」品牌的合并菜单节点（不分簇）；非空时用这个而不是簇下标
+        const shell::CensusSystemNode* systemNode = nullptr;
+        std::wstring systemPath;              // 系统菜单节点的祖先文字路径（造身份键用）
     };
 
     // 右侧配置树节点
@@ -202,6 +205,7 @@ private:
 
     // ---- 防止"属性区回填"时触发模型写回 ----
     bool m_fillingProperties = false;
+    std::wstring m_extsSummary;   // 属性区里扩展名的显示摘要（原样未改就不重写模型）
 };
 
 } // namespace ui

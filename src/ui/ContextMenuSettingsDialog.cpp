@@ -145,6 +145,25 @@ HBITMAP LoadBitmapFile(const std::wstring& iconFile, int pixels)
                                             LR_LOADFROMFILE | LR_CREATEDIBSECTION));
 }
 
+// 扩展名范围的显示摘要：覆盖全部 →「全部文件」，否则「前 3 个 等 N 种」
+std::wstring ExtSummary(const std::vector<std::wstring>& exts, size_t allCount)
+{
+    if (exts.empty()) return L"（不限）";
+    if (allCount > 0 && exts.size() >= allCount) return L"全部文件";
+
+    std::wstring text;
+    for (size_t i = 0; i < exts.size() && i < 3; ++i)
+    {
+        if (i > 0) text += L" ";
+        text += exts[i];
+    }
+    if (exts.size() > 3)
+    {
+        text += L" 等 " + std::to_wstring(exts.size()) + L" 种";
+    }
+    return text;
+}
+
 } // namespace
 
 // ============================================================================
@@ -571,8 +590,12 @@ void ContextMenuSettingsDialog::RebuildSysTree()
         }
     }
 
+    if (!m_report.systemMenu.empty()) addBrand(L"系统");
+
     for (const std::wstring& brand : brands)
     {
+        const bool mergedSystem = (brand == L"系统" && !m_report.systemMenu.empty());
+
         // 该品牌在本机"单选文件"场景下的簇
         std::vector<int> ownClusters;
         for (int i = 0; i < static_cast<int>(m_report.clusters.size()); ++i)
@@ -596,7 +619,7 @@ void ContextMenuSettingsDialog::RebuildSysTree()
             if (!indexes.empty()) ownScenes.push_back({ scene.scene, indexes });
         }
 
-        if (ownClusters.empty() && ownScenes.empty()) continue;
+        if (ownClusters.empty() && ownScenes.empty() && !mergedSystem) continue;
 
         SysNode software;
         software.kind  = SysNode::Software;
@@ -605,7 +628,11 @@ void ContextMenuSettingsDialog::RebuildSysTree()
         const int softwareIndex = static_cast<int>(m_sysNodes.size()) - 1;
 
         std::wstring softwareText = brand;
-        if (!ownClusters.empty())
+        if (mergedSystem)
+        {
+            softwareText += L"　（合并菜单，不分簇）";
+        }
+        else if (!ownClusters.empty())
         {
             softwareText += L"　（" + std::to_wstring(ownClusters.size()) + L" 簇）";
         }
@@ -613,8 +640,53 @@ void ContextMenuSettingsDialog::RebuildSysTree()
                                                    shell::BrandIconFile(brand),
                                                    softwareIndex + 1);
 
-        // ---- 单选文件场景：三级按扩展名分簇 ----
-        if (!ownClusters.empty())
+        // ---- 单选文件场景：系统用合并菜单；其它软件按扩展名分簇 ----
+        if (mergedSystem)
+        {
+            SysNode fileScene;
+            fileScene.kind  = SysNode::Scene;
+            fileScene.brand = brand;
+            fileScene.scene = shell::SceneFile;
+            m_sysNodes.push_back(fileScene);
+            const int fileSceneIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+            const HTREEITEM fileSceneItem = AddTreeItem(
+                m_hSysTree, softwareItem,
+                L"单选文件　（合并后 " + std::to_wstring(m_report.systemMenu.size()) +
+                    L" 个顶层项）",
+                std::wstring(), fileSceneIndex + 1);
+
+            // 递归展开合并后的系统菜单（节点带自己的扩展名范围）
+            std::function<void(const shell::CensusSystemNode&, HTREEITEM, const std::wstring&)> appendNode =
+                [&](const shell::CensusSystemNode& node, HTREEITEM parentItem, const std::wstring& parentPath)
+            {
+                SysNode itemNode;
+                itemNode.kind       = SysNode::Item;
+                itemNode.brand      = L"系统";
+                itemNode.itemScene  = shell::SceneFile;
+                itemNode.systemNode = &node;
+                itemNode.systemPath = parentPath;
+                m_sysNodes.push_back(itemNode);
+                const int itemNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+                const std::wstring text = node.text.empty() ? L"（无文字）" : node.text;
+                const HTREEITEM newItem = AddTreeItem(m_hSysTree, parentItem, text,
+                                                      node.iconFile, itemNodeIndex + 1);
+                const std::wstring childPath = parentPath + text + L"\x1f";
+                for (const shell::CensusSystemNode& child : node.children)
+                {
+                    appendNode(child, newItem, childPath);
+                }
+            };
+
+            for (const shell::CensusSystemNode& node : m_report.systemMenu)
+            {
+                appendNode(node, fileSceneItem, std::wstring());
+            }
+            ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE,
+                           reinterpret_cast<LPARAM>(fileSceneItem));
+        }
+        else if (!ownClusters.empty())
         {
             SysNode fileScene;
             fileScene.kind  = SysNode::Scene;
@@ -1011,7 +1083,7 @@ void ContextMenuSettingsDialog::LoadSelectionProperties()
     std::wstring name;
     std::wstring iconFile;
     unsigned int scenes = 0;
-    std::wstring exts;
+    std::vector<std::wstring> scopedExts;
 
     if (hasSelection && node.kind == CfgNode::Group)
     {
@@ -1030,13 +1102,22 @@ void ContextMenuSettingsDialog::LoadSelectionProperties()
             name     = entry->displayName.empty() ? entry->sourceText : entry->displayName;
             iconFile = entry->iconFile;
             scenes   = entry->scope.scenes;
-            for (const std::wstring& ext : entry->scope.exts)
-            {
-                if (!exts.empty()) exts += L" ";
-                exts += ext;
-            }
+            scopedExts = entry->scope.exts;
         }
     }
+
+    // 扩展名只显示摘要（覆盖全部就写"全部文件"），完整清单留在配置模型里
+    std::wstring exts;
+    size_t allCount = 0;
+    for (const shell::CensusExtension& ext : m_report.extensions)
+    {
+        if (ext.ok) ++allCount;
+    }
+    if (!scopedExts.empty())
+    {
+        exts = ExtSummary(scopedExts, allCount);
+    }
+    m_extsSummary = exts;
 
     ::SetWindowTextW(m_hNameEdit, name.c_str());
     ::SetWindowTextW(m_hExtsEdit, exts.c_str());
@@ -1117,6 +1198,12 @@ void ContextMenuSettingsDialog::ApplyExtsFromEdit()
     std::wstring raw(static_cast<size_t>(length) + 1, L'\0');
     ::GetWindowTextW(m_hExtsEdit, &raw[0], length + 1);
     raw.resize(static_cast<size_t>(length));
+
+    // 用户没改（还是那句摘要）就不动模型里的完整扩展名清单
+    if (Trim(raw) == m_extsSummary)
+    {
+        return;
+    }
 
     std::vector<std::wstring> exts;
     std::wstring token;
@@ -1318,10 +1405,38 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         }
     };
 
+    // 「系统」品牌的合并菜单：按节点自带的范围展开（每个节点的扩展名范围不同）
+    std::function<void(const shell::CensusSystemNode&, int, const std::wstring&)> appendSystemTree;
+    appendSystemTree = [&out, &appendSystemTree](const shell::CensusSystemNode& node,
+                                                 int depth,
+                                                 const std::wstring& parentPath)
+    {
+        DropItem drop;
+        drop.text     = node.text;
+        drop.brand    = L"系统";
+        drop.verb     = node.verb;
+        drop.iconFile = node.iconFile;
+        drop.level    = depth;
+        drop.scenes   = shell::SceneFile;
+        drop.exts     = node.exts;
+        drop.pathKey  = L"系统|" + node.verb + L"|" + parentPath + node.text;
+        out.push_back(drop);
+
+        const std::wstring childPath = parentPath + node.text + L"\x1f";
+        for (const shell::CensusSystemNode& child : node.children)
+        {
+            appendSystemTree(child, depth + 1, childPath);
+        }
+    };
+
     switch (node.kind)
     {
     case SysNode::Item:
-        if (node.itemScene == shell::SceneFile && node.clusterIndex >= 0)
+        if (node.systemNode != nullptr)
+        {
+            appendSystemTree(*node.systemNode, 0, node.systemPath);
+        }
+        else if (node.itemScene == shell::SceneFile && node.clusterIndex >= 0)
         {
             appendCluster(node.clusterIndex, node.clusterItemIndex);
         }
@@ -1355,6 +1470,14 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
     case SysNode::Scene:
         if (node.scene == shell::SceneFile)
         {
+            if (node.brand == L"系统" && !m_report.systemMenu.empty())
+            {
+                for (const shell::CensusSystemNode& root : m_report.systemMenu)
+                {
+                    appendSystemTree(root, 0, std::wstring());
+                }
+                break;
+            }
             for (int i = 0; i < static_cast<int>(m_report.clusters.size()); ++i)
             {
                 if (m_report.clusters[i].brand == node.brand) appendCluster(i, -1);
@@ -1378,6 +1501,13 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         break;
 
     case SysNode::Software:
+        if (node.brand == L"系统" && !m_report.systemMenu.empty())
+        {
+            for (const shell::CensusSystemNode& root : m_report.systemMenu)
+            {
+                appendSystemTree(root, 0, std::wstring());
+            }
+        }
         for (int i = 0; i < static_cast<int>(m_report.clusters.size()); ++i)
         {
             if (m_report.clusters[i].brand == node.brand) appendCluster(i, -1);
@@ -1572,6 +1702,7 @@ void ContextMenuSettingsDialog::StartCensus()
         report->extensions = std::move(results);
         shell::CollectNonFileScenes(report->scenes);
         shell::BuildClusters(*report);
+        shell::BuildSystemMenu(*report);
 
         ::PostMessageW(window, WM_APP + 3, 0, reinterpret_cast<LPARAM>(report));
     });
@@ -1699,11 +1830,45 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wPa
         }
         if (header->hwndFrom == m_hSysTree && header->code == TVN_SELCHANGED)
         {
-            // 左侧选中时给个提示，告诉用户能拖
             const NMTREEVIEWW* change = reinterpret_cast<const NMTREEVIEWW*>(lParam);
             if (change->itemNew.hItem != nullptr)
             {
-                ::SetWindowTextW(m_hStatus, L"提示：按住这一项拖到右侧的组或条目上，即可加入我们的菜单");
+                TVITEMW item = {};
+                item.mask  = TVIF_PARAM;
+                item.hItem = change->itemNew.hItem;
+                int nodeIndex = -1;
+                if (::SendMessageW(m_hSysTree, TVM_GETITEMW, 0, reinterpret_cast<LPARAM>(&item)))
+                {
+                    nodeIndex = static_cast<int>(item.lParam) - 1;
+                }
+
+                std::wstring status = L"提示：按住这一项拖到右侧的组或条目上，即可加入我们的菜单";
+                if (nodeIndex >= 0 && nodeIndex < static_cast<int>(m_sysNodes.size()))
+                {
+                    const SysNode& node = m_sysNodes[nodeIndex];
+                    if (node.systemNode != nullptr)
+                    {
+                        size_t allCount = 0;
+                        for (const shell::CensusExtension& ext : m_report.extensions)
+                        {
+                            if (ext.ok) ++allCount;
+                        }
+                        const std::wstring text = node.systemNode->text.empty()
+                                                      ? L"（无文字）" : node.systemNode->text;
+                        status = L"「" + text + L"」 适用于 " +
+                                 ExtSummary(node.systemNode->exts, allCount) +
+                                 L"　（拖到右侧即可加入我们的菜单）";
+                    }
+                    else if (node.kind == SysNode::Cluster &&
+                             node.clusterIndex >= 0 &&
+                             node.clusterIndex < static_cast<int>(m_report.clusters.size()))
+                    {
+                        status = L"这一簇覆盖 " +
+                                 std::to_wstring(m_report.clusters[node.clusterIndex].exts.size()) +
+                                 L" 种扩展名　（拖到右侧即可加入我们的菜单）";
+                    }
+                }
+                ::SetWindowTextW(m_hStatus, status.c_str());
             }
             return 0;
         }
