@@ -5,17 +5,16 @@
 // 「配置右键菜单」窗口实现。界面说明见 ContextMenuSettingsDialog.h。
 //
 // 数据链路：
-//   · 打开窗口：先读 menu-cache.json 缓存，有就直接展示；
-//   · 点「刷新」：EnumerateRegistry 扫注册表 → CollectDynamicItems 运行时采集
-//     → SaveCache 落缓存 → 重建树。
+//   · 打开窗口：先读 menu-cache.json 缓存（含 menu-icons 里的渲染图）；
+//   · 点「刷新」：CollectScenes 重新采集 → SaveCache → 重建列表。
 //
-// 一期只做查看，窗口内不写回配置、不执行菜单命令。
+// 列表用自绘 ListView：每一行贴采集时外壳扩展画好的位图，
+// 所以图标和文字都跟系统右键菜单一模一样。
 // ============================================================================
 
 #include "ui/ContextMenuSettingsDialog.h"
 
 #include "core/Logger.h"
-#include "shell/ContextMenuEnumerator.h"
 #include "shell/ContextMenuCollector.h"
 
 #include <windows.h>
@@ -24,7 +23,7 @@
 #include <shlwapi.h>
 
 #include <string>
-#include <unordered_map>
+#include <vector>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -39,28 +38,38 @@ const wchar_t* const kClassName = L"FileExplorerContextMenuSettingsDialog";
 
 const int kControlIdStatus  = 2201;
 const int kControlIdRefresh = 2202;
-const int kControlIdTree    = 2203;
-const int kControlIdSystem  = 2204;
+const int kControlIdList    = 2203;
+const int kControlIdTab     = 2204;
+const int kControlIdCombo   = 2205;
 
 // 窗口客户区尺寸（逻辑像素）
-const int kDialogWidth  = 720;
-const int kDialogHeight = 480;
-const int kPadding      = 14;
+const int kDialogWidth  = 760;
+const int kDialogHeight = 620;
+const int kPadding      = 12;
 const int kButtonHeight = 28;
-const int kButtonWidth  = 96;
+const int kButtonWidth  = 88;
 const int kTopRowHeight = 34;
+const int kTabHeight    = 26;
+const int kComboHeight  = 26;
 
-// 往树里插一个节点；返回节点句柄
-HTREEITEM InsertNode(HWND tree, HTREEITEM parent, const std::wstring& text, LPARAM lParam)
+// 列表行高（逻辑像素）——和渲染图高度（26）对齐
+const int kRowHeight = 26;
+
+const COLORREF kRowTextColor   = RGB(31, 35, 40);
+const COLORREF kSeparatorColor = RGB(222, 226, 230);
+const COLORREF kFailTextColor  = RGB(178, 34, 34);
+
+// 去掉 "文件 · " 之类的前缀，样本下拉里只显示样本名
+std::wstring ShortSampleLabel(const std::wstring& label)
 {
-    TVINSERTSTRUCTW insert = {};
-    insert.hParent      = parent;
-    insert.hInsertAfter = TVI_LAST;
-    insert.item.mask    = TVIF_TEXT | TVIF_PARAM;
-    insert.item.pszText = const_cast<LPWSTR>(text.data());
-    insert.item.lParam  = lParam;
-    return reinterpret_cast<HTREEITEM>(
-        ::SendMessageW(tree, TVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&insert)));
+    const size_t pos = label.find(L"·");
+    if (pos == std::wstring::npos)
+    {
+        return label;
+    }
+    std::wstring tail = label.substr(pos + 1);
+    const size_t begin = tail.find_first_not_of(L" ");
+    return begin == std::wstring::npos ? tail : tail.substr(begin);
 }
 
 } // namespace
@@ -77,6 +86,7 @@ ContextMenuSettingsDialog::ContextMenuSettingsDialog(HWND owner)
 
 ContextMenuSettingsDialog::~ContextMenuSettingsDialog()
 {
+    ReleaseBitmaps();
     if (m_font != nullptr)
     {
         ::DeleteObject(m_font);
@@ -95,12 +105,10 @@ bool ContextMenuSettingsDialog::EnsureClassRegistered()
     {
         return true;
     }
-
     if (!RegisterWindowClass(kClassName, ::GetModuleHandleW(nullptr), CS_DBLCLKS))
     {
         return false;
     }
-
     registered = true;
     return true;
 }
@@ -111,11 +119,10 @@ bool ContextMenuSettingsDialog::EnsureClassRegistered()
 
 void ContextMenuSettingsDialog::ShowModal()
 {
-    // 先读缓存；没有缓存就先跑一次采集
-    if (!shell::LoadCache(m_report) || m_report.groups.empty())
+    // 先读缓存；没有缓存（或版本不符）就现场采一次
+    if (!shell::LoadCache(m_report) || m_report.scenes.empty())
     {
-        m_report = shell::EnumerateRegistry();
-        shell::CollectDynamicItems(m_report);
+        shell::CollectScenes(m_report);
         shell::SaveCache(m_report);
     }
 
@@ -124,7 +131,7 @@ void ContextMenuSettingsDialog::ShowModal()
         return;
     }
 
-    RunModalLoop(m_hOwner);
+    RunModalLoop(m_hOwner, m_hList);
 }
 
 // ============================================================================
@@ -138,10 +145,9 @@ bool ContextMenuSettingsDialog::CreateDialogWindow()
         return false;
     }
 
-    // 通用控件（TreeView 需要）
     INITCOMMONCONTROLSEX cc = {};
     cc.dwSize = sizeof(cc);
-    cc.dwICC  = ICC_TREEVIEW_CLASSES | ICC_STANDARD_CLASSES;
+    cc.dwICC  = ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES;
     ::InitCommonControlsEx(&cc);
 
     NONCLIENTMETRICSW metrics = {};
@@ -158,19 +164,26 @@ bool ContextMenuSettingsDialog::CreateDialogWindow()
     const int width  = Scale(kDialogWidth);
     const int height = Scale(kDialogHeight);
 
+    // 把客户区尺寸换算成窗口尺寸（含标题栏边框）
+    RECT windowRect = { 0, 0, width, height };
+    ::AdjustWindowRectEx(&windowRect, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
+                         WS_EX_DLGMODALFRAME);
+    const int windowW = windowRect.right - windowRect.left;
+    const int windowH = windowRect.bottom - windowRect.top;
+
     RECT ownerRect = {};
     if (m_hOwner != nullptr)
     {
         ::GetWindowRect(m_hOwner, &ownerRect);
     }
-    const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
-    const int y = ownerRect.top  + ((ownerRect.bottom - ownerRect.top) - height) / 2;
+    const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - windowW) / 2;
+    const int y = ownerRect.top  + ((ownerRect.bottom - ownerRect.top) - windowH) / 2;
 
     m_hWnd = ::CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
                                kClassName,
                                L"配置右键菜单",
                                WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                               x, y, width, height,
+                               x, y, windowW, windowH,
                                m_hOwner,
                                nullptr,
                                ::GetModuleHandleW(nullptr),
@@ -184,7 +197,7 @@ bool ContextMenuSettingsDialog::CreateDialogWindow()
 
     CreateControls();
     Layout();
-    ReloadTree();
+    ReloadList();
     return true;
 }
 
@@ -192,44 +205,87 @@ void ContextMenuSettingsDialog::CreateControls()
 {
     // 顶部状态标签
     m_hStatus = ::CreateWindowExW(0, WC_STATICW, L"",
-                                  WS_CHILD | WS_VISIBLE | SS_LEFT | SS_PATHELLIPSIS,
-                                  0, 0, 0, 0,
-                                  m_hWnd,
+                                  WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
+                                  0, 0, 0, 0, m_hWnd,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdStatus)),
                                   ::GetModuleHandleW(nullptr), nullptr);
-
-    // 「显示系统项」复选框：默认不勾，隐藏系统自带项（打开/复制/删除/属性…）
-    m_hCheckSystem = ::CreateWindowExW(0, WC_BUTTONW, L"显示系统项",
-                                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                       0, 0, 0, 0,
-                                       m_hWnd,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdSystem)),
-                                       ::GetModuleHandleW(nullptr), nullptr);
 
     // 刷新按钮
     m_hRefresh = ::CreateWindowExW(0, WC_BUTTONW, L"刷新",
                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                   0, 0, 0, 0,
-                                   m_hWnd,
+                                   0, 0, 0, 0, m_hWnd,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdRefresh)),
                                    ::GetModuleHandleW(nullptr), nullptr);
 
-    // 中部树形列表
-    m_hTree = ::CreateWindowExW(0, WC_TREEVIEWW, L"",
+    // 四个选项卡
+    m_hTab = ::CreateWindowExW(0, WC_TABCONTROLW, L"",
+                               WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                               0, 0, 0, 0, m_hWnd,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdTab)),
+                               ::GetModuleHandleW(nullptr), nullptr);
+
+    if (m_hTab != nullptr)
+    {
+        const wchar_t* tabNames[] = { L"文件", L"文件夹", L"文件夹空白区", L"多选文件" };
+        for (int i = 0; i < ARRAYSIZE(tabNames); ++i)
+        {
+            TCITEMW tabItem = {};
+            tabItem.mask = TCIF_TEXT;
+            tabItem.pszText = const_cast<LPWSTR>(tabNames[i]);
+            ::SendMessageW(m_hTab, TCM_INSERTITEMW, i, reinterpret_cast<LPARAM>(&tabItem));
+        }
+    }
+
+    // 文件选项卡的样本下拉（txt / docx / rar / zip）
+    m_hCombo = ::CreateWindowExW(0, WC_COMBOBOXW, L"",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                     TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT |
-                                     TVS_SHOWSELALWAYS,
-                                 0, 0, 0, 0,
-                                 m_hWnd,
-                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdTree)),
+                                     CBS_DROPDOWNLIST | WS_VSCROLL,
+                                 0, 0, 0, 0, m_hWnd,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdCombo)),
                                  ::GetModuleHandleW(nullptr), nullptr);
 
-    for (HWND ctrl : { m_hStatus, m_hRefresh, m_hTree, m_hCheckSystem })
+    // 列表（自绘行）
+    m_hList = ::CreateWindowExW(0, WC_LISTVIEWW, L"",
+                                WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                    LVS_REPORT | LVS_SINGLESEL | LVS_NOCOLUMNHEADER |
+                                    LVS_NOSORTHEADER | LVS_OWNERDRAWFIXED,
+                                0, 0, 0, 0, m_hWnd,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdList)),
+                                ::GetModuleHandleW(nullptr), nullptr);
+
+    if (m_hList != nullptr)
+    {
+        ::SendMessageW(m_hList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
+                       LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+
+        LVCOLUMNW column = {};
+        column.mask = LVCF_TEXT | LVCF_WIDTH;
+        column.pszText = const_cast<LPWSTR>(L"");
+        column.cx = Scale(1200);
+        ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+    }
+
+    for (HWND ctrl : { m_hStatus, m_hRefresh, m_hTab, m_hCombo, m_hList })
     {
         if (ctrl != nullptr)
         {
             ::SendMessageW(ctrl, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
         }
+    }
+
+    // 填充文件样本下拉
+    if (m_hCombo != nullptr)
+    {
+        for (const shell::SceneMenu& scene : m_report.scenes)
+        {
+            if (scene.scene == shell::SceneFile)
+            {
+                const std::wstring shortLabel = ShortSampleLabel(scene.sampleLabel);
+                ::SendMessageW(m_hCombo, CB_ADDSTRING, 0,
+                               reinterpret_cast<LPARAM>(shortLabel.c_str()));
+            }
+        }
+        ::SendMessageW(m_hCombo, CB_SETCURSEL, 0, 0);
     }
 }
 
@@ -247,147 +303,134 @@ void ContextMenuSettingsDialog::Layout()
     const int buttonW = Scale(kButtonWidth);
     const int buttonH = Scale(kButtonHeight);
     const int topH    = Scale(kTopRowHeight);
+    const int tabH    = Scale(kTabHeight);
+    const int comboH  = Scale(kComboHeight);
 
-    // 顶部行：状态标签吃左侧剩余宽度，「显示系统项」复选框和刷新按钮贴右
-    const int checkW = Scale(96);
+    // 状态 + 刷新
     ::SetWindowPos(m_hRefresh, nullptr,
-                   client.right - padding - buttonW,
-                   padding,
+                   client.right - padding - buttonW, padding,
                    buttonW, buttonH, SWP_NOZORDER);
 
-    if (m_hCheckSystem != nullptr)
-    {
-        ::SetWindowPos(m_hCheckSystem, nullptr,
-                       client.right - padding - buttonW - Scale(10) - checkW,
-                       padding + (buttonH - Scale(20)) / 2,
-                       checkW, Scale(20), SWP_NOZORDER);
-    }
-
-    const int statusRight = client.right - padding - buttonW - Scale(10) - checkW - Scale(10);
     ::SetWindowPos(m_hStatus, nullptr,
                    padding, padding + (buttonH - Scale(16)) / 2,
-                   statusRight - padding, Scale(16), SWP_NOZORDER);
+                   client.right - padding * 2 - buttonW - Scale(10), Scale(16),
+                   SWP_NOZORDER);
 
-    // 树占满顶部行以下的区域；复选框放在状态行下方靠左
-    ::SetWindowPos(m_hTree, nullptr,
-                   padding, padding + topH,
+    // 选项卡
+    const int tabTop = padding + topH;
+    ::SetWindowPos(m_hTab, nullptr,
+                   padding, tabTop,
+                   client.right - padding * 2, tabH, SWP_NOZORDER);
+
+    // 样本下拉：只在文件选项卡显示，放在选项卡下方右侧
+    const int comboTop = tabTop + tabH + Scale(4);
+    int listTop = comboTop + comboH + Scale(4);
+    if (m_hCombo != nullptr)
+    {
+        ::SetWindowPos(m_hCombo, nullptr,
+                       padding, comboTop, Scale(220), comboH + Scale(160),
+                       SWP_NOZORDER);
+    }
+
+    // 列表
+    ::SetWindowPos(m_hList, nullptr,
+                   padding, listTop,
                    client.right - padding * 2,
-                   client.bottom - padding * 2 - topH,
+                   client.bottom - padding - listTop,
                    SWP_NOZORDER);
 }
 
 // ============================================================================
-// 数据展示
+// 场景选择
 // ============================================================================
 
-void ContextMenuSettingsDialog::ReloadTree()
+int ContextMenuSettingsDialog::SceneIndexForTab(int tab) const
 {
-    if (m_hTree == nullptr)
+    // 选项卡 → 场景位
+    unsigned int wanted = shell::SceneNone;
+    switch (tab)
+    {
+    case 0: wanted = shell::SceneFile;       break;
+    case 1: wanted = shell::SceneFolder;     break;
+    case 2: wanted = shell::SceneBackground; break;
+    case 3: wanted = shell::SceneMultiple;   break;
+    default: return -1;
+    }
+
+    // 文件选项卡：按样本下拉选第几个
+    if (wanted == shell::SceneFile && m_hCombo != nullptr)
+    {
+        const int sel = static_cast<int>(::SendMessageW(m_hCombo, CB_GETCURSEL, 0, 0));
+        int seen = 0;
+        for (int i = 0; i < static_cast<int>(m_report.scenes.size()); ++i)
+        {
+            if (m_report.scenes[i].scene != shell::SceneFile)
+            {
+                continue;
+            }
+            if (seen == sel)
+            {
+                return i;
+            }
+            ++seen;
+        }
+        return -1;
+    }
+
+    for (int i = 0; i < static_cast<int>(m_report.scenes.size()); ++i)
+    {
+        if (m_report.scenes[i].scene == wanted)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// ============================================================================
+// 列表内容
+// ============================================================================
+
+void ContextMenuSettingsDialog::ReleaseBitmaps()
+{
+    for (HBITMAP bitmap : m_rowBitmaps)
+    {
+        if (bitmap != nullptr)
+        {
+            ::DeleteObject(bitmap);
+        }
+    }
+    m_rowBitmaps.clear();
+}
+
+void ContextMenuSettingsDialog::ReloadList()
+{
+    if (m_hList == nullptr)
     {
         return;
     }
 
-    ::SendMessageW(m_hTree, TVM_DELETEITEM, 0, reinterpret_cast<LPARAM>(TVI_ROOT));
+    ReleaseBitmaps();
+    m_rows.clear();
+    m_rowLevels.clear();
 
-    // 是否显示系统自带项（复选框状态）
-    const bool showSystem =
-        m_hCheckSystem != nullptr &&
-        ::SendMessageW(m_hCheckSystem, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    ::SendMessageW(m_hList, LVM_DELETEALLITEMS, 0, 0);
 
-    // 分组内节点的浅色分隔线只是视觉，不占条目
-    // 统计用
-    m_totalItemCount = 0;
-    m_hiddenSystemCount = 0;
+    const int tab = m_hTab != nullptr
+                        ? static_cast<int>(::SendMessageW(m_hTab, TCM_GETCURSEL, 0, 0))
+                        : 0;
 
-    // 一级文字 → 节点句柄（二级项按 parentPath 挂回去）
-    // 注意：分组可能重名合并过，所以 firstLevel 每个分组前清空，避免串组
-    for (const shell::ContextMenuGroup& group : m_report.groups)
+    // 样本下拉只在文件选项卡可见
+    if (m_hCombo != nullptr)
     {
-        m_totalItemCount += static_cast<int>(group.items.size());
-
-        // 先算出这一组要显示多少条（用于组名后的计数）
-        int visibleCount = 0;
-        for (const shell::ContextMenuItem& item : group.items)
-        {
-            if (item.isSeparator)
-            {
-                continue;
-            }
-            if (!showSystem && item.isSystemBuiltin)
-            {
-                ++m_hiddenSystemCount;
-                continue;
-            }
-            ++visibleCount;
-        }
-
-        if (visibleCount == 0)
-        {
-            continue;   // 整组都被过滤掉就不建组节点
-        }
-
-        // 根节点：分组名 + 条目数
-        std::wstring rootText = group.name.empty() ? L"（未命名）" : group.name;
-        rootText += L"  （" + std::to_wstring(visibleCount) + L" 项）";
-        const HTREEITEM hRoot = InsertNode(m_hTree, TVI_ROOT, rootText, 0);
-
-        std::unordered_map<std::wstring, HTREEITEM> firstLevel;
-
-        for (const shell::ContextMenuItem& item : group.items)
-        {
-            if (item.isSeparator)
-            {
-                continue;
-            }
-            if (!showSystem && item.isSystemBuiltin)
-            {
-                continue;
-            }
-
-            // 条目文字：真实菜单文字 + 场景标注 + 来源标注
-            std::wstring text = item.text.empty() ? L"（无名）" : item.text;
-            text += L"  [" + shell::ScenesToText(item.scenes) + L"]";
-
-            const std::wstring source =
-                shell::SourceLabelToText(item.fromRegistry, item.fromExtension);
-            if (!source.empty())
-            {
-                text += L" · " + source;
-            }
-            if (item.disabled)
-            {
-                text += L" （灰态）";
-            }
-            if (item.failed)
-            {
-                text += L" （读取失败：" + item.failReason + L"）";
-            }
-
-            // 一级项挂根节点；二级项按 parentPath 挂到对应一级节点
-            HTREEITEM parent = hRoot;
-            if (!item.parentPath.empty())
-            {
-                const auto it = firstLevel.find(item.parentPath);
-                if (it != firstLevel.end())
-                {
-                    parent = it->second;
-                }
-            }
-
-            const HTREEITEM hNode = InsertNode(m_hTree, parent, text, 0);
-
-            if (item.parentPath.empty())
-            {
-                firstLevel[item.text] = hNode;
-            }
-        }
-
-        // 展开分组根节点
-        ::SendMessageW(m_hTree, TVM_EXPAND, TVE_EXPAND,
-                       reinterpret_cast<LPARAM>(hRoot));
+        ::ShowWindow(m_hCombo, tab == 0 ? SW_SHOW : SW_HIDE);
+        Layout();
     }
 
-    // 状态文字：采集时间 + 统计 + 被隐藏的系统项数量
+    m_sceneIndex = SceneIndexForTab(tab);
+
+    const std::wstring iconDir = shell::IconDirPath();
+
     std::wstring status;
     if (m_report.collectedAt.empty())
     {
@@ -396,22 +439,174 @@ void ContextMenuSettingsDialog::ReloadTree()
     else
     {
         status = L"最近采集：" + m_report.collectedAt;
-        status += L"　共 " + std::to_wstring(m_totalItemCount) + L" 项";
-        if (!showSystem && m_hiddenSystemCount > 0)
+    }
+
+    if (m_sceneIndex < 0 || m_sceneIndex >= static_cast<int>(m_report.scenes.size()))
+    {
+        ::SetWindowTextW(m_hStatus, (status + L"　（该场景没有数据）").c_str());
+        return;
+    }
+
+    const shell::SceneMenu& scene = m_report.scenes[m_sceneIndex];
+
+    int shown = 0;
+    int noImage = 0;
+
+    for (const shell::ContextMenuItem& item : scene.items)
+    {
+        m_rows.push_back(&item);
+        m_rowLevels.push_back(item.level);
+
+        HBITMAP bitmap = nullptr;
+        if (!item.imageFile.empty())
         {
-            status += L"，已隐藏系统项 " + std::to_wstring(m_hiddenSystemCount) + L" 条";
+            const std::wstring path = iconDir + L"\\" + item.imageFile;
+            bitmap = static_cast<HBITMAP>(
+                ::LoadImageW(nullptr, path.c_str(), IMAGE_BITMAP, 0, 0,
+                             LR_LOADFROMFILE | LR_CREATEDIBSECTION));
+        }
+        if (bitmap == nullptr)
+        {
+            ++noImage;
+        }
+        m_rowBitmaps.push_back(bitmap);
+
+        if (!item.isSeparator)
+        {
+            ++shown;
         }
     }
+
+    // 建行：报告模式的自绘列表必须逐条插入（LVM_SETITEMCOUNT 只对虚拟列表有效）
+    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i)
+    {
+        LVITEMW lvItem = {};
+        lvItem.mask  = LVIF_TEXT;
+        lvItem.iItem = i;
+        lvItem.pszText = const_cast<LPWSTR>(L"");
+        ::SendMessageW(m_hList, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&lvItem));
+    }
+
+    // 状态栏
+    status += L"　" + scene.sampleLabel + L"：" +
+              std::to_wstring(shown) + L" 项";
+    if (noImage > 0)
+    {
+        status += L"，其中 " + std::to_wstring(noImage) + L" 条没取到图（只显示文字）";
+    }
+    if (!scene.ok && !scene.failReason.empty())
+    {
+        status += L"　采集失败：" + scene.failReason;
+    }
     ::SetWindowTextW(m_hStatus, status.c_str());
+
+    ::InvalidateRect(m_hList, nullptr, TRUE);
 }
+
+// ============================================================================
+// 自绘行
+// ============================================================================
+
+void ContextMenuSettingsDialog::DrawSeparatorRow(HDC dc, const RECT& rowRect)
+{
+    const int y = (rowRect.top + rowRect.bottom) / 2;
+    HPEN pen = ::CreatePen(PS_SOLID, 1, kSeparatorColor);
+    HGDIOBJ oldPen = ::SelectObject(dc, pen);
+    ::MoveToEx(dc, rowRect.left + Scale(8), y, nullptr);
+    ::LineTo(dc, rowRect.right - Scale(8), y);
+    ::SelectObject(dc, oldPen);
+    ::DeleteObject(pen);
+}
+
+void ContextMenuSettingsDialog::DrawRow(HDC dc, const RECT& rowRect, int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_rows.size()))
+    {
+        return;
+    }
+
+    const shell::ContextMenuItem& item = *m_rows[index];
+    const int level = m_rowLevels[index];
+
+    if (item.isSeparator)
+    {
+        DrawSeparatorRow(dc, rowRect);
+        return;
+    }
+
+    const int indent = Scale(8) + Scale(18) * level;
+    const int rowHeight = rowRect.bottom - rowRect.top;
+
+    HBITMAP bitmap = (index < static_cast<int>(m_rowBitmaps.size()))
+                         ? m_rowBitmaps[index] : nullptr;
+
+    if (bitmap != nullptr)
+    {
+        // 渲染图是 96 DPI 逻辑尺寸，按当前 DPI 等比缩放
+        BITMAP info = {};
+        if (::GetObjectW(bitmap, sizeof(info), &info) == sizeof(info))
+        {
+            const int targetHeight = rowHeight - Scale(2);
+            const int targetWidth = info.bmWidth * targetHeight / (info.bmHeight > 0 ? info.bmHeight : 1);
+
+            HDC memDc = ::CreateCompatibleDC(dc);
+            HGDIOBJ oldBitmap = ::SelectObject(memDc, bitmap);
+            ::SetStretchBltMode(dc, HALFTONE);
+            ::StretchBlt(dc, rowRect.left + indent, rowRect.top + Scale(1),
+                         targetWidth, targetHeight,
+                         memDc, 0, 0, info.bmWidth, info.bmHeight, SRCCOPY);
+            ::SelectObject(memDc, oldBitmap);
+            ::DeleteDC(memDc);
+        }
+        return;
+    }
+
+    // 没有渲染图：只画文字（左缩进 + 可选图标区留白）
+    ::SetBkMode(dc, TRANSPARENT);
+    ::SetTextColor(dc, item.failed ? kFailTextColor : kRowTextColor);
+    HGDIOBJ oldFont = ::SelectObject(dc, m_font);
+
+    std::wstring text = item.text.empty() ? L"（无文字）" : item.text;
+    if (item.failed && !item.failReason.empty())
+    {
+        text += L"　（" + item.failReason + L"）";
+    }
+
+    RECT textRect = { rowRect.left + indent + Scale(2), rowRect.top,
+                      rowRect.right - Scale(6), rowRect.bottom };
+    ::DrawTextW(dc, text.c_str(), -1, &textRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    ::SelectObject(dc, oldFont);
+}
+
+// ============================================================================
+// 刷新
+// ============================================================================
 
 void ContextMenuSettingsDialog::Refresh()
 {
-    // 重新扫注册表 + 运行时采集 + 落缓存；一期纯查看，不改任何系统设置
-    m_report = shell::EnumerateRegistry();
-    shell::CollectDynamicItems(m_report);
+    shell::CollectScenes(m_report);
     shell::SaveCache(m_report);
-    ReloadTree();
+
+    // 样本下拉重新填（采集后文件场景数量固定，但保持同步）
+    if (m_hCombo != nullptr)
+    {
+        const int oldSel = static_cast<int>(::SendMessageW(m_hCombo, CB_GETCURSEL, 0, 0));
+        ::SendMessageW(m_hCombo, CB_RESETCONTENT, 0, 0);
+        for (const shell::SceneMenu& scene : m_report.scenes)
+        {
+            if (scene.scene == shell::SceneFile)
+            {
+                const std::wstring shortLabel = ShortSampleLabel(scene.sampleLabel);
+                ::SendMessageW(m_hCombo, CB_ADDSTRING, 0,
+                               reinterpret_cast<LPARAM>(shortLabel.c_str()));
+            }
+        }
+        ::SendMessageW(m_hCombo, CB_SETCURSEL, oldSel >= 0 ? oldSel : 0, 0);
+    }
+
+    ReloadList();
 }
 
 // ============================================================================
@@ -426,6 +621,56 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, 
         Layout();
         return 0;
 
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+        if (measure != nullptr && measure->CtlID == static_cast<UINT>(kControlIdList))
+        {
+            measure->itemHeight = static_cast<UINT>(Scale(kRowHeight));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (draw != nullptr && draw->CtlID == static_cast<UINT>(kControlIdList) &&
+            draw->itemID != static_cast<UINT>(-1))
+        {
+            // 选中行先铺底色
+            if (draw->itemState & ODS_SELECTED)
+            {
+                ::FillRect(draw->hDC, &draw->rcItem,
+                           static_cast<HBRUSH>(::GetSysColorBrush(COLOR_HIGHLIGHT)));
+            }
+            else
+            {
+                ::FillRect(draw->hDC, &draw->rcItem,
+                           static_cast<HBRUSH>(::GetSysColorBrush(COLOR_WINDOW)));
+            }
+
+            DrawRow(draw->hDC, draw->rcItem, static_cast<int>(draw->itemID));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_NOTIFY:
+    {
+        const NMHDR* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (header == nullptr)
+        {
+            break;
+        }
+        if (header->hwndFrom == m_hTab && header->code == TCN_SELCHANGE)
+        {
+            ReloadList();
+            return 0;
+        }
+        break;
+    }
+
     case WM_COMMAND:
     {
         const int controlId = LOWORD(wParam);
@@ -434,11 +679,14 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, 
             Refresh();
             return 0;
         }
-        if (controlId == kControlIdSystem &&
-            HIWORD(wParam) == BN_CLICKED)
+        if (controlId == kControlIdCombo && HIWORD(wParam) == CBN_SELCHANGE)
         {
-            // 只重画树，不重采（采集很贵，勾选开关纯展示过滤）
-            ReloadTree();
+            ReloadList();
+            return 0;
+        }
+        if (controlId == IDCANCEL || controlId == IDOK)
+        {
+            ::DestroyWindow(m_hWnd);
             return 0;
         }
         break;
@@ -457,6 +705,7 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, 
         return 0;
 
     case WM_DESTROY:
+        ReleaseBitmaps();
         m_hWnd = nullptr;
         return 0;
     }

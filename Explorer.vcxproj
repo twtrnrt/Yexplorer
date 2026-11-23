@@ -155,7 +155,6 @@
     <ClCompile Include="src\shell\ShellIcon.cpp" />
     <ClCompile Include="src\shell\ShellOverlay.cpp" />
     <ClCompile Include="src\shell\ContextMenuData.cpp" />
-    <ClCompile Include="src\shell\ContextMenuEnumerator.cpp" />
     <ClCompile Include="src\shell\ContextMenuCollector.cpp" />
     <ClCompile Include="src\shell\ShellClipboard.cpp" />
     <ClCompile Include="src\shell\ShellDragDrop.cpp" />
@@ -208,7 +207,6 @@
     <ClInclude Include="src\shell\ShellIcon.h" />
     <ClInclude Include="src\shell\ShellOverlay.h" />
     <ClInclude Include="src\shell\ContextMenuData.h" />
-    <ClInclude Include="src\shell\ContextMenuEnumerator.h" />
     <ClInclude Include="src\shell\ContextMenuCollector.h" />
     <ClInclude Include="src\shell\ShellClipboard.h" />
     <ClInclude Include="src\shell\ShellDragDrop.h" />

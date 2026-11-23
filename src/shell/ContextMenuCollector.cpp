@@ -2,21 +2,27 @@
 // 文件管理器（自研 Explorer 替代品）
 // 文件：src/shell/ContextMenuCollector.cpp
 //
-// 运行时采集 shellex 真实菜单项 + 缓存 JSON 读写实现。
+// 按场景采集系统右键菜单快照 + 每条菜单项渲染成位图 + 缓存读写。
 //
-// 采集原理（和资源管理器右键菜单同一套 COM）：
-//   · 文件 / 文件夹：IShellItem::BindToHandler(BHID_SFUIObject) 拿 IContextMenu；
-//   · 背景目录：先拿目录的 IShellFolder，GetUIObjectOf 传空 PIDL 拿背景菜单；
-//   · QueryContextMenu 填临时 HMENU，递归遍历取文字 / 层级 / 动词；
-//   · 子菜单先 HandleMenuMsg(WM_INITMENUPOPUP) 触发扩展懒填充。
+// 采集（和资源管理器右键菜单完全同一套 COM）：
+//   · 文件 / 文件夹：IShellItem::BindToHandler(BHID_SFUIObject) → IContextMenu
+//   · 空白区：目录的 IShellFolder::GetUIObjectOf(0 个子项) → IContextMenu
+//   · 多选：父 IShellFolder::GetUIObjectOf(2 个子 PIDL) → IContextMenu
 //
-// 注意：本模块在「配置右键菜单」窗口打开 / 点刷新时调用，不进右键弹出链路。
+// 渲染（解决图标问题）：
+//   实测 434 项里只有 29% 自带 hbmpItem，WPS / 7-Zip 全空。
+//   真实菜单是扩展自己在 WM_DRAWITEM 里画的，所以这里对每条项：
+//     1. 建 32 位内存 DC（白底）；
+//     2. 调 IContextMenu3::HandleMenuMsg2(WM_DRAWITEM)，让扩展把图标+文字画上去；
+//     3. 扩展不画（返回失败 / 全白）时退回：画 hbmpItem（若有）+ 自己画文字；
+//     4. 存成 BMP，界面按原样贴出来。
+//
+// 注意：本模块只在「配置右键菜单」窗口打开 / 点刷新时调用，不进右键弹出链路。
 // ============================================================================
 
 #include "shell/ContextMenuCollector.h"
 
 #include "core/Logger.h"
-#include "shell/ContextMenuEnumerator.h"
 
 #include <wil/com.h>
 #include <wil/result.h>
@@ -28,9 +34,9 @@
 
 #include <nlohmann/json.hpp>
 
-#include <fstream>
 #include <algorithm>
 #include <cwctype>
+#include <fstream>
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -40,10 +46,20 @@ namespace shell
 namespace
 {
 
-// ---------------------------------------------------------------------------
-// 路径 / 编码 / 时间小工具
-// ---------------------------------------------------------------------------
+// 渲染尺寸（96 DPI 逻辑像素；显示时按窗口 DPI 缩放）
+const int kRowWidth  = 460;
+const int kRowHeight = 26;
 
+// 渲染统计（每次采集前清零；用于判断有多少行真的是扩展自己画的）
+int g_nativeDrawCount   = 0;   // 扩展自己画的
+int g_fallbackDrawCount = 0;   // 扩展没画、由我们兜底画的
+
+// 当前正在采集第几份场景快照（渲染图文件名用它保证唯一）
+int g_sceneSerial = 0;
+
+// ---------------------------------------------------------------------------
+// 基础小工具
+// ---------------------------------------------------------------------------
 std::string ToUtf8(const std::wstring& text)
 {
     if (text.empty())
@@ -82,8 +98,7 @@ std::wstring FromUtf8(const std::string& text)
     return result;
 }
 
-// 缓存文件：%APPDATA%\FileExplorer\menu-cache.json
-std::wstring CacheFilePath()
+std::wstring AppDataFolder()
 {
     LPWSTR appData = nullptr;
     if (FAILED(::SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData)) ||
@@ -91,9 +106,19 @@ std::wstring CacheFilePath()
     {
         return std::wstring();
     }
-    std::wstring path = std::wstring(appData) + L"\\FileExplorer\\menu-cache.json";
+    std::wstring path = appData;
     ::CoTaskMemFree(appData);
     return path;
+}
+
+std::wstring CacheFilePath()
+{
+    const std::wstring appData = AppDataFolder();
+    if (appData.empty())
+    {
+        return std::wstring();
+    }
+    return appData + L"\\FileExplorer\\menu-cache.json";
 }
 
 bool EnsureDirectory(const std::wstring& filePath)
@@ -103,12 +128,10 @@ bool EnsureDirectory(const std::wstring& filePath)
     {
         return false;
     }
-    const std::wstring folder = filePath.substr(0, slash);
-    int result = ::SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr);
+    int result = ::SHCreateDirectoryExW(nullptr, filePath.substr(0, slash).c_str(), nullptr);
     return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS;
 }
 
-// 当前本地时间 "YYYY-MM-DD HH:MM:SS"
 std::wstring NowTimeString()
 {
     SYSTEMTIME st = {};
@@ -119,60 +142,54 @@ std::wstring NowTimeString()
     return buffer;
 }
 
-// 菜单文字里的助记符下划线标记（&F）要去掉，展示用
+// 去掉助记符 '&'（"&&" 保留一个 &）
 std::wstring StripAmpersand(std::wstring text)
 {
     std::wstring out;
     out.reserve(text.size());
     for (size_t i = 0; i < text.size(); ++i)
     {
-        if (text[i] == L'&' && i + 1 < text.size() && text[i + 1] != L'&')
+        if (text[i] == L'&')
         {
-            continue; // 跳过这个 &，后面字符保留
+            if (i + 1 < text.size() && text[i + 1] == L'&')
+            {
+                out.push_back(L'&');
+                ++i;
+                continue;
+            }
+            continue;   // 单个 & 是助记符，去掉
         }
         out.push_back(text[i]);
     }
     return out;
 }
 
-std::wstring ToLower(std::wstring text)
+// 清空并重建渲染图目录（每次采集都重来，避免旧图残留）
+void ResetIconDir(const std::wstring& dir)
 {
-    for (wchar_t& ch : text)
+    if (dir.empty())
     {
-        ch = static_cast<wchar_t>(::towlower(ch));
+        return;
     }
-    return text;
-}
+    ::SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
 
-// 按归并键找分组，找不到新建
-ContextMenuGroup& FindOrAddGroup(ContextMenuReport& report,
-                                 const std::wstring& sourceKey,
-                                 const std::wstring& displayName,
-                                 bool isShellex)
-{
-    for (ContextMenuGroup& group : report.groups)
+    WIN32_FIND_DATAW data = {};
+    HANDLE find = ::FindFirstFileW((dir + L"\\*.bmp").c_str(), &data);
+    if (find != INVALID_HANDLE_VALUE)
     {
-        if (group.sourceKey == sourceKey)
+        do
         {
-            return group;
-        }
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                ::DeleteFileW((dir + L"\\" + data.cFileName).c_str());
+            }
+        } while (::FindNextFileW(find, &data));
+        ::FindClose(find);
     }
-    ContextMenuGroup group;
-    group.sourceKey = sourceKey;
-    group.name      = displayName;
-    group.isShellex = isShellex;
-    report.groups.push_back(std::move(group));
-    return report.groups.back();
 }
 
 // ---------------------------------------------------------------------------
-// 临时样本目录：%TEMP%\FileExplorerMenuSample
-//
-// 一期采集三类样本：
-//   · 文件：sample.txt / sample.docx / sample.rar / sample.zip（空文件）
-//   · 文件夹：sample-folder
-//   · 背景：样本根目录本身
-// 用完整个目录清掉。
+// 样本
 // ---------------------------------------------------------------------------
 std::wstring SampleRootPath()
 {
@@ -184,7 +201,6 @@ std::wstring SampleRootPath()
     return std::wstring(tempPath) + L"FileExplorerMenuSample";
 }
 
-// 递归删除样本目录（只删我们自己建的内容）
 void CleanupSample(const std::wstring& root)
 {
     if (root.empty())
@@ -192,20 +208,19 @@ void CleanupSample(const std::wstring& root)
         return;
     }
 
-    WIN32_FIND_DATAW findData = {};
-    const std::wstring pattern = root + L"\\*";
-    HANDLE find = ::FindFirstFileW(pattern.c_str(), &findData);
+    WIN32_FIND_DATAW data = {};
+    HANDLE find = ::FindFirstFileW((root + L"\\*").c_str(), &data);
     if (find != INVALID_HANDLE_VALUE)
     {
         do
         {
-            const std::wstring name = findData.cFileName;
+            const std::wstring name = data.cFileName;
             if (name == L"." || name == L"..")
             {
                 continue;
             }
             const std::wstring child = root + L"\\" + name;
-            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             {
                 CleanupSample(child);
             }
@@ -214,13 +229,12 @@ void CleanupSample(const std::wstring& root)
                 ::SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
                 ::DeleteFileW(child.c_str());
             }
-        } while (::FindNextFileW(find, &findData));
+        } while (::FindNextFileW(find, &data));
         ::FindClose(find);
     }
     ::RemoveDirectoryW(root.c_str());
 }
 
-// 建样本目录和空文件；返回是否成功
 bool PrepareSample(std::wstring& rootOut, std::wstring& folderOut)
 {
     rootOut = SampleRootPath();
@@ -230,31 +244,17 @@ bool PrepareSample(std::wstring& rootOut, std::wstring& folderOut)
     }
 
     CleanupSample(rootOut);
-    if (!::CreateDirectoryW(rootOut.c_str(), nullptr) &&
-        ::GetLastError() != ERROR_ALREADY_EXISTS)
-    {
-        return false;
-    }
+    ::SHCreateDirectoryExW(nullptr, rootOut.c_str(), nullptr);
 
     folderOut = rootOut + L"\\sample-folder";
-    if (!::CreateDirectoryW(folderOut.c_str(), nullptr) &&
-        ::GetLastError() != ERROR_ALREADY_EXISTS)
-    {
-        return false;
-    }
+    ::SHCreateDirectoryExW(nullptr, folderOut.c_str(), nullptr);
 
-    // 空样本文件（处理器按扩展名判断是否出现，内容无所谓）
-    const wchar_t* sampleFiles[] =
+    const wchar_t* files[] =
     {
-        L"sample.txt",
-        L"sample.docx",
-        L"sample.rar",
-        L"sample.zip",
-        // 多选样本：两个同类型文件，放在同一目录（多选菜单要求同父目录）
-        L"multi-a.txt",
-        L"multi-b.txt",
+        L"sample.txt", L"sample.docx", L"sample.rar", L"sample.zip",
+        L"multi-a.txt", L"multi-b.txt",
     };
-    for (const wchar_t* file : sampleFiles)
+    for (const wchar_t* file : files)
     {
         const std::wstring path = rootOut + L"\\" + file;
         HANDLE handle = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -268,665 +268,696 @@ bool PrepareSample(std::wstring& rootOut, std::wstring& folderOut)
 }
 
 // ---------------------------------------------------------------------------
-// 把一条动态菜单项并进报告
+// 渲染一条菜单项到 BMP
 //
-// 去重钥匙 = 分组 + 层级 + 菜文字：同一个样本采到、或不同样本采到的同一条
-// （文字一样、层级一样、分组一样）只留一条，场景位取并集。
-// 这样 .txt/.docx/.rar/.zip 各采一遍不会再出现 4 份「打开」。
+// 返回 true 表示图片已写盘；失败时 item.imageFile 留空，界面只画文字。
 // ---------------------------------------------------------------------------
-void AddDynamicItem(ContextMenuReport& report,
-                    const std::wstring& groupName,
-                    const ContextMenuItem& item)
+bool SaveDibAsBmp(const std::wstring& path, const BITMAPINFO& info, const void* bits)
 {
-    const std::wstring name = groupName.empty() ? L"其他" : groupName;
-    const std::wstring sourceKey = L"menu:" + ToLower(name);
-    ContextMenuGroup& group = FindOrAddGroup(report, sourceKey, name, true);
-
-    for (ContextMenuItem& existing : group.items)
+    const int width  = info.bmiHeader.biWidth;
+    const int height = info.bmiHeader.biHeight;      // 正数 = 自下而上，和 BMP 一致
+    if (width <= 0 || height <= 0 || bits == nullptr)
     {
-        if (existing.isSeparator || item.isSeparator)
-        {
-            continue;
-        }
-        if (existing.parentPath == item.parentPath && existing.text == item.text)
-        {
-            // 已存在：并场景位；有一样本可用就不算灰态；补动词 / 偏移
-            existing.scenes |= item.scenes;
-            existing.disabled = existing.disabled && item.disabled;
-            if (existing.verb.empty() && !item.verb.empty())
-            {
-                existing.verb = item.verb;
-            }
-            if (existing.commandOffset < 0 && item.commandOffset >= 0)
-            {
-                existing.commandOffset = item.commandOffset;
-            }
-            existing.fromExtension = true;
-            existing.isSystemBuiltin = existing.isSystemBuiltin || item.isSystemBuiltin;
-            return;
-        }
+        return false;
     }
 
-    group.items.push_back(item);
+    const int bytesPerPixel = info.bmiHeader.biBitCount / 8;
+    const int stride = width * bytesPerPixel;
+    const DWORD imageSize = static_cast<DWORD>(stride) * static_cast<DWORD>(height);
+
+    BITMAPFILEHEADER fileHeader = {};
+    fileHeader.bfType    = 0x4D42;   // "BM"
+    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    fileHeader.bfSize    = fileHeader.bfOffBits + imageSize;
+
+    BITMAPINFOHEADER header = info.bmiHeader;
+
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    bool ok = true;
+    DWORD written = 0;
+    ok = ok && ::WriteFile(file, &fileHeader, sizeof(fileHeader), &written, nullptr);
+    ok = ok && ::WriteFile(file, &header, sizeof(header), &written, nullptr);
+    ok = ok && ::WriteFile(file, bits, imageSize, &written, nullptr);
+    ::CloseHandle(file);
+
+    return ok;
 }
 
-// ---------------------------------------------------------------------------
-// 菜单树遍历（分隔线一律跳过，不生成任何条目）
-//
-// menu        待遍历的菜单
-// cm          对应的 IContextMenu（取动词用）
-// idFirst     命令 ID 下限（前缀一个，偏移 = ID - idFirst）
-// parentPath  上级层级路径（一级为空；二级为一级文字）
-// scene       当前样本场景位
-// report      结果报告
-// topGroup    一级分组名（进入子菜单时 = 一级项文字）
-// ---------------------------------------------------------------------------
-void WalkMenu(HMENU menu,
-              IContextMenu* cm,
-              UINT idFirst,
-              const std::wstring& parentPath,
-              unsigned int scene,
-              ContextMenuReport& report,
-              const std::wstring& topGroup)
+// 整张图是否全白（判断扩展到底有没有画东西）
+bool LooksBlank(const void* bits, int width, int height)
 {
-    if (menu == nullptr || cm == nullptr)
+    const unsigned char* pixels = static_cast<const unsigned char*>(bits);
+    const int stride = width * 4;
+    for (int y = 0; y < height; ++y)
     {
-        return;
-    }
-
-    const int count = ::GetMenuItemCount(menu);
-    for (int index = 0; index < count; ++index)
-    {
-        const UINT id = ::GetMenuItemID(menu, index);
-        MENUITEMINFOW info = {};
-        info.cbSize = sizeof(info);
-        info.fMask  = MIIM_ID | MIIM_TYPE | MIIM_SUBMENU | MIIM_STATE;
-        if (!::GetMenuItemInfoW(menu, index, TRUE, &info))
+        const unsigned char* row = pixels + y * stride;
+        for (int x = 0; x < width * 4; x += 4)
         {
-            continue;
-        }
-
-        // 分隔线：直接跳过（用户要求不展示）
-        if ((info.fType & MFT_SEPARATOR) != 0)
-        {
-            continue;
-        }
-
-        // 取菜单文字
-        wchar_t textBuffer[512] = {};
-        ::GetMenuStringW(menu, index, textBuffer, ARRAYSIZE(textBuffer), MF_BYPOSITION);
-        std::wstring text = StripAmpersand(textBuffer);
-        if (text.empty())
-        {
-            continue;   // 取不到文字的空项没有展示价值
-        }
-
-        // 命令偏移 = 命令 ID - idFirst（GetCommandString / InvokeCommand 都按偏移认）
-        const UINT offset = (id != 0 && id != static_cast<UINT>(-1))
-                                ? id - idFirst : static_cast<UINT>(-1);
-
-        // 动词（GCS_VERBW）；取不到不影响条目展示
-        std::wstring verb;
-        if (offset != static_cast<UINT>(-1))
-        {
-            wchar_t verbBuffer[256] = {};
-            HRESULT verbHr = cm->GetCommandString(static_cast<UINT_PTR>(offset),
-                                                  GCS_VERBW, nullptr,
-                                                  reinterpret_cast<LPSTR>(verbBuffer),
-                                                  ARRAYSIZE(verbBuffer));
-            if (SUCCEEDED(verbHr) && verbBuffer[0] != L'\0')
+            if (row[x] != 0xFF || row[x + 1] != 0xFF || row[x + 2] != 0xFF)
             {
-                verb = verbBuffer;
+                return false;
             }
         }
-
-        ContextMenuItem item;
-        item.id         = std::to_wstring(id);
-        item.text       = text;
-        item.verb       = verb;
-        item.parentPath = parentPath;
-        item.scenes     = scene;
-        item.commandOffset = (offset == static_cast<UINT>(-1)) ? -1 : static_cast<int>(offset);
-        item.disabled   = (info.fState & MFS_GRAYED) != 0;
-        item.fromExtension = true;
-        item.isSystemBuiltin = IsSystemBuiltinItem(text, verb);
-
-        // 一级项：分组名 = 自己的文字；二级及以后：分组名沿用 topGroup
-        const std::wstring groupName = topGroup.empty() ? text : topGroup;
-        AddDynamicItem(report, groupName, item);
-
-        // 子菜单：先让处理器填充（WM_INITMENUPOPUP），再递归
-        if (info.hSubMenu != nullptr)
-        {
-            wil::com_ptr<IContextMenu2> cm2;
-            if (SUCCEEDED(cm->QueryInterface(IID_PPV_ARGS(cm2.put()))) && cm2 != nullptr)
-            {
-                cm2->HandleMenuMsg(WM_INITMENUPOPUP,
-                                   reinterpret_cast<WPARAM>(info.hSubMenu), 0);
-            }
-
-            WalkMenu(info.hSubMenu, cm, idFirst,
-                     topGroup.empty() ? text : topGroup,
-                     scene, report, groupName);
-        }
     }
+    return true;
 }
 
-// 对单个 IContextMenu 采集菜单树，写进报告
-void CollectOne(IContextMenu* cm, unsigned int scene, ContextMenuReport& report)
+// 菜单字体（和系统右键菜单同一号字）
+HFONT MenuFont()
 {
-    if (cm == nullptr)
+    static HFONT font = nullptr;
+    static bool tried = false;
+
+    if (!tried)
     {
-        return;
+        tried = true;
+        NONCLIENTMETRICSW metrics = {};
+        metrics.cbSize = sizeof(metrics);
+        if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+        {
+            font = ::CreateFontIndirectW(&metrics.lfMenuFont);
+        }
+        if (font == nullptr)
+        {
+            font = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+        }
+    }
+    return font;
+}
+
+bool RenderRow(HWND host,
+               IContextMenu3* cm3,
+               const MENUITEMINFOW& mi,
+               UINT_PTR itemOffset,
+               const std::wstring& text,
+               bool disabled,
+               const std::wstring& outPath)
+{
+    // 先问扩展希望多宽多高（多数不填，用默认）
+    int width  = kRowWidth;
+    int height = kRowHeight;
+
+    if (cm3 != nullptr)
+    {
+        MEASUREITEMSTRUCT measure = {};
+        measure.CtlType  = ODT_MENU;
+        measure.itemID   = static_cast<UINT>(itemOffset);
+        measure.itemData = mi.dwItemData;
+        if (SUCCEEDED(cm3->HandleMenuMsg2(WM_MEASUREITEM, 0,
+                                          reinterpret_cast<LPARAM>(&measure), nullptr)))
+        {
+            if (measure.itemWidth > 0 && measure.itemWidth < 700)
+            {
+                width = static_cast<int>(measure.itemWidth);
+            }
+            if (measure.itemHeight > 0 && measure.itemHeight <= 48)
+            {
+                height = static_cast<int>(measure.itemHeight);
+            }
+        }
     }
 
-    const UINT idFirst = 1;   // 命令 ID 下限；偏移 = ID - idFirst
+    // 32 位 DIB（自下而上，和 BMP 存储顺序一致，可直接落盘）
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth       = width;
+    info.bmiHeader.biHeight      = height;
+    info.bmiHeader.biPlanes      = 1;
+    info.bmiHeader.biBitCount    = 32;
+    info.bmiHeader.biCompression = BI_RGB;
 
-    HMENU menu = ::CreatePopupMenu();
-    if (menu == nullptr)
+    void* bits = nullptr;
+    HDC screen = ::GetDC(nullptr);
+    HBITMAP bitmap = ::CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ::ReleaseDC(nullptr, screen);
+
+    if (bitmap == nullptr || bits == nullptr)
     {
-        return;
+        return false;
     }
 
-    // 先按宽字符标准问；部分老旧扩展只认 ANSI，一期失败项留待二期兼容回退
-    HRESULT hr = cm->QueryContextMenu(menu, 0, idFirst, 0x7FFF, CMF_NORMAL);
-    if (SUCCEEDED(hr))
+    HDC memDc = ::CreateCompatibleDC(nullptr);
+    HGDIOBJ oldBitmap = ::SelectObject(memDc, bitmap);
+    HGDIOBJ oldFont   = ::SelectObject(memDc, MenuFont());
+
+    // 白底（和系统菜单背景一致）
+    RECT full = { 0, 0, width, height };
+    ::FillRect(memDc, &full, static_cast<HBRUSH>(::GetStockObject(WHITE_BRUSH)));
+    ::SetBkMode(memDc, TRANSPARENT);
+
+    bool drawn = false;
+    if (cm3 != nullptr)
     {
-        WalkMenu(menu, cm, idFirst, L"", scene, report, L"");
+        DRAWITEMSTRUCT draw = {};
+        draw.CtlType    = ODT_MENU;
+        draw.CtlID      = 0;
+        draw.itemID     = static_cast<UINT>(itemOffset);
+        draw.itemAction = ODA_DRAWENTIRE;
+        draw.itemState  = disabled ? ODS_GRAYED : 0;
+        draw.hwndItem   = host;
+        draw.hDC        = memDc;
+        draw.rcItem     = full;
+        draw.itemData   = mi.dwItemData;
+
+        HRESULT hr = cm3->HandleMenuMsg2(WM_DRAWITEM, 0,
+                                         reinterpret_cast<LPARAM>(&draw), nullptr);
+        drawn = SUCCEEDED(hr) && !LooksBlank(bits, width, height);
+    }
+
+    // 扩展没画（或者没实现 WM_DRAWITEM）：自己兜底画图标 + 文字
+    if (!drawn)
+    {
+        ++g_fallbackDrawCount;
+
+        // 图标列固定留 22 像素宽，保证所有行的文字左边界对齐
+        const int iconLeft = 4;
+
+        // 有些项在 QueryContextMenu 时就设了图标位图，这里用上
+        if (mi.hbmpItem != nullptr && mi.hbmpItem != HBMMENU_CALLBACK)
+        {
+            BITMAP bmpInfo = {};
+            if (::GetObjectW(mi.hbmpItem, sizeof(bmpInfo), &bmpInfo) == sizeof(bmpInfo))
+            {
+                const int iconSize = 16;
+                HDC iconDc = ::CreateCompatibleDC(memDc);
+                HGDIOBJ oldIcon = ::SelectObject(iconDc, mi.hbmpItem);
+                ::SetStretchBltMode(memDc, HALFTONE);
+                ::StretchBlt(memDc, iconLeft, (height - iconSize) / 2, iconSize, iconSize,
+                             iconDc, 0, 0, bmpInfo.bmWidth, bmpInfo.bmHeight, SRCCOPY);
+                ::SelectObject(iconDc, oldIcon);
+                ::DeleteDC(iconDc);
+            }
+        }
+
+        ::SetTextColor(memDc, disabled ? RGB(109, 109, 109) : RGB(0, 0, 0));
+        RECT textRect = { iconLeft + 22, 0, width - 6, height };
+        ::DrawTextW(memDc, text.c_str(), -1, &textRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     else
     {
-        Logger::Warn(L"QueryContextMenu 失败：" + Logger::FormatHresult(hr));
+        ++g_nativeDrawCount;
+    }
+
+    ::SelectObject(memDc, oldFont);
+    ::SelectObject(memDc, oldBitmap);
+    ::DeleteDC(memDc);
+
+    const bool saved = SaveDibAsBmp(outPath, info, bits);
+    ::DeleteObject(bitmap);
+
+    return saved;
+}
+
+// ---------------------------------------------------------------------------
+// 递归遍历菜单，生成菜单项快照
+//
+// itemOffset = 命令 ID - idFirst（GetCommandString / 渲染都用这个）
+// -------------------------------------------------------------------------------------------------------------------------------------------
+void WalkMenu(HMENU menu,
+              IContextMenu3* cm3,
+              HWND host,
+              UINT idFirst,
+              int level,
+              unsigned int scene,
+              const std::wstring& iconDir,
+              int& itemCounter,
+              bool& anyFail,
+              std::vector<ContextMenuItem>& out)
+{
+    const int count = ::GetMenuItemCount(menu);
+    for (int index = 0; index < count; ++index)
+    {
+        MENUITEMINFOW mi = {};
+        mi.cbSize = sizeof(mi);
+        mi.fMask  = MIIM_ID | MIIM_FTYPE | MIIM_SUBMENU | MIIM_BITMAP | MIIM_DATA | MIIM_STATE;
+        if (!::GetMenuItemInfoW(menu, index, TRUE, &mi))
+        {
+            continue;
+        }
+
+        ContextMenuItem item;
+        item.level  = level;
+        item.scenes = scene;
+
+        // 分隔线：保留位置（界面画一条浅线），层级也照原样
+        if ((mi.fType & MFT_SEPARATOR) != 0)
+        {
+            item.isSeparator = true;
+            out.push_back(item);
+            continue;
+        }
+
+        wchar_t textBuffer[512] = {};
+        ::GetMenuStringW(menu, index, textBuffer, ARRAYSIZE(textBuffer), MF_BYPOSITION);
+        item.text     = StripAmpersand(textBuffer);
+        item.disabled = (mi.fState & MFS_GRAYED) != 0;
+        item.fromExtension = true;
+
+        const UINT offset = (mi.wID != 0 && mi.wID != static_cast<UINT>(-1))
+                                ? mi.wID - idFirst : static_cast<UINT>(-1);
+        if (offset != static_cast<UINT>(-1))
+        {
+            item.commandOffset = static_cast<int>(offset);
+
+            wchar_t verbBuffer[256] = {};
+            HRESULT verbHr = cm3->GetCommandString(offset, GCS_VERBW, nullptr,
+                                                   reinterpret_cast<LPSTR>(verbBuffer),
+                                                   ARRAYSIZE(verbBuffer));
+            if (SUCCEEDED(verbHr) && verbBuffer[0] != L'\0')
+            {
+                item.verb = verbBuffer;
+            }
+        }
+
+        // 渲染这一项（图标 + 文字由扩展自己画）
+        // 文件名用「快照序号_项序号」：四个文件样本是四次独立快照，序号必须唯一，
+        // 否则同名文件会互相覆盖（曾经四个文件样本都写成 s1_N.bmp，图全串了）。
+        const std::wstring imageName =
+            L"m" + std::to_wstring(g_sceneSerial) + L"_" + std::to_wstring(itemCounter) + L".bmp";
+        ++itemCounter;
+
+        const std::wstring imagePath = iconDir + L"\\" + imageName;
+        if (offset != static_cast<UINT>(-1))
+        {
+            if (RenderRow(host, cm3, mi, offset, item.text, item.disabled, imagePath))
+            {
+                item.imageFile = imageName;
+            }
+            else
+            {
+                item.failed = true;
+                item.failReason = L"渲染失败";
+                anyFail = true;
+            }
+        }
+        else
+        {
+            // 子菜单节点 / 无命令 ID 的项：文字照常展示
+            item.imageFile.clear();
+        }
+
+        out.push_back(item);
+
+        // 子菜单：先让扩展填充（WM_INITMENUPOPUP），再递归
+        if (mi.hSubMenu != nullptr)
+        {
+            LPARAM initParam = MAKELPARAM(index, FALSE);
+            HRESULT initHr = E_NOTIMPL;
+            if (cm3 != nullptr)
+            {
+                initHr = cm3->HandleMenuMsg2(WM_INITMENUPOPUP,
+                                             reinterpret_cast<WPARAM>(mi.hSubMenu),
+                                             initParam, nullptr);
+            }
+
+            // 老实现只认 IContextMenu2::HandleMenuMsg 的，退回一次
+            if (FAILED(initHr))
+            {
+                wil::com_ptr<IContextMenu2> cm2;
+                if (SUCCEEDED(cm3->QueryInterface(IID_PPV_ARGS(cm2.put()))) && cm2 != nullptr)
+                {
+                    cm2->HandleMenuMsg(WM_INITMENUPOPUP,
+                                       reinterpret_cast<WPARAM>(mi.hSubMenu), initParam);
+                }
+            }
+
+            WalkMenu(mi.hSubMenu, cm3, host, idFirst, level + 1, scene,
+                     iconDir, itemCounter, anyFail, out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 对单个 IContextMenu 采一份场景快照
+// ----------------------------------------------------------------------------------// ---------------------------------------------------------------------------
+void CollectOneScene(IContextMenu* cm,
+                     IContextMenu3* cm3,
+                     HWND host,
+                     unsigned int scene,
+                     const std::wstring& sampleLabel,
+                     const std::wstring& samplePath,
+                     const std::wstring& iconDir,
+                     SceneMenu& outScene)
+{
+    outScene.scene       = scene;
+    outScene.sampleLabel = sampleLabel;
+    outScene.samplePath  = samplePath;
+
+    ++g_sceneSerial;   // 每份快照一个唯一序号
+
+    if (cm == nullptr || cm3 == nullptr)
+    {
+        outScene.ok = false;
+        outScene.failReason = L"拿不到 IContextMenu3";
+        return;
+    }
+
+    const UINT idFirst = 1;
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr)
+    {
+        outScene.ok = false;
+        outScene.failReason = L"创建菜单失败";
+        return;
+    }
+
+    HRESULT hr = cm->QueryContextMenu(menu, 0, idFirst, 0x7FFF, CMF_NORMAL);
+    if (SUCCEEDED(hr))
+    {
+        int counter = 0;
+        bool anyFail = false;
+        WalkMenu(menu, cm3, host, idFirst, 0, scene, iconDir,
+                 counter, anyFail, outScene.items);
+        outScene.ok = true;
+        if (anyFail)
+        {
+            outScene.failReason = L"部分条目渲染失败";
+        }
+    }
+    else
+    {
+        outScene.ok = false;
+        outScene.failReason = L"QueryContextMenu 失败：" + Logger::FormatHresult(hr);
     }
 
     ::DestroyMenu(menu);
 }
 
-// 文件 / 文件夹样本：按路径拿菜单对象
-bool CollectForPath(const std::wstring& path, unsigned int scene,
+// 文件 / 文件夹样本
+void CollectForPath(const std::wstring& path,
+                    unsigned int scene,
+                    const std::wstring& label,
+                    HWND host,
+                    const std::wstring& iconDir,
                     ContextMenuReport& report)
 {
+    SceneMenu sceneMenu;
+    sceneMenu.scene       = scene;
+    sceneMenu.sampleLabel = label;
+    sceneMenu.samplePath  = path;
+
     wil::com_ptr<IShellItem> item;
-    HRESULT hr = ::SHCreateItemFromParsingName(path.c_str(), nullptr,
-                                               IID_PPV_ARGS(item.put()));
-    if (FAILED(hr) || item == nullptr)
+    if (FAILED(::SHCreateItemFromParsingName(path.c_str(), nullptr,
+                                              IID_PPV_ARGS(item.put()))) ||
+        item == nullptr)
     {
-        return false;
+        sceneMenu.failReason = L"解析路径失败";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
     }
 
     wil::com_ptr<IContextMenu> cm;
-    hr = item->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(cm.put()));
-    if (FAILED(hr) || cm == nullptr)
+    if (FAILED(item->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(cm.put()))) ||
+        cm == nullptr)
     {
-        Logger::Warn(L"BindToHandler(BHID_SFUIObject) 失败：" + path +
-                     L"，" + Logger::FormatHresult(hr));
-        return false;
+        sceneMenu.failReason = L"拿菜单对象失败";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
     }
 
-    CollectOne(cm.get(), scene, report);
-    return true;
+    wil::com_ptr<IContextMenu3> cm3;
+    if (FAILED(cm->QueryInterface(IID_PPV_ARGS(cm3.put()))) || cm3 == nullptr)
+    {
+        sceneMenu.failReason = L"拿不到 IContextMenu3（无法渲染图标）";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
+    }
+
+    CollectOneScene(cm.get(), cm3.get(), host, scene, label, path, iconDir, sceneMenu);
+    report.scenes.push_back(std::move(sceneMenu));
 }
 
-// 背景样本：目录的 IShellFolder + 空 PIDL 拿背景菜单
-bool CollectForBackground(const std::wstring& dir, ContextMenuReport& report)
+// 空白区样本
+void CollectForBackground(const std::wstring& dir,
+                          HWND host,
+                          const std::wstring& iconDir,
+                          ContextMenuReport& report)
 {
+    SceneMenu sceneMenu;
+    sceneMenu.scene       = SceneBackground;
+    sceneMenu.sampleLabel = L"文件夹空白区";
+    sceneMenu.samplePath  = dir;
+
     wil::com_ptr<IShellItem> item;
     if (FAILED(::SHCreateItemFromParsingName(dir.c_str(), nullptr,
                                               IID_PPV_ARGS(item.put()))) ||
         item == nullptr)
     {
-        return false;
+        sceneMenu.failReason = L"解析目录失败";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
     }
 
     wil::com_ptr<IShellFolder> folder;
-    HRESULT hr = item->BindToHandler(nullptr, BHID_SFObject, IID_PPV_ARGS(folder.put()));
-    if (FAILED(hr) || folder == nullptr)
+    if (FAILED(item->BindToHandler(nullptr, BHID_SFObject, IID_PPV_ARGS(folder.put()))) ||
+        folder == nullptr)
     {
-        return false;
+        sceneMenu.failReason = L"拿 IShellFolder 失败";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
     }
 
+    // 空白区菜单有两个来源，按可靠性顺序都试：
+    //   1. 文件夹视图的"背景"对象（资源管理器就是从这里拿的背景菜单）；
+    //   2. 目录自己的 GetUIObjectOf(0 个子项)——部分命名空间扩展只支持这种方式。
     wil::com_ptr<IContextMenu> cm;
-    hr = folder->GetUIObjectOf(nullptr, 0, nullptr,
-                               IID_IContextMenu, nullptr, cm.put_void());
-    if (FAILED(hr) || cm == nullptr)
+
+    wil::com_ptr<IShellView> view;
+    if (SUCCEEDED(folder->CreateViewObject(host, IID_PPV_ARGS(view.put()))) &&
+        view != nullptr)
     {
-        Logger::Warn(L"背景菜单 GetUIObjectOf 失败：" + dir +
-                     L"，" + Logger::FormatHresult(hr));
-        return false;
+        view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(cm.put()));
     }
 
-    CollectOne(cm.get(), SceneBackground, report);
-    return true;
+    if (cm == nullptr)
+    {
+        folder->GetUIObjectOf(nullptr, 0, nullptr, IID_IContextMenu,
+                              nullptr, cm.put_void());
+    }
+
+    if (cm == nullptr)
+    {
+        sceneMenu.failReason = L"拿空白区菜单失败（两种方式都没拿到）";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
+    }
+
+    wil::com_ptr<IContextMenu3> cm3;
+    if (FAILED(cm->QueryInterface(IID_PPV_ARGS(cm3.put()))) || cm3 == nullptr)
+    {
+        sceneMenu.failReason = L"拿不到 IContextMenu3";
+        report.scenes.push_back(std::move(sceneMenu));
+        return;
+    }
+
+    CollectOneScene(cm.get(), cm3.get(), host, SceneBackground,
+                    L"文件夹空白区", dir, iconDir, sceneMenu);
+    report.scenes.push_back(std::move(sceneMenu));
 }
 
-// ---------------------------------------------------------------------------
-// 多选样本：同一目录下两个文件
-//
-// 多选菜单只能从"父 IShellFolder + 两个子 PIDL"拿：
-//   SHParseDisplayName 得到绝对 PIDL → SHBindToParent 拆出父文件夹和末级子 PIDL
-//   → GetUIObjectOf(cidl=2) 拿多选合并菜单
-// ---------------------------------------------------------------------------
-bool CollectForMultiSelect(const std::wstring& path1, const std::wstring& path2,
+// 多选样本
+void CollectForMultiSelect(const std::wstring& path1,
+                           const std::wstring& path2,
+                           HWND host,
+                           const std::wstring& iconDir,
                            ContextMenuReport& report)
 {
+    SceneMenu sceneMenu;
+    sceneMenu.scene       = SceneMultiple;
+    sceneMenu.sampleLabel = L"多选两个 txt 文件";
+    sceneMenu.samplePath  = path1;
+
     PIDLIST_ABSOLUTE pidl1 = nullptr;
     PIDLIST_ABSOLUTE pidl2 = nullptr;
     SFGAOF attrs = 0;
 
-    bool ok = false;
-
-    if (SUCCEEDED(::SHParseDisplayName(path1.c_str(), nullptr, &pidl1, 0, &attrs)) &&
-        pidl1 != nullptr &&
-        SUCCEEDED(::SHParseDisplayName(path2.c_str(), nullptr, &pidl2, 0, &attrs)) &&
-        pidl2 != nullptr)
+    auto finish = [&]()
     {
-        wil::com_ptr<IShellFolder> folder;
-        PCUITEMID_CHILD child1 = nullptr;
-        PCUITEMID_CHILD child2 = nullptr;
-
-        HRESULT hr = ::SHBindToParent(pidl1, IID_IShellFolder,
-                                      folder.put_void(), &child1);
-        if (SUCCEEDED(hr) && folder != nullptr && child1 != nullptr)
+        if (pidl1 != nullptr)
         {
-            wil::com_ptr<IShellFolder> folder2;
-            hr = ::SHBindToParent(pidl2, IID_IShellFolder,
-                                  folder2.put_void(), &child2);
-
-            if (SUCCEEDED(hr) && child2 != nullptr)
-            {
-                PCUITEMID_CHILD children[2] = { child1, child2 };
-
-                wil::com_ptr<IContextMenu> cm;
-                hr = folder->GetUIObjectOf(nullptr, 2, children,
-                                           IID_IContextMenu, nullptr, cm.put_void());
-                if (SUCCEEDED(hr) && cm != nullptr)
-                {
-                    CollectOne(cm.get(), SceneMultiple, report);
-                    ok = true;
-                }
-                else
-                {
-                    Logger::Warn(L"多选菜单 GetUIObjectOf 失败：" +
-                                 Logger::FormatHresult(hr));
-                }
-            }
-            else
-            {
-                Logger::Warn(L"多选样本第二个 PIDL 拆分失败：" +
-                             Logger::FormatHresult(hr));
-            }
+            ::CoTaskMemFree(pidl1);
         }
-        else
+        if (pidl2 != nullptr)
         {
-            Logger::Warn(L"多选样本 PIDL 拆分失败：" + Logger::FormatHresult(hr));
+            ::CoTaskMemFree(pidl2);
         }
-    }
-
-    if (pidl1 != nullptr)
-    {
-        ::CoTaskMemFree(pidl1);
-    }
-    if (pidl2 != nullptr)
-    {
-        ::CoTaskMemFree(pidl2);
-    }
-    return ok;
-}
-
-// ---------------------------------------------------------------------------
-// 按软件归并分组
-//
-// 背景：菜单是"合并查询"拿到的，接口不告诉每一项属于哪个 DLL，所以只能按
-// 一级菜单文字分组。同一家软件常在菜单里出现多个一级文字（如 "WPS" 和
-// "上传到 WPS"），这里用处理器清单里的软件名做"软匹配"把它们并到一组。
-//
-// 匹配规则：从每个处理器的显示名（DLL 版本资源的产品名优先）取两个 token：
-//   ① 整个名字去掉空格小写；② 第一个单词（长度 >= 3 且不是厂商通用词）。
-// 分组名（去掉空格小写）包含任一 token，就归到这个软件名下。
-// 这是启发式，可能偶尔归错或归得过宽；只影响整齐度，不影响数据。
-// ---------------------------------------------------------------------------
-
-// 去掉空格和 '&'、转小写
-std::wstring NormalizeGroupName(const std::wstring& text)
-{
-    std::wstring out;
-    out.reserve(text.size());
-    for (wchar_t ch : text)
-    {
-        if (ch == L'&' || ch == L' ' || ch == L'\t')
-        {
-            continue;
-        }
-        out.push_back(static_cast<wchar_t>(::towlower(ch)));
-    }
-    return out;
-}
-
-// 厂商通用词，做 token 会造成大面积误并，直接不用
-bool IsGenericToken(const std::wstring& token)
-{
-    static const wchar_t* generics[] =
-    {
-        L"microsoft", L"windows", L"system", L"office", L"intel", L"adobe",
-        L"google", L"apple", L"tencent", L"alibaba", L"baidu", L"huawei",
+        report.scenes.push_back(std::move(sceneMenu));
     };
-    for (const wchar_t* one : generics)
+
+    if (FAILED(::SHParseDisplayName(path1.c_str(), nullptr, &pidl1, 0, &attrs)) ||
+        pidl1 == nullptr ||
+        FAILED(::SHParseDisplayName(path2.c_str(), nullptr, &pidl2, 0, &attrs)) ||
+        pidl2 == nullptr)
     {
-        if (token == one)
-        {
-            return true;
-        }
+        sceneMenu.failReason = L"解析样本路径失败";
+        finish();
+        return;
     }
-    return false;
+
+    wil::com_ptr<IShellFolder> folder;
+    PCUITEMID_CHILD child1 = nullptr;
+    if (FAILED(::SHBindToParent(pidl1, IID_IShellFolder, folder.put_void(), &child1)) ||
+        folder == nullptr || child1 == nullptr)
+    {
+        sceneMenu.failReason = L"拆父文件夹失败";
+        finish();
+        return;
+    }
+
+    wil::com_ptr<IShellFolder> folder2;
+    PCUITEMID_CHILD child2 = nullptr;
+    if (FAILED(::SHBindToParent(pidl2, IID_IShellFolder, folder2.put_void(), &child2)) ||
+        child2 == nullptr)
+    {
+        sceneMenu.failReason = L"拆第二个子项失败";
+        finish();
+        return;
+    }
+
+    PCUITEMID_CHILD children[2] = { child1, child2 };
+
+    wil::com_ptr<IContextMenu> cm;
+    if (FAILED(folder->GetUIObjectOf(nullptr, 2, children, IID_IContextMenu,
+                                     nullptr, cm.put_void())) || cm == nullptr)
+    {
+        sceneMenu.failReason = L"拿多选菜单失败";
+        finish();
+        return;
+    }
+
+    wil::com_ptr<IContextMenu3> cm3;
+    if (FAILED(cm->QueryInterface(IID_PPV_ARGS(cm3.put()))) || cm3 == nullptr)
+    {
+        sceneMenu.failReason = L"拿不到 IContextMenu3";
+        finish();
+        return;
+    }
+
+    CollectOneScene(cm.get(), cm3.get(), host, SceneMultiple,
+                    sceneMenu.sampleLabel, path1, iconDir, sceneMenu);
+    finish();
 }
 
-struct VendorName
+// 隐藏宿主窗口：HandleMenuMsg2 的 DRAWITEM 需要 hwndItem
+HWND CreateHiddenHost()
 {
-    std::wstring display;                 // 归并后的组名（用处理器的软件名）
-    std::vector<std::wstring> tokens;     // 用于匹配的小写 token
-};
+    const wchar_t* const kHostClass = L"FileExplorerMenuProbeHost";
 
-std::vector<VendorName> BuildVendors(
-    const std::vector<EnumeratedHandler>& handlers)
-{
-    std::vector<VendorName> vendors;
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = ::DefWindowProcW;
+    wc.hInstance     = ::GetModuleHandleW(nullptr);
+    wc.lpszClassName = kHostClass;
+    ::RegisterClassExW(&wc);
 
-    for (const EnumeratedHandler& handler : handlers)
-    {
-        const std::wstring display = handler.displayName;
-        if (display.empty())
-        {
-            continue;
-        }
-
-        // 已经有了就不重复建
-        const std::wstring normalized = NormalizeGroupName(display);
-        bool exists = false;
-        for (const VendorName& vendor : vendors)
-        {
-            if (NormalizeGroupName(vendor.display) == normalized)
-            {
-                exists = true;
-                break;
-            }
-        }
-        if (exists)
-        {
-            continue;
-        }
-
-        VendorName vendor;
-        vendor.display = display;
-
-        if (!normalized.empty())
-        {
-            vendor.tokens.push_back(normalized);
-        }
-
-        // 第一个单词：按空格 / 连字符切开，取第一段
-        std::wstring firstWord;
-        for (wchar_t ch : display)
-        {
-            if (ch == L' ' || ch == L'\t')
-            {
-                break;
-            }
-            firstWord.push_back(static_cast<wchar_t>(::towlower(ch)));
-        }
-        if (firstWord.size() >= 3 && firstWord != normalized &&
-            !IsGenericToken(firstWord))
-        {
-            vendor.tokens.push_back(firstWord);
-        }
-
-        if (!vendor.tokens.empty())
-        {
-            vendors.push_back(std::move(vendor));
-        }
-    }
-
-    return vendors;
-}
-
-// 把 src 的条目并进 target，条目按「层级 + 文字」去重
-void MergeItemInto(ContextMenuGroup& target, const ContextMenuItem& src)
-{
-    for (ContextMenuItem& existing : target.items)
-    {
-        if (existing.parentPath == src.parentPath && existing.text == src.text)
-        {
-            existing.scenes |= src.scenes;
-            existing.disabled = existing.disabled && src.disabled;
-            existing.fromRegistry = existing.fromRegistry || src.fromRegistry;
-            existing.fromExtension = existing.fromExtension || src.fromExtension;
-            existing.isSystemBuiltin = existing.isSystemBuiltin || src.isSystemBuiltin;
-            if (existing.verb.empty())
-            {
-                existing.verb = src.verb;
-            }
-            if (existing.commandLine.empty())
-            {
-                existing.commandLine = src.commandLine;
-            }
-            if (existing.commandOffset < 0)
-            {
-                existing.commandOffset = src.commandOffset;
-            }
-            return;
-        }
-    }
-    target.items.push_back(src);
-}
-
-// 全局归并：先按软件名归档，再把同名组合并、条目去重、去掉空组
-void MergeGroups(ContextMenuReport& report,
-                 const std::vector<EnumeratedHandler>& handlers)
-{
-    const std::vector<VendorName> vendors = BuildVendors(handlers);
-
-    std::vector<ContextMenuGroup> merged;
-
-    for (const ContextMenuGroup& group : report.groups)
-    {
-        if (group.items.empty())
-        {
-            continue;   // 空组不展示
-        }
-
-        // 目标组名：默认原名；能匹配到软件名就用软件名
-        std::wstring targetName = group.name;
-        const std::wstring normalizedGroup = NormalizeGroupName(group.name);
-        if (!normalizedGroup.empty())
-        {
-            for (const VendorName& vendor : vendors)
-            {
-                bool matched = false;
-                for (const std::wstring& token : vendor.tokens)
-                {
-                    if (!token.empty() && normalizedGroup.find(token) != std::wstring::npos)
-                    {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (matched)
-                {
-                    targetName = vendor.display;
-                    break;
-                }
-            }
-        }
-
-        const std::wstring targetKey = L"merged:" + NormalizeGroupName(targetName);
-
-        // 找已存在的同名组
-        ContextMenuGroup* existing = nullptr;
-        for (ContextMenuGroup& candidate : merged)
-        {
-            if (candidate.sourceKey == targetKey)
-            {
-                existing = &candidate;
-                break;
-            }
-        }
-
-        if (existing == nullptr)
-        {
-            ContextMenuGroup fresh;
-            fresh.sourceKey = targetKey;
-            fresh.name      = targetName;
-            fresh.isShellex = group.isShellex;
-            merged.push_back(std::move(fresh));
-            existing = &merged.back();
-        }
-
-        for (const ContextMenuItem& item : group.items)
-        {
-            MergeItemInto(*existing, item);
-        }
-        existing->isShellex = existing->isShellex || group.isShellex;
-    }
-
-    // 组级系统判定：如「新建」「发送到」整组标系统项
-    for (ContextMenuGroup& group : merged)
-    {
-        if (IsSystemBuiltinGroup(group.name))
-        {
-            for (ContextMenuItem& item : group.items)
-            {
-                item.isSystemBuiltin = true;
-            }
-        }
-    }
-
-    report.groups = std::move(merged);
+    return ::CreateWindowExW(0, kHostClass, L"", WS_POPUP,
+                             0, 0, 1, 1, nullptr, nullptr,
+                             ::GetModuleHandleW(nullptr), nullptr);
 }
 
 } // namespace
 
 // ---------------------------------------------------------------------------
 
-void CollectDynamicItems(ContextMenuReport& report)
+std::wstring IconDirPath()
+{
+    const std::wstring appData = AppDataFolder();
+    if (appData.empty())
+    {
+        return std::wstring();
+    }
+    return appData + L"\\FileExplorer\\menu-icons";
+}
+
+void CollectScenes(ContextMenuReport& report)
 {
     HRESULT initHr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool needUninitialize = SUCCEEDED(initHr);
 
+    report.scenes.clear();
+    g_nativeDrawCount   = 0;
+    g_fallbackDrawCount = 0;
+    g_sceneSerial       = 0;
+
+    std::wstring root, folder;
+    if (!PrepareSample(root, folder))
+    {
+        report.collectedAt = NowTimeString();
+        for (const auto& scene : { SceneFile, SceneFolder, SceneBackground, SceneMultiple })
+        {
+            SceneMenu sceneMenu;
+            sceneMenu.scene = scene;
+            sceneMenu.failReason = L"样本目录准备失败";
+            report.scenes.push_back(std::move(sceneMenu));
+        }
+        if (needUninitialize) ::CoUninitialize();
+        return;
+    }
+
+    const std::wstring iconDir = IconDirPath();
+    ResetIconDir(iconDir);
+
+    HWND host = CreateHiddenHost();
+
     try
     {
-        std::wstring root, folder;
-        if (!PrepareSample(root, folder))
-        {
-            Logger::Error(L"右键菜单样本目录准备失败");
-            if (needUninitialize)
-            {
-                ::CoUninitialize();
-            }
-            return;
-        }
-
-        // 1) 文件样本（多种扩展名，覆盖不同文件处理器）
-        const wchar_t* fileSamples[] =
-        {
-            L"sample.txt",
-            L"sample.docx",
-            L"sample.rar",
-            L"sample.zip",
+        // 文件：四个样本各采一份（不同扩展名菜单本来就不同）
+        struct FileSample { const wchar_t* name; const wchar_t* label; };
+        const FileSample files[] = {
+            { L"sample.txt",  L"文件 · sample.txt" },
+            { L"sample.docx", L"文件 · sample.docx" },
+            { L"sample.rar",  L"文件 · sample.rar" },
+            { L"sample.zip",  L"文件 · sample.zip" },
         };
-        for (const wchar_t* file : fileSamples)
+        for (const FileSample& sample : files)
         {
-            try
-            {
-                CollectForPath(root + L"\\" + file, SceneFile, report);
-            }
-            catch (...)
-            {
-                Logger::Warn(L"文件样本采集异常：" + std::wstring(file));
-            }
+            CollectForPath(root + L"\\" + sample.name, SceneFile, sample.label,
+                           host, iconDir, report);
         }
 
-        // 2) 文件夹样本
-        try
-        {
-            CollectForPath(folder, SceneFolder, report);
-        }
-        catch (...)
-        {
-            Logger::Warn(L"文件夹样本采集异常");
-        }
-
-        // 3) 背景样本
-        try
-        {
-            CollectForBackground(root, report);
-        }
-        catch (...)
-        {
-            Logger::Warn(L"背景样本采集异常");
-        }
-
-        // 4) 多选样本（同目录两个文件）
-        try
-        {
-            CollectForMultiSelect(root + L"\\multi-a.txt",
-                                  root + L"\\multi-b.txt", report);
-        }
-        catch (...)
-        {
-            Logger::Warn(L"多选样本采集异常");
-        }
-
-        CleanupSample(root);
-
-        // 5) 按软件归并 + 条目去重（消掉同族多组、重复项）
-        const std::vector<EnumeratedHandler> handlers = EnumerateShellexHandlers();
-        MergeGroups(report, handlers);
-
-        report.collectedAt = NowTimeString();
-        Logger::Info(L"右键菜单动态采集完成：分组 " +
-                     std::to_wstring(report.groups.size()) +
-                     L"，处理器 " + std::to_wstring(handlers.size()));
+        CollectForPath(folder, SceneFolder, L"文件夹", host, iconDir, report);
+        CollectForBackground(root, host, iconDir, report);
+        CollectForMultiSelect(root + L"\\multi-a.txt", root + L"\\multi-b.txt",
+                              host, iconDir, report);
     }
     catch (...)
     {
-        Logger::Error(L"右键菜单动态采集出现未知异常");
+        Logger::Error(L"右键菜单采集出现未知异常");
     }
 
-    if (needUninitialize)
+    if (host != nullptr)
     {
-        ::CoUninitialize();
+        ::DestroyWindow(host);
     }
+
+    CleanupSample(root);
+
+    report.collectedAt = NowTimeString();
+
+    int sceneOk = 0;
+    for (const SceneMenu& scene : report.scenes)
+    {
+        sceneOk += scene.ok ? 1 : 0;
+    }
+    Logger::Info(L"右键菜单采集完成：场景 " + std::to_wstring(report.scenes.size()) +
+                 L"，成功 " + std::to_wstring(sceneOk) +
+                 L"，扩展自绘 " + std::to_wstring(g_nativeDrawCount) +
+                 L" 行，兜底绘制 " + std::to_wstring(g_fallbackDrawCount) + L" 行");
 }
 
 // ---------------------------------------------------------------------------
-// 缓存 JSON 读写
+// 缓存
 // ---------------------------------------------------------------------------
-
 using nlohmann::json;
 
-// 缓存格式版本：整理规则一变就换号，老缓存自动作废重采
-const int kCacheVersion = 2;
-
-json ItemToJson(const ContextMenuItem& item)
-{
-    json j;
-    j["id"]           = ToUtf8(item.id);
-    j["text"]         = ToUtf8(item.text);
-    j["verb"]         = ToUtf8(item.verb);
-    j["parentPath"]   = ToUtf8(item.parentPath);
-    j["commandLine"]  = ToUtf8(item.commandLine);
-    j["dllPath"]      = ToUtf8(item.dllPath);
-    j["clsid"]        = ToUtf8(item.clsid);
-    j["scenes"]       = item.scenes;
-    j["commandOffset"]= item.commandOffset;
-    j["isSeparator"]  = item.isSeparator;
-    j["disabled"]     = item.disabled;
-    j["failed"]       = item.failed;
-    j["fromRegistry"] = item.fromRegistry;
-    j["fromExtension"]= item.fromExtension;
-    j["isSystemBuiltin"] = item.isSystemBuiltin;
-    j["failReason"]   = ToUtf8(item.failReason);
-    return j;
-}
+const int kCacheVersion = 3;
 
 ContextMenuItem ItemFromJson(const json& j)
 {
@@ -937,23 +968,43 @@ ContextMenuItem ItemFromJson(const json& j)
                    ? FromUtf8(j[key].get<std::string>())
                    : std::wstring();
     };
-    item.id          = str("id");
-    item.text        = str("text");
-    item.verb        = str("verb");
-    item.parentPath  = str("parentPath");
-    item.commandLine = str("commandLine");
-    item.dllPath     = str("dllPath");
-    item.clsid       = str("clsid");
-    item.scenes      = j.contains("scenes") ? j["scenes"].get<unsigned int>() : 0;
+    item.level         = j.contains("level") ? j["level"].get<int>() : 0;
+    item.text          = str("text");
+    item.verb          = str("verb");
+    item.commandLine   = str("commandLine");
+    item.dllPath       = str("dllPath");
+    item.clsid         = str("clsid");
+    item.scenes        = j.contains("scenes") ? j["scenes"].get<unsigned int>() : 0;
     item.commandOffset = j.contains("commandOffset") ? j["commandOffset"].get<int>() : -1;
-    item.isSeparator = j.contains("isSeparator") && j["isSeparator"].get<bool>();
-    item.disabled    = j.contains("disabled") && j["disabled"].get<bool>();
-    item.failed      = j.contains("failed") && j["failed"].get<bool>();
-    item.fromRegistry = j.contains("fromRegistry") && j["fromRegistry"].get<bool>();
+    item.isSeparator   = j.contains("isSeparator") && j["isSeparator"].get<bool>();
+    item.disabled      = j.contains("disabled") && j["disabled"].get<bool>();
+    item.failed        = j.contains("failed") && j["failed"].get<bool>();
+    item.fromRegistry  = j.contains("fromRegistry") && j["fromRegistry"].get<bool>();
     item.fromExtension = j.contains("fromExtension") && j["fromExtension"].get<bool>();
-    item.isSystemBuiltin = j.contains("isSystemBuiltin") && j["isSystemBuiltin"].get<bool>();
-    item.failReason  = str("failReason");
+    item.imageFile     = str("imageFile");
+    item.failReason    = str("failReason");
     return item;
+}
+
+json ItemToJson(const ContextMenuItem& item)
+{
+    json j;
+    j["level"]         = item.level;
+    j["text"]          = ToUtf8(item.text);
+    j["verb"]          = ToUtf8(item.verb);
+    j["commandLine"]   = ToUtf8(item.commandLine);
+    j["dllPath"]       = ToUtf8(item.dllPath);
+    j["clsid"]         = ToUtf8(item.clsid);
+    j["scenes"]        = item.scenes;
+    j["commandOffset"] = item.commandOffset;
+    j["isSeparator"]   = item.isSeparator;
+    j["disabled"]      = item.disabled;
+    j["failed"]        = item.failed;
+    j["fromRegistry"]  = item.fromRegistry;
+    j["fromExtension"] = item.fromExtension;
+    j["imageFile"]     = ToUtf8(item.imageFile);
+    j["failReason"]    = ToUtf8(item.failReason);
+    return j;
 }
 
 void SaveCache(const ContextMenuReport& report)
@@ -968,23 +1019,25 @@ void SaveCache(const ContextMenuReport& report)
     root["version"]     = kCacheVersion;
     root["collectedAt"] = ToUtf8(report.collectedAt);
 
-    json groups = json::array();
-    for (const ContextMenuGroup& group : report.groups)
+    json scenes = json::array();
+    for (const SceneMenu& scene : report.scenes)
     {
-        json gj;
-        gj["name"]      = ToUtf8(group.name);
-        gj["sourceKey"] = ToUtf8(group.sourceKey);
-        gj["isShellex"] = group.isShellex;
+        json sj;
+        sj["scene"]       = scene.scene;
+        sj["sampleLabel"] = ToUtf8(scene.sampleLabel);
+        sj["samplePath"]  = ToUtf8(scene.samplePath);
+        sj["ok"]          = scene.ok;
+        sj["failReason"]  = ToUtf8(scene.failReason);
 
         json items = json::array();
-        for (const ContextMenuItem& item : group.items)
+        for (const ContextMenuItem& item : scene.items)
         {
             items.push_back(ItemToJson(item));
         }
-        gj["items"] = items;
-        groups.push_back(gj);
+        sj["items"] = items;
+        scenes.push_back(sj);
     }
-    root["groups"] = groups;
+    root["scenes"] = scenes;
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out)
@@ -1011,12 +1064,10 @@ bool LoadCache(ContextMenuReport& report)
     }
     catch (const std::exception& e)
     {
-        Logger::Warn(std::wstring(L"菜单缓存 JSON 解析失败：") +
-                     FromUtf8(e.what()));
+        Logger::Warn(std::wstring(L"菜单缓存 JSON 解析失败：") + FromUtf8(e.what()));
         return false;
     }
 
-    // 老格式缓存（没有 version 或版本号不符）直接作废，让上层重采
     const int version = root.contains("version") && root["version"].is_number()
                             ? root["version"].get<int>() : 0;
     if (version != kCacheVersion)
@@ -1025,30 +1076,33 @@ bool LoadCache(ContextMenuReport& report)
         return false;
     }
 
-    report.groups.clear();
+    report.scenes.clear();
     report.collectedAt = root.contains("collectedAt") && root["collectedAt"].is_string()
                              ? FromUtf8(root["collectedAt"].get<std::string>())
                              : std::wstring();
 
-    if (root.contains("groups") && root["groups"].is_array())
+    if (root.contains("scenes") && root["scenes"].is_array())
     {
-        for (const auto& gj : root["groups"])
+        for (const auto& sj : root["scenes"])
         {
-            ContextMenuGroup group;
-            group.name      = gj.contains("name") && gj["name"].is_string()
-                                  ? FromUtf8(gj["name"].get<std::string>()) : std::wstring();
-            group.sourceKey = gj.contains("sourceKey") && gj["sourceKey"].is_string()
-                                  ? FromUtf8(gj["sourceKey"].get<std::string>()) : std::wstring();
-            group.isShellex = gj.contains("isShellex") && gj["isShellex"].get<bool>();
+            SceneMenu scene;
+            scene.scene       = sj.contains("scene") ? sj["scene"].get<unsigned int>() : 0;
+            scene.sampleLabel = sj.contains("sampleLabel") && sj["sampleLabel"].is_string()
+                                    ? FromUtf8(sj["sampleLabel"].get<std::string>()) : std::wstring();
+            scene.samplePath  = sj.contains("samplePath") && sj["samplePath"].is_string()
+                                    ? FromUtf8(sj["samplePath"].get<std::string>()) : std::wstring();
+            scene.ok          = sj.contains("ok") && sj["ok"].get<bool>();
+            scene.failReason  = sj.contains("failReason") && sj["failReason"].is_string()
+                                    ? FromUtf8(sj["failReason"].get<std::string>()) : std::wstring();
 
-            if (gj.contains("items") && gj["items"].is_array())
+            if (sj.contains("items") && sj["items"].is_array())
             {
-                for (const auto& ij : gj["items"])
+                for (const auto& ij : sj["items"])
                 {
-                    group.items.push_back(ItemFromJson(ij));
+                    scene.items.push_back(ItemFromJson(ij));
                 }
             }
-            report.groups.push_back(std::move(group));
+            report.scenes.push_back(std::move(scene));
         }
     }
     return true;
