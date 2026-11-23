@@ -154,10 +154,6 @@
     <ClCompile Include="src\shell\ShellFolder.cpp" />
     <ClCompile Include="src\shell\ShellIcon.cpp" />
     <ClCompile Include="src\shell\ShellOverlay.cpp" />
-    <ClCompile Include="src\shell\ContextMenuData.cpp" />
-    <ClCompile Include="src\shell\ContextMenuCollector.cpp" />
-    <ClCompile Include="src\shell\MenuCensus.cpp" />
-    <ClCompile Include="src\shell\MenuConfig.cpp" />
     <ClCompile Include="src\shell\ShellClipboard.cpp" />
     <ClCompile Include="src\shell\ShellDragDrop.cpp" />
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
@@ -181,7 +177,6 @@
     <ClCompile Include="src\ui\PasteProgressBar.cpp" />
     <ClCompile Include="src\ui\SettingsDialog.cpp" />
     <ClCompile Include="src\ui\OverlaySettingsDialog.cpp" />
-    <ClCompile Include="src\ui\ContextMenuSettingsDialog.cpp" />
     <ClCompile Include="src\ui\BatchRenameDialog.cpp" />
     <ClCompile Include="src\ui\BatchRenameRules.cpp" />
     <ClCompile Include="src\ui\CustomWindow.cpp" />
@@ -208,10 +203,6 @@
     <ClInclude Include="src\shell\ShellFolder.h" />
     <ClInclude Include="src\shell\ShellIcon.h" />
     <ClInclude Include="src\shell\ShellOverlay.h" />
-    <ClInclude Include="src\shell\ContextMenuData.h" />
-    <ClInclude Include="src\shell\ContextMenuCollector.h" />
-    <ClInclude Include="src\shell\MenuCensus.h" />
-    <ClInclude Include="src\shell\MenuConfig.h" />
     <ClInclude Include="src\shell\ShellClipboard.h" />
     <ClInclude Include="src\shell\ShellDragDrop.h" />
     <ClInclude Include="src\shell\ShellOpenWith.h" />
@@ -230,7 +221,6 @@
     <ClInclude Include="src\ui\PasteProgressBar.h" />
     <ClInclude Include="src\ui\SettingsDialog.h" />
     <ClInclude Include="src\ui\OverlaySettingsDialog.h" />
-    <ClInclude Include="src\ui\ContextMenuSettingsDialog.h" />
     <ClInclude Include="src\ui\BatchRenameDialog.h" />
     <ClInclude Include="src\ui\BatchRenameRules.h" />
     <ClInclude Include="src\ui\CustomWindow.h" />

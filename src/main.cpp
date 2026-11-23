@@ -14,7 +14,6 @@
 #include <objbase.h>        // OleInitialize / OleUninitialize
 #include <commctrl.h>       // InitCommonControlsEx
 #include <shlobj.h>         // SetCurrentProcessExplicitAppUserModelID
-#include <shellapi.h>       // CommandLineToArgvW（普查子进程解析参数）
 
 #include <string>
 
@@ -23,7 +22,6 @@
 #include "shell/AutoStart.h"
 #include "shell/ExplorerProxy.h"   // 管理员身份下部署/移除 System32 里的 explorer.exe 代理
 #include "shell/ListaryIntegration.h"   // 顺手把内嵌的 Listary 插件装进 Listary 目录
-#include "shell/MenuCensus.h"      // --census-worker：右键菜单普查子进程
 #include "shell/ShellFolder.h"     // IsContainerFileExtension：压缩包要当目录打开
 #include "ui/BackgroundHost.h"
 #include "ui/MainWnd.h"
@@ -216,33 +214,6 @@ int WINAPI wWinMain(HINSTANCE hInstance,
                          L"，Listary=" + std::wstring(listaryOk ? L"成功" : L"失败"));
             Logger::Shutdown();
             return failed ? 1 : 0;
-        }
-    }
-
-    // ---------- 步骤 1.6：右键菜单普查子进程（--census-worker） ----------
-    // 第三方 shellex 偶尔会把采集进程搞崩，所以真正采集放在独立子进程里做，
-    // 崩了只影响这一批扩展名，主程序照常活着。参数：
-    //   --census-worker <批次号> <扩展名清单文件> <结果文件>
-    {
-        std::wstring command = lpCmdLine != nullptr ? lpCmdLine : L"";
-        while (!command.empty() && (command.front() == L' ' || command.front() == L'\t'))
-        {
-            command.erase(command.begin());
-        }
-
-        if (command.rfind(L"--census-worker", 0) == 0)
-        {
-            int argc = 0;
-            LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
-            int workerExit = 2;
-            if (argv != nullptr)
-            {
-                workerExit = shell::RunCensusWorker(argc, argv);
-                ::LocalFree(argv);
-            }
-            Logger::Info(L"普查子进程退出码=" + std::to_wstring(workerExit));
-            Logger::Shutdown();
-            return workerExit;
         }
     }
 

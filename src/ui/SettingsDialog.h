@@ -73,9 +73,6 @@ private:
     void RefreshOverlayControls();
     void OnOverlayConfigButton();
 
-    // 右键菜单：点「配置右键菜单…」打开菜单采集结果查看窗口（一期纯展示）
-    void OnCtxMenuConfigButton();
-
     // 「恢复/重置」按钮：弹选择框（仅恢复设置 / 清除所有痕迹），确认后执行
     void OnRestoreButton();
 
@@ -118,11 +115,6 @@ private:
     bool  m_hotOverlayConfig = false;
     bool  m_pressedOverlayConfig = false;
     bool  m_overlayConfigDirty = false;
-
-    // 右键菜单配置：自绘「配置右键菜单…」按钮（一期纯查看，无总开关联动）
-    RECT  m_ctxMenuRect = {};
-    bool  m_hotCtxMenu = false;
-    bool  m_pressedCtxMenu = false;
 
     HFONT m_font        = nullptr;
     HFONT m_fontTitle   = nullptr;
