@@ -486,7 +486,10 @@ std::vector<RawHandler> ScanRegistry()
 
 OverlayManager::~OverlayManager()
 {
+    // 先让常驻线程把处理器释放干净（COM 对象只能在其创建线程上释放），
+    // 再把这根线程收掉
     Shutdown();
+    StopWorkerThread();
 }
 
 OverlayManager& OverlayManager::Instance()
@@ -495,26 +498,252 @@ OverlayManager& OverlayManager::Instance()
     return instance;
 }
 
+// ============================================================================
+// 常驻专用 STA 线程（二期 2A 跨线程加固）
+//
+// 为什么要有它：处理器是 STA 对象，只在创建它的线程上调用才安全。一期是
+// 「第一次枚举时在那根临时枚举线程里创建，下次枚举换线程却复用旧对象」，
+// 跨线程调用会返回 RPC_E_WRONG_THREAD，被当成未命中，表现为角标偶尔不显示。
+// 现在所有 COM 操作（实例化 / GetOverlayInfo / IsMemberOf / 释放）都固定在
+// 这一根线程上，调用方只负责投递任务和等结果。
+// ============================================================================
+
+bool OverlayManager::StartWorkerThread()
+{
+    if (m_workerThread.joinable())
+    {
+        return true; // 已经起来了
+    }
+
+    // 三个同步事件：任务到达（自动重置）、请求退出（手动重置）、任务完成（手动重置）
+    if (m_taskEvent == nullptr)
+    {
+        m_taskEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    }
+    if (m_stopEvent == nullptr)
+    {
+        m_stopEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    if (m_doneEvent == nullptr)
+    {
+        m_doneEvent = ::CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    }
+    if (m_taskEvent == nullptr || m_stopEvent == nullptr || m_doneEvent == nullptr)
+    {
+        Logger::Warn(L"角标常驻线程：创建同步事件失败，本次退回调用方线程直接处理");
+        return false;
+    }
+
+    ::ResetEvent(m_stopEvent);
+
+    try
+    {
+        m_workerThread = std::thread([this]() { WorkerLoop(); });
+    }
+    catch (...)
+    {
+        Logger::Warn(L"角标常驻线程：线程创建失败，本次退回调用方线程直接处理");
+        return false;
+    }
+    return true;
+}
+
+void OverlayManager::StopWorkerThread()
+{
+    if (!m_workerThread.joinable())
+    {
+        return;
+    }
+
+    // 置退出事件；常驻线程从等待中醒来后走完循环、CoUninitialize，再 join 收尾
+    ::SetEvent(m_stopEvent);
+    m_workerThread.join();
+
+    if (m_taskEvent != nullptr)
+    {
+        ::CloseHandle(m_taskEvent);
+        m_taskEvent = nullptr;
+    }
+    if (m_stopEvent != nullptr)
+    {
+        ::CloseHandle(m_stopEvent);
+        m_stopEvent = nullptr;
+    }
+    if (m_doneEvent != nullptr)
+    {
+        ::CloseHandle(m_doneEvent);
+        m_doneEvent = nullptr;
+    }
+}
+
+void OverlayManager::WorkerLoop()
+{
+    m_workerThreadId = ::GetCurrentThreadId();
+
+    // 这根线程就是处理器的「家」：必须自己初始化成 STA
+    const HRESULT hrInit =
+        ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool comReady = SUCCEEDED(hrInit);
+    if (!comReady)
+    {
+        Logger::Warn(L"角标常驻线程 CoInitializeEx 失败：" + Logger::FormatHresult(hrInit));
+    }
+
+    HANDLE waitHandles[2] = { m_stopEvent, m_taskEvent };
+
+    bool running = true;
+    while (running)
+    {
+        // 带消息泵的等待：既等任务 / 退出事件，也把消息泵掉。
+        // 这一步不能省——处理器内部若需要 COM 跨 apartment 调度或窗口消息，
+        // 没有消息泵会被我们自己卡死。
+        const DWORD waitResult = ::MsgWaitForMultipleObjectsEx(
+            2, waitHandles, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+
+        // 不论被什么唤醒，先把已排队的消息处理干净
+        MSG msg = {};
+        while (::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            ::TranslateMessage(&msg);
+            ::DispatchMessageW(&msg);
+        }
+
+        if (waitResult == WAIT_OBJECT_0)
+        {
+            running = false; // 退出事件
+            break;
+        }
+
+        if (waitResult == WAIT_OBJECT_0 + 1)
+        {
+            TaskKind kind = TaskKind::Annotate;
+            std::vector<ShellEntry>* entries = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_taskMutex);
+                kind    = m_taskKind;
+                entries = m_taskEntries;
+            }
+
+            if (kind == TaskKind::Shutdown)
+            {
+                RunShutdownOnWorker();
+            }
+            else if (entries != nullptr)
+            {
+                RunAnnotateOnWorker(*entries);
+            }
+
+            // 手动重置事件：保持置位，等下一次投递前由投递方 ResetEvent
+            ::SetEvent(m_doneEvent);
+        }
+        // 其余返回值（有消息）已经在上面泵过，回到循环继续等
+    }
+
+    if (comReady)
+    {
+        ::CoUninitialize();
+    }
+    m_workerThreadId = 0;
+}
+
+void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries)
+{
+    // 同一时刻只允许一个任务在飞：枚举线程的 Annotate 与 UI 线程的 Shutdown
+    // 可能并发，撞车会互相覆盖任务字段
+    std::lock_guard<std::mutex> postLock(m_postMutex);
+
+    if (!StartWorkerThread())
+    {
+        // 常驻线程起不来（事件 / 线程创建失败，极罕见）：退回在调用方线程直接做，
+        // 行为退化成加固前，但功能不丢
+        if (kind == TaskKind::Annotate && entries != nullptr)
+        {
+            RunAnnotateOnWorker(*entries);
+        }
+        else
+        {
+            RunShutdownOnWorker();
+        }
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_taskMutex);
+        m_taskKind    = kind;
+        m_taskEntries = entries;
+    }
+
+    ::ResetEvent(m_doneEvent);
+    ::SetEvent(m_taskEvent);
+
+    // 同步等结果。调用方是后台枚举线程或 UI 线程，等的是同一批条目的判定结果；
+    // 线程间靠完成事件建立先后关系，等待期间调用方不会碰 entries。
+    ::WaitForSingleObject(m_doneEvent, INFINITE);
+
+    {
+        std::lock_guard<std::mutex> lock(m_taskMutex);
+        m_taskEntries = nullptr;
+    }
+}
+
 void OverlayManager::Shutdown()
 {
-    for (auto& [index, icon] : m_iconSmall)
+    // 从未启用过角标、也没起过常驻线程：没有任何东西要释放，直接返回，
+    // 避免为了一个空 Shutdown 白起一根线程
+    bool hasAnything = m_workerThread.joinable();
+    if (!hasAnything)
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        hasAnything = !m_handlers.empty() || !m_iconSmall.empty() ||
+                      !m_iconLarge.empty() || !m_deadIcons.empty();
+    }
+    if (!hasAnything)
+    {
+        return;
+    }
+
+    // 处理器 COM 对象必须在其创建线程（常驻 STA）上释放，所以交给常驻线程做
+    PostTaskAndWait(TaskKind::Shutdown, nullptr);
+
+    // 图标 HICON 与 COM 无关，统一放在调用方（UI）线程销毁：
+    // 常驻线程若直接销毁，UI 可能正在用这个 HICON 绘制，会画到已释放的对象
+    std::vector<HICON> icons;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        icons.swap(m_deadIcons);
+    }
+    for (HICON icon : icons)
     {
         if (icon != nullptr)
         {
             ::DestroyIcon(icon);
+        }
+    }
+}
+
+void OverlayManager::RunShutdownOnWorker()
+{
+    // 只允许在常驻 STA 线程执行
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+
+    for (auto& [index, icon] : m_iconSmall)
+    {
+        if (icon != nullptr)
+        {
+            m_deadIcons.push_back(icon); // 搬出去，交给调用方线程 DestroyIcon
         }
     }
     for (auto& [index, icon] : m_iconLarge)
     {
         if (icon != nullptr)
         {
-            ::DestroyIcon(icon);
+            m_deadIcons.push_back(icon);
         }
     }
     m_iconSmall.clear();
     m_iconLarge.clear();
 
-    m_handlers.clear();
+    m_handlers.clear();     // 到这里，所有处理器都在创建它们的线程上释放
     m_resultCache.clear();
     m_loaded = false;
 }
@@ -547,7 +776,13 @@ void OverlayManager::EnsureLoaded()
 
 void OverlayManager::EnumerateHandlers()
 {
+    // 只允许在常驻 STA 线程执行（处理器要在这根线程上实例化）。
+    // 先在局部容器里建好，最后一次性换进 m_handlers，
+    // 这样 UI 线程读 m_handlers 时不会看到半成品或 vector 重分配。
     const std::vector<RawHandler> raw = ScanRegistry();
+
+    std::vector<OverlayHandler> found;
+    found.reserve(raw.size());
 
     for (const RawHandler& entry : raw)
     {
@@ -589,7 +824,7 @@ void OverlayManager::EnumerateHandlers()
             info.flags     = flags;
         }
 
-        m_handlers.push_back(std::move(info));
+        found.push_back(std::move(info));
     }
 
     // 与配置对齐：按配置里的顺序 / 范围套到同 id 的处理器上；未配置的追加末尾、默认全部路径
@@ -597,6 +832,7 @@ void OverlayManager::EnumerateHandlers()
 
     // 先按配置出现顺序排好已配置的，未配置的保持原顺序追加
     std::vector<OverlayHandler> ordered;
+    ordered.reserve(found.size());
     for (const core::OverlaySet& set : sets)
     {
         const std::wstring key = ToLower(set.id);
@@ -604,7 +840,7 @@ void OverlayManager::EnumerateHandlers()
         {
             continue; // 丢弃历史遗留的空 id 配置项
         }
-        for (auto& handler : m_handlers)
+        for (auto& handler : found)
         {
             if (handler.setId == key)
             {
@@ -614,7 +850,7 @@ void OverlayManager::EnumerateHandlers()
             }
         }
     }
-    for (auto& handler : m_handlers)
+    for (auto& handler : found)
     {
         if (!handler.handler)
         {
@@ -622,9 +858,17 @@ void OverlayManager::EnumerateHandlers()
         }
         ordered.push_back(std::move(handler));
     }
-    m_handlers.swap(ordered);
 
-    Logger::Info(L"角标处理器枚举完成，共 " + std::to_wstring(m_handlers.size()) + L" 个");
+    size_t handlerCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        // swap 出来的旧 handlers 在锁外由 ordered 析构，且析构发生在本线程，
+        // 满足「COM 对象在其创建线程释放」的约束
+        m_handlers.swap(ordered);
+        handlerCount = m_handlers.size();
+    }
+
+    Logger::Info(L"角标处理器枚举完成，共 " + std::to_wstring(handlerCount) + L" 个");
 }
 
 std::vector<core::OverlaySet> OverlayManager::ListSets()
@@ -825,6 +1069,15 @@ void OverlayManager::Annotate(std::vector<ShellEntry>& entries)
         return;
     }
 
+    // 真正的判定与处理器懒加载 / 实例化全部投递到常驻 STA 线程执行，
+    // 这里同步等结果。调用方（后台枚举线程）在等待期间不会碰 entries，
+    // 两边靠完成事件建立先后关系，不会出现数据竞争。
+    PostTaskAndWait(TaskKind::Annotate, &entries);
+}
+
+void OverlayManager::RunAnnotateOnWorker(std::vector<ShellEntry>& entries)
+{
+    // 只允许在常驻 STA 线程执行：处理器 COM 对象全部由这根线程持有
     EnsureLoaded();
     ClearResultCache();
 
@@ -864,6 +1117,10 @@ void OverlayManager::Annotate(std::vector<ShellEntry>& entries)
 
 HICON OverlayManager::GetOverlayIcon(size_t handlerIndex, int size)
 {
+    // 本函数在 UI 线程被调用；m_handlers 与图标缓存会被常驻线程整体替换
+    // （懒加载 / Shutdown），必须加锁，否则可能读到悬垂引用或半成品。
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+
     if (handlerIndex >= m_handlers.size())
     {
         return nullptr;
