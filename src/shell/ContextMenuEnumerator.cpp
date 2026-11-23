@@ -448,6 +448,10 @@ ContextMenuGroup& FindOrAddGroup(ContextMenuReport& report,
 }
 
 // 扫一个静态动词根，把读到的项写进报告
+//
+// 去重规则：同一个动词（同一个归并键 + 同一个动词名）在多个根下注册
+// （比如 `*\shell` 和 `Directory\shell` 都有 git_gui）只记一条，场景位取并集。
+// 这样能消掉「同一条项出现两遍、只有场景标注不同」的重复。
 void ScanStaticRoot(const StaticRoot& root, ContextMenuReport& report)
 {
     const std::vector<std::wstring> verbs = ReadSubKeyNames(HKEY_CLASSES_ROOT, root.path);
@@ -484,19 +488,44 @@ void ScanStaticRoot(const StaticRoot& root, ContextMenuReport& report)
         ContextMenuGroup& group = FindOrAddGroup(report, sourceKey,
                                                  groupName.empty() ? verb : groupName, false);
 
-        ContextMenuItem item;
-        item.id          = verb;
-        item.text        = text;
-        item.verb        = verb;
-        item.commandLine = command;
-        item.scenes      = root.scenes;
-        item.dllPath     = exe;
-        group.items.push_back(std::move(item));
+        // 同组同动词已存在 → 只并场景位，不再重复添加
+        bool alreadyPresent = false;
+        for (ContextMenuItem& existing : group.items)
+        {
+            if (existing.verb == verb)
+            {
+                existing.scenes |= root.scenes;
+                if (existing.text.empty())
+                {
+                    existing.text = text;
+                }
+                if (existing.commandLine.empty())
+                {
+                    existing.commandLine = command;
+                }
+                alreadyPresent = true;
+                break;
+            }
+        }
+
+        if (!alreadyPresent)
+        {
+            ContextMenuItem item;
+            item.id          = verb;
+            item.text        = text;
+            item.verb        = verb;
+            item.commandLine = command;
+            item.scenes      = root.scenes;
+            item.dllPath     = exe;
+            item.fromRegistry = true;
+            item.isSystemBuiltin = IsSystemBuiltinItem(text, verb);
+            group.items.push_back(std::move(item));
+        }
     }
 }
 
-// 扫一个 shellex 根，把处理器写进报告（组内菜单项留空，待 Collector 采集）
-void ScanShellexRoot(const StaticRoot& root, ContextMenuReport& report,
+// 扫一个 shellex 根，只收集处理器清单（不再建空壳分组，避免"一个东西两个组"）
+void ScanShellexRoot(const StaticRoot& root,
                      std::vector<EnumeratedHandler>* handlersOut)
 {
     const std::wstring handlerRoot =
@@ -520,47 +549,33 @@ void ScanShellexRoot(const StaticRoot& root, ContextMenuReport& report,
             continue;
         }
 
-        const std::wstring dll = ReadClsidDllPath(clsid);
-        const std::wstring displayName = BuildHandlerDisplayName(name, clsid, dll);
-        const std::wstring sourceKey = !dll.empty() ? ToLower(dll) : L"clsid:" + ToLower(clsidStr);
-
-        // 同一处理器可能在多个根注册：场景位叠加，分组只建一次
-        ContextMenuGroup* group = nullptr;
-        for (ContextMenuGroup& g : report.groups)
+        if (handlersOut == nullptr)
         {
-            if (g.sourceKey == sourceKey)
+            continue;
+        }
+
+        // 同一处理器可能在多个根注册：按 CLSID 找已有条目，只并场景位
+        bool alreadyPresent = false;
+        for (EnumeratedHandler& existing : *handlersOut)
+        {
+            if (existing.clsidStr == ClsidToString(clsid))
             {
-                group = &g;
+                existing.scenes |= root.scenes;
+                alreadyPresent = true;
                 break;
             }
         }
 
-        EnumeratedHandler handler;
-        handler.clsid    = clsid;
-        handler.clsidStr = ClsidToString(clsid);
-        handler.regName  = name;
-        handler.dllPath  = dll;
-        handler.displayName = displayName;
-        handler.scenes   = root.scenes;
-
-        if (group == nullptr)
+        if (!alreadyPresent)
         {
-            ContextMenuGroup newGroup;
-            newGroup.sourceKey = sourceKey;
-            newGroup.name      = displayName;
-            newGroup.isShellex = true;
-            report.groups.push_back(std::move(newGroup));
-            group = &report.groups.back();
-        }
-        else
-        {
-            // 已存在：把新场景位并进去
-            handler.scenes |= root.scenes;
-        }
-
-        if (handlersOut != nullptr)
-        {
-            handlersOut->push_back(handler);
+            EnumeratedHandler handler;
+            handler.clsid    = clsid;
+            handler.clsidStr = ClsidToString(clsid);
+            handler.regName  = name;
+            handler.dllPath  = ReadClsidDllPath(clsid);
+            handler.displayName = BuildHandlerDisplayName(name, clsid, handler.dllPath);
+            handler.scenes   = root.scenes;
+            handlersOut->push_back(std::move(handler));
         }
     }
 }
@@ -571,22 +586,20 @@ void ScanShellexRoot(const StaticRoot& root, ContextMenuReport& report,
 
 std::vector<EnumeratedHandler> EnumerateShellexHandlers()
 {
-    ContextMenuReport throwaway;
     std::vector<EnumeratedHandler> handlers;
 
     for (const StaticRoot& root : kStaticRoots)
     {
-        ScanShellexRoot(root, throwaway, &handlers);
+        ScanShellexRoot(root, &handlers);
     }
 
-    // AllFilesystemObjects：文件和文件夹都出现
+    // AllFilesystemObjects：文件和文件夹、多选都出现
+    const std::wstring afRoot = L"AllFilesystemObjects\\shellex\\ContextMenuHandlers";
     const std::vector<std::wstring> names =
-        ReadSubKeyNames(HKEY_CLASSES_ROOT,
-                        L"AllFilesystemObjects\\shellex\\ContextMenuHandlers");
+        ReadSubKeyNames(HKEY_CLASSES_ROOT, afRoot);
     for (const std::wstring& name : names)
     {
-        const std::wstring handlerKey =
-            L"AllFilesystemObjects\\shellex\\ContextMenuHandlers\\" + name;
+        const std::wstring handlerKey = afRoot + L"\\" + name;
         const std::wstring clsidStr = ReadRegValue(HKEY_CLASSES_ROOT, handlerKey, nullptr);
         if (clsidStr.empty())
         {
@@ -598,14 +611,30 @@ std::vector<EnumeratedHandler> EnumerateShellexHandlers()
             continue;
         }
 
-        EnumeratedHandler handler;
-        handler.clsid    = clsid;
-        handler.clsidStr = ClsidToString(clsid);
-        handler.regName  = name;
-        handler.dllPath  = ReadClsidDllPath(clsid);
-        handler.displayName = BuildHandlerDisplayName(name, clsid, handler.dllPath);
-        handler.scenes   = SceneFile | SceneFolder;
-        handlers.push_back(handler);
+        const std::wstring clsidText = ClsidToString(clsid);
+
+        bool alreadyPresent = false;
+        for (EnumeratedHandler& existing : handlers)
+        {
+            if (existing.clsidStr == clsidText)
+            {
+                existing.scenes |= SceneFile | SceneFolder | SceneMultiple;
+                alreadyPresent = true;
+                break;
+            }
+        }
+
+        if (!alreadyPresent)
+        {
+            EnumeratedHandler handler;
+            handler.clsid    = clsid;
+            handler.clsidStr = clsidText;
+            handler.regName  = name;
+            handler.dllPath  = ReadClsidDllPath(clsid);
+            handler.displayName = BuildHandlerDisplayName(name, clsid, handler.dllPath);
+            handler.scenes   = SceneFile | SceneFolder | SceneMultiple;
+            handlers.push_back(std::move(handler));
+        }
     }
 
     return handlers;
@@ -615,19 +644,20 @@ ContextMenuReport EnumerateRegistry()
 {
     ContextMenuReport report;
 
-    // 1) 静态动词（命令行可读，直接成项）
+    // 只做静态动词（shellex 处理器不再建空壳分组，其菜单项由采集器归组）
     for (const StaticRoot& root : kStaticRoots)
     {
         ScanStaticRoot(root, report);
     }
 
-    // 2) shellex 处理器（只建分组占位，菜单项由 Collector 补）
-    for (const StaticRoot& root : kStaticRoots)
+    size_t itemCount = 0;
+    for (const ContextMenuGroup& group : report.groups)
     {
-        ScanShellexRoot(root, report, nullptr);
+        itemCount += group.items.size();
     }
 
-    Logger::Info(L"右键菜单注册表枚举完成：分组 " + std::to_wstring(report.groups.size()));
+    Logger::Info(L"右键菜单注册表枚举完成：分组 " + std::to_wstring(report.groups.size()) +
+                 L"，静态项 " + std::to_wstring(itemCount));
     return report;
 }
 

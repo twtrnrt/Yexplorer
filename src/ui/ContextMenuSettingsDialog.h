@@ -66,9 +66,12 @@ private:
     HWND  m_hTree    = nullptr;
     HWND  m_hRefresh = nullptr;
     HWND  m_hStatus  = nullptr;
+    HWND  m_hCheckSystem = nullptr;   // 「显示系统项」复选框（默认不勾 = 隐藏系统自带项）
     HFONT m_font     = nullptr;
 
     shell::ContextMenuReport m_report;
+    int m_totalItemCount = 0;   // 采集到的条目总数（显示在状态栏）
+    int m_hiddenSystemCount = 0; // 被默认隐藏掉的系统项数量
 };
 
 } // namespace ui

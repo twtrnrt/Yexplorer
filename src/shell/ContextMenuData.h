@@ -51,9 +51,12 @@ struct ContextMenuItem
     std::wstring clsid;          // 扩展处理器 CLSID 字符串；静态项为空
     unsigned int scenes = SceneNone; // MenuScene 位掩码
     int  commandOffset = -1;     // 扩展项在处理器菜单里的命令偏移（二期 InvokeCommand 用）
-    bool isSeparator = false;    // 是否分隔线
+    bool isSeparator = false;    // 是否分隔线（一期已不再采集，字段保留兼容）
     bool disabled    = false;    // 是否灰态
     bool failed      = false;    // 该项 / 所属处理器读取失败
+    bool fromRegistry = false;   // 来源：注册表静态动词
+    bool fromExtension = false;  // 来源：DLL 外壳扩展（IContextMenu 采集）
+    bool isSystemBuiltin = false; // 判定为系统自带项（默认在界面上隐藏）
     std::wstring failReason;     // 失败原因（failed=true 时填写）
 };
 
@@ -75,5 +78,15 @@ struct ContextMenuReport
 
 // 场景位掩码 → 界面文字，如 "文件 / 文件夹"；空掩码返回 "—"
 std::wstring ScenesToText(unsigned int scenes);
+
+// 来源标注文字：注册表 / 扩展 / 注册表+扩展；都为空时返回空串
+std::wstring SourceLabelToText(bool fromRegistry, bool fromExtension);
+
+// 判定是不是系统自带项（按常见系统动词名 / 菜单文字白名单）
+// 只用于界面默认隐藏，判定不准不会丢数据，勾选「显示系统项」就能看到
+bool IsSystemBuiltinItem(const std::wstring& text, const std::wstring& verb);
+
+// 判定是不是系统自带分组（如「新建」「发送到」）
+bool IsSystemBuiltinGroup(const std::wstring& groupName);
 
 } // namespace shell

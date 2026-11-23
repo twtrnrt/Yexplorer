@@ -40,6 +40,7 @@ const wchar_t* const kClassName = L"FileExplorerContextMenuSettingsDialog";
 const int kControlIdStatus  = 2201;
 const int kControlIdRefresh = 2202;
 const int kControlIdTree    = 2203;
+const int kControlIdSystem  = 2204;
 
 // 窗口客户区尺寸（逻辑像素）
 const int kDialogWidth  = 720;
@@ -197,6 +198,14 @@ void ContextMenuSettingsDialog::CreateControls()
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdStatus)),
                                   ::GetModuleHandleW(nullptr), nullptr);
 
+    // 「显示系统项」复选框：默认不勾，隐藏系统自带项（打开/复制/删除/属性…）
+    m_hCheckSystem = ::CreateWindowExW(0, WC_BUTTONW, L"显示系统项",
+                                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                       0, 0, 0, 0,
+                                       m_hWnd,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdSystem)),
+                                       ::GetModuleHandleW(nullptr), nullptr);
+
     // 刷新按钮
     m_hRefresh = ::CreateWindowExW(0, WC_BUTTONW, L"刷新",
                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -215,7 +224,7 @@ void ContextMenuSettingsDialog::CreateControls()
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdTree)),
                                  ::GetModuleHandleW(nullptr), nullptr);
 
-    for (HWND ctrl : { m_hStatus, m_hRefresh, m_hTree })
+    for (HWND ctrl : { m_hStatus, m_hRefresh, m_hTree, m_hCheckSystem })
     {
         if (ctrl != nullptr)
         {
@@ -239,18 +248,27 @@ void ContextMenuSettingsDialog::Layout()
     const int buttonH = Scale(kButtonHeight);
     const int topH    = Scale(kTopRowHeight);
 
-    // 顶部行：状态标签吃左侧剩余宽度，刷新按钮贴右
+    // 顶部行：状态标签吃左侧剩余宽度，「显示系统项」复选框和刷新按钮贴右
+    const int checkW = Scale(96);
     ::SetWindowPos(m_hRefresh, nullptr,
                    client.right - padding - buttonW,
                    padding,
                    buttonW, buttonH, SWP_NOZORDER);
 
-    const int statusRight = client.right - padding - buttonW - Scale(10);
+    if (m_hCheckSystem != nullptr)
+    {
+        ::SetWindowPos(m_hCheckSystem, nullptr,
+                       client.right - padding - buttonW - Scale(10) - checkW,
+                       padding + (buttonH - Scale(20)) / 2,
+                       checkW, Scale(20), SWP_NOZORDER);
+    }
+
+    const int statusRight = client.right - padding - buttonW - Scale(10) - checkW - Scale(10);
     ::SetWindowPos(m_hStatus, nullptr,
                    padding, padding + (buttonH - Scale(16)) / 2,
                    statusRight - padding, Scale(16), SWP_NOZORDER);
 
-    // 树占满顶部行以下的区域
+    // 树占满顶部行以下的区域；复选框放在状态行下方靠左
     ::SetWindowPos(m_hTree, nullptr,
                    padding, padding + topH,
                    client.right - padding * 2,
@@ -271,39 +289,71 @@ void ContextMenuSettingsDialog::ReloadTree()
 
     ::SendMessageW(m_hTree, TVM_DELETEITEM, 0, reinterpret_cast<LPARAM>(TVI_ROOT));
 
-    // 状态文字
-    std::wstring status;
-    if (m_report.collectedAt.empty())
-    {
-        status = L"暂无缓存，点「刷新」从系统采集";
-    }
-    else
-    {
-        status = L"最近采集：" + m_report.collectedAt;
-    }
-    ::SetWindowTextW(m_hStatus, status.c_str());
+    // 是否显示系统自带项（复选框状态）
+    const bool showSystem =
+        m_hCheckSystem != nullptr &&
+        ::SendMessageW(m_hCheckSystem, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+    // 分组内节点的浅色分隔线只是视觉，不占条目
+    // 统计用
+    m_totalItemCount = 0;
+    m_hiddenSystemCount = 0;
 
     // 一级文字 → 节点句柄（二级项按 parentPath 挂回去）
-    std::unordered_map<std::wstring, HTREEITEM> firstLevel;
-
+    // 注意：分组可能重名合并过，所以 firstLevel 每个分组前清空，避免串组
     for (const shell::ContextMenuGroup& group : m_report.groups)
     {
+        m_totalItemCount += static_cast<int>(group.items.size());
+
+        // 先算出这一组要显示多少条（用于组名后的计数）
+        int visibleCount = 0;
+        for (const shell::ContextMenuItem& item : group.items)
+        {
+            if (item.isSeparator)
+            {
+                continue;
+            }
+            if (!showSystem && item.isSystemBuiltin)
+            {
+                ++m_hiddenSystemCount;
+                continue;
+            }
+            ++visibleCount;
+        }
+
+        if (visibleCount == 0)
+        {
+            continue;   // 整组都被过滤掉就不建组节点
+        }
+
         // 根节点：分组名 + 条目数
         std::wstring rootText = group.name.empty() ? L"（未命名）" : group.name;
-        rootText += L"  （" + std::to_wstring(group.items.size()) + L" 项）";
+        rootText += L"  （" + std::to_wstring(visibleCount) + L" 项）";
         const HTREEITEM hRoot = InsertNode(m_hTree, TVI_ROOT, rootText, 0);
+
+        std::unordered_map<std::wstring, HTREEITEM> firstLevel;
 
         for (const shell::ContextMenuItem& item : group.items)
         {
             if (item.isSeparator)
             {
-                InsertNode(m_hTree, hRoot, L"—", 0);
+                continue;
+            }
+            if (!showSystem && item.isSystemBuiltin)
+            {
                 continue;
             }
 
-            // 条目文字：真实菜单文字 + 场景标注；失败项附原因
+            // 条目文字：真实菜单文字 + 场景标注 + 来源标注
             std::wstring text = item.text.empty() ? L"（无名）" : item.text;
             text += L"  [" + shell::ScenesToText(item.scenes) + L"]";
+
+            const std::wstring source =
+                shell::SourceLabelToText(item.fromRegistry, item.fromExtension);
+            if (!source.empty())
+            {
+                text += L" · " + source;
+            }
             if (item.disabled)
             {
                 text += L" （灰态）";
@@ -336,6 +386,23 @@ void ContextMenuSettingsDialog::ReloadTree()
         ::SendMessageW(m_hTree, TVM_EXPAND, TVE_EXPAND,
                        reinterpret_cast<LPARAM>(hRoot));
     }
+
+    // 状态文字：采集时间 + 统计 + 被隐藏的系统项数量
+    std::wstring status;
+    if (m_report.collectedAt.empty())
+    {
+        status = L"暂无缓存，点「刷新」从系统采集";
+    }
+    else
+    {
+        status = L"最近采集：" + m_report.collectedAt;
+        status += L"　共 " + std::to_wstring(m_totalItemCount) + L" 项";
+        if (!showSystem && m_hiddenSystemCount > 0)
+        {
+            status += L"，已隐藏系统项 " + std::to_wstring(m_hiddenSystemCount) + L" 条";
+        }
+    }
+    ::SetWindowTextW(m_hStatus, status.c_str());
 }
 
 void ContextMenuSettingsDialog::Refresh()
@@ -365,6 +432,13 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND, UINT msg, WPARAM wParam, 
         if (controlId == kControlIdRefresh)
         {
             Refresh();
+            return 0;
+        }
+        if (controlId == kControlIdSystem &&
+            HIWORD(wParam) == BN_CLICKED)
+        {
+            // 只重画树，不重采（采集很贵，勾选开关纯展示过滤）
+            ReloadTree();
             return 0;
         }
         break;

@@ -16,6 +16,7 @@
 #include "shell/ContextMenuCollector.h"
 
 #include "core/Logger.h"
+#include "shell/ContextMenuEnumerator.h"
 
 #include <wil/com.h>
 #include <wil/result.h>
@@ -249,6 +250,9 @@ bool PrepareSample(std::wstring& rootOut, std::wstring& folderOut)
         L"sample.docx",
         L"sample.rar",
         L"sample.zip",
+        // 多选样本：两个同类型文件，放在同一目录（多选菜单要求同父目录）
+        L"multi-a.txt",
+        L"multi-b.txt",
     };
     for (const wchar_t* file : sampleFiles)
     {
@@ -264,10 +268,54 @@ bool PrepareSample(std::wstring& rootOut, std::wstring& folderOut)
 }
 
 // ---------------------------------------------------------------------------
-// 菜单树遍历
+// 把一条动态菜单项并进报告
+//
+// 去重钥匙 = 分组 + 层级 + 菜文字：同一个样本采到、或不同样本采到的同一条
+// （文字一样、层级一样、分组一样）只留一条，场景位取并集。
+// 这样 .txt/.docx/.rar/.zip 各采一遍不会再出现 4 份「打开」。
+// ---------------------------------------------------------------------------
+void AddDynamicItem(ContextMenuReport& report,
+                    const std::wstring& groupName,
+                    const ContextMenuItem& item)
+{
+    const std::wstring name = groupName.empty() ? L"其他" : groupName;
+    const std::wstring sourceKey = L"menu:" + ToLower(name);
+    ContextMenuGroup& group = FindOrAddGroup(report, sourceKey, name, true);
+
+    for (ContextMenuItem& existing : group.items)
+    {
+        if (existing.isSeparator || item.isSeparator)
+        {
+            continue;
+        }
+        if (existing.parentPath == item.parentPath && existing.text == item.text)
+        {
+            // 已存在：并场景位；有一样本可用就不算灰态；补动词 / 偏移
+            existing.scenes |= item.scenes;
+            existing.disabled = existing.disabled && item.disabled;
+            if (existing.verb.empty() && !item.verb.empty())
+            {
+                existing.verb = item.verb;
+            }
+            if (existing.commandOffset < 0 && item.commandOffset >= 0)
+            {
+                existing.commandOffset = item.commandOffset;
+            }
+            existing.fromExtension = true;
+            existing.isSystemBuiltin = existing.isSystemBuiltin || item.isSystemBuiltin;
+            return;
+        }
+    }
+
+    group.items.push_back(item);
+}
+
+// ---------------------------------------------------------------------------
+// 菜单树遍历（分隔线一律跳过，不生成任何条目）
 //
 // menu        待遍历的菜单
 // cm          对应的 IContextMenu（取动词用）
+// idFirst     命令 ID 下限（前缀一个，偏移 = ID - idFirst）
 // parentPath  上级层级路径（一级为空；二级为一级文字）
 // scene       当前样本场景位
 // report      结果报告
@@ -298,17 +346,9 @@ void WalkMenu(HMENU menu,
             continue;
         }
 
-        // 分隔线
+        // 分隔线：直接跳过（用户要求不展示）
         if ((info.fType & MFT_SEPARATOR) != 0)
         {
-            ContextMenuItem item;
-            item.isSeparator = true;
-            item.text        = L"—";
-            item.parentPath  = parentPath;
-            item.scenes      = scene;
-            const std::wstring key = L"sep:" + ToLower(topGroup.empty() ? parentPath : topGroup);
-            FindOrAddGroup(report, key, topGroup.empty() ? L"其他" : topGroup, true)
-                .items.push_back(std::move(item));
             continue;
         }
 
@@ -316,6 +356,10 @@ void WalkMenu(HMENU menu,
         wchar_t textBuffer[512] = {};
         ::GetMenuStringW(menu, index, textBuffer, ARRAYSIZE(textBuffer), MF_BYPOSITION);
         std::wstring text = StripAmpersand(textBuffer);
+        if (text.empty())
+        {
+            continue;   // 取不到文字的空项没有展示价值
+        }
 
         // 命令偏移 = 命令 ID - idFirst（GetCommandString / InvokeCommand 都按偏移认）
         const UINT offset = (id != 0 && id != static_cast<UINT>(-1))
@@ -344,21 +388,15 @@ void WalkMenu(HMENU menu,
         item.scenes     = scene;
         item.commandOffset = (offset == static_cast<UINT>(-1)) ? -1 : static_cast<int>(offset);
         item.disabled   = (info.fState & MFS_GRAYED) != 0;
-
-        const bool hasSubmenu = info.hSubMenu != nullptr;
+        item.fromExtension = true;
+        item.isSystemBuiltin = IsSystemBuiltinItem(text, verb);
 
         // 一级项：分组名 = 自己的文字；二级及以后：分组名沿用 topGroup
-        std::wstring groupName = topGroup.empty() ? text : topGroup;
-        if (groupName.empty())
-        {
-            groupName = L"其他";
-        }
-        const std::wstring sourceKey = L"menu:" + ToLower(groupName);
-        ContextMenuGroup& group = FindOrAddGroup(report, sourceKey, groupName, true);
-        group.items.push_back(item);
+        const std::wstring groupName = topGroup.empty() ? text : topGroup;
+        AddDynamicItem(report, groupName, item);
 
         // 子菜单：先让处理器填充（WM_INITMENUPOPUP），再递归
-        if (hasSubmenu)
+        if (info.hSubMenu != nullptr)
         {
             wil::com_ptr<IContextMenu2> cm2;
             if (SUCCEEDED(cm->QueryInterface(IID_PPV_ARGS(cm2.put()))) && cm2 != nullptr)
@@ -461,6 +499,309 @@ bool CollectForBackground(const std::wstring& dir, ContextMenuReport& report)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 多选样本：同一目录下两个文件
+//
+// 多选菜单只能从"父 IShellFolder + 两个子 PIDL"拿：
+//   SHParseDisplayName 得到绝对 PIDL → SHBindToParent 拆出父文件夹和末级子 PIDL
+//   → GetUIObjectOf(cidl=2) 拿多选合并菜单
+// ---------------------------------------------------------------------------
+bool CollectForMultiSelect(const std::wstring& path1, const std::wstring& path2,
+                           ContextMenuReport& report)
+{
+    PIDLIST_ABSOLUTE pidl1 = nullptr;
+    PIDLIST_ABSOLUTE pidl2 = nullptr;
+    SFGAOF attrs = 0;
+
+    bool ok = false;
+
+    if (SUCCEEDED(::SHParseDisplayName(path1.c_str(), nullptr, &pidl1, 0, &attrs)) &&
+        pidl1 != nullptr &&
+        SUCCEEDED(::SHParseDisplayName(path2.c_str(), nullptr, &pidl2, 0, &attrs)) &&
+        pidl2 != nullptr)
+    {
+        wil::com_ptr<IShellFolder> folder;
+        PCUITEMID_CHILD child1 = nullptr;
+        PCUITEMID_CHILD child2 = nullptr;
+
+        HRESULT hr = ::SHBindToParent(pidl1, IID_IShellFolder,
+                                      folder.put_void(), &child1);
+        if (SUCCEEDED(hr) && folder != nullptr && child1 != nullptr)
+        {
+            wil::com_ptr<IShellFolder> folder2;
+            hr = ::SHBindToParent(pidl2, IID_IShellFolder,
+                                  folder2.put_void(), &child2);
+
+            if (SUCCEEDED(hr) && child2 != nullptr)
+            {
+                PCUITEMID_CHILD children[2] = { child1, child2 };
+
+                wil::com_ptr<IContextMenu> cm;
+                hr = folder->GetUIObjectOf(nullptr, 2, children,
+                                           IID_IContextMenu, nullptr, cm.put_void());
+                if (SUCCEEDED(hr) && cm != nullptr)
+                {
+                    CollectOne(cm.get(), SceneMultiple, report);
+                    ok = true;
+                }
+                else
+                {
+                    Logger::Warn(L"多选菜单 GetUIObjectOf 失败：" +
+                                 Logger::FormatHresult(hr));
+                }
+            }
+            else
+            {
+                Logger::Warn(L"多选样本第二个 PIDL 拆分失败：" +
+                             Logger::FormatHresult(hr));
+            }
+        }
+        else
+        {
+            Logger::Warn(L"多选样本 PIDL 拆分失败：" + Logger::FormatHresult(hr));
+        }
+    }
+
+    if (pidl1 != nullptr)
+    {
+        ::CoTaskMemFree(pidl1);
+    }
+    if (pidl2 != nullptr)
+    {
+        ::CoTaskMemFree(pidl2);
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// 按软件归并分组
+//
+// 背景：菜单是"合并查询"拿到的，接口不告诉每一项属于哪个 DLL，所以只能按
+// 一级菜单文字分组。同一家软件常在菜单里出现多个一级文字（如 "WPS" 和
+// "上传到 WPS"），这里用处理器清单里的软件名做"软匹配"把它们并到一组。
+//
+// 匹配规则：从每个处理器的显示名（DLL 版本资源的产品名优先）取两个 token：
+//   ① 整个名字去掉空格小写；② 第一个单词（长度 >= 3 且不是厂商通用词）。
+// 分组名（去掉空格小写）包含任一 token，就归到这个软件名下。
+// 这是启发式，可能偶尔归错或归得过宽；只影响整齐度，不影响数据。
+// ---------------------------------------------------------------------------
+
+// 去掉空格和 '&'、转小写
+std::wstring NormalizeGroupName(const std::wstring& text)
+{
+    std::wstring out;
+    out.reserve(text.size());
+    for (wchar_t ch : text)
+    {
+        if (ch == L'&' || ch == L' ' || ch == L'\t')
+        {
+            continue;
+        }
+        out.push_back(static_cast<wchar_t>(::towlower(ch)));
+    }
+    return out;
+}
+
+// 厂商通用词，做 token 会造成大面积误并，直接不用
+bool IsGenericToken(const std::wstring& token)
+{
+    static const wchar_t* generics[] =
+    {
+        L"microsoft", L"windows", L"system", L"office", L"intel", L"adobe",
+        L"google", L"apple", L"tencent", L"alibaba", L"baidu", L"huawei",
+    };
+    for (const wchar_t* one : generics)
+    {
+        if (token == one)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct VendorName
+{
+    std::wstring display;                 // 归并后的组名（用处理器的软件名）
+    std::vector<std::wstring> tokens;     // 用于匹配的小写 token
+};
+
+std::vector<VendorName> BuildVendors(
+    const std::vector<EnumeratedHandler>& handlers)
+{
+    std::vector<VendorName> vendors;
+
+    for (const EnumeratedHandler& handler : handlers)
+    {
+        const std::wstring display = handler.displayName;
+        if (display.empty())
+        {
+            continue;
+        }
+
+        // 已经有了就不重复建
+        const std::wstring normalized = NormalizeGroupName(display);
+        bool exists = false;
+        for (const VendorName& vendor : vendors)
+        {
+            if (NormalizeGroupName(vendor.display) == normalized)
+            {
+                exists = true;
+                break;
+            }
+        }
+        if (exists)
+        {
+            continue;
+        }
+
+        VendorName vendor;
+        vendor.display = display;
+
+        if (!normalized.empty())
+        {
+            vendor.tokens.push_back(normalized);
+        }
+
+        // 第一个单词：按空格 / 连字符切开，取第一段
+        std::wstring firstWord;
+        for (wchar_t ch : display)
+        {
+            if (ch == L' ' || ch == L'\t')
+            {
+                break;
+            }
+            firstWord.push_back(static_cast<wchar_t>(::towlower(ch)));
+        }
+        if (firstWord.size() >= 3 && firstWord != normalized &&
+            !IsGenericToken(firstWord))
+        {
+            vendor.tokens.push_back(firstWord);
+        }
+
+        if (!vendor.tokens.empty())
+        {
+            vendors.push_back(std::move(vendor));
+        }
+    }
+
+    return vendors;
+}
+
+// 把 src 的条目并进 target，条目按「层级 + 文字」去重
+void MergeItemInto(ContextMenuGroup& target, const ContextMenuItem& src)
+{
+    for (ContextMenuItem& existing : target.items)
+    {
+        if (existing.parentPath == src.parentPath && existing.text == src.text)
+        {
+            existing.scenes |= src.scenes;
+            existing.disabled = existing.disabled && src.disabled;
+            existing.fromRegistry = existing.fromRegistry || src.fromRegistry;
+            existing.fromExtension = existing.fromExtension || src.fromExtension;
+            existing.isSystemBuiltin = existing.isSystemBuiltin || src.isSystemBuiltin;
+            if (existing.verb.empty())
+            {
+                existing.verb = src.verb;
+            }
+            if (existing.commandLine.empty())
+            {
+                existing.commandLine = src.commandLine;
+            }
+            if (existing.commandOffset < 0)
+            {
+                existing.commandOffset = src.commandOffset;
+            }
+            return;
+        }
+    }
+    target.items.push_back(src);
+}
+
+// 全局归并：先按软件名归档，再把同名组合并、条目去重、去掉空组
+void MergeGroups(ContextMenuReport& report,
+                 const std::vector<EnumeratedHandler>& handlers)
+{
+    const std::vector<VendorName> vendors = BuildVendors(handlers);
+
+    std::vector<ContextMenuGroup> merged;
+
+    for (const ContextMenuGroup& group : report.groups)
+    {
+        if (group.items.empty())
+        {
+            continue;   // 空组不展示
+        }
+
+        // 目标组名：默认原名；能匹配到软件名就用软件名
+        std::wstring targetName = group.name;
+        const std::wstring normalizedGroup = NormalizeGroupName(group.name);
+        if (!normalizedGroup.empty())
+        {
+            for (const VendorName& vendor : vendors)
+            {
+                bool matched = false;
+                for (const std::wstring& token : vendor.tokens)
+                {
+                    if (!token.empty() && normalizedGroup.find(token) != std::wstring::npos)
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched)
+                {
+                    targetName = vendor.display;
+                    break;
+                }
+            }
+        }
+
+        const std::wstring targetKey = L"merged:" + NormalizeGroupName(targetName);
+
+        // 找已存在的同名组
+        ContextMenuGroup* existing = nullptr;
+        for (ContextMenuGroup& candidate : merged)
+        {
+            if (candidate.sourceKey == targetKey)
+            {
+                existing = &candidate;
+                break;
+            }
+        }
+
+        if (existing == nullptr)
+        {
+            ContextMenuGroup fresh;
+            fresh.sourceKey = targetKey;
+            fresh.name      = targetName;
+            fresh.isShellex = group.isShellex;
+            merged.push_back(std::move(fresh));
+            existing = &merged.back();
+        }
+
+        for (const ContextMenuItem& item : group.items)
+        {
+            MergeItemInto(*existing, item);
+        }
+        existing->isShellex = existing->isShellex || group.isShellex;
+    }
+
+    // 组级系统判定：如「新建」「发送到」整组标系统项
+    for (ContextMenuGroup& group : merged)
+    {
+        if (IsSystemBuiltinGroup(group.name))
+        {
+            for (ContextMenuItem& item : group.items)
+            {
+                item.isSystemBuiltin = true;
+            }
+        }
+    }
+
+    report.groups = std::move(merged);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -523,9 +864,27 @@ void CollectDynamicItems(ContextMenuReport& report)
             Logger::Warn(L"背景样本采集异常");
         }
 
+        // 4) 多选样本（同目录两个文件）
+        try
+        {
+            CollectForMultiSelect(root + L"\\multi-a.txt",
+                                  root + L"\\multi-b.txt", report);
+        }
+        catch (...)
+        {
+            Logger::Warn(L"多选样本采集异常");
+        }
+
         CleanupSample(root);
+
+        // 5) 按软件归并 + 条目去重（消掉同族多组、重复项）
+        const std::vector<EnumeratedHandler> handlers = EnumerateShellexHandlers();
+        MergeGroups(report, handlers);
+
         report.collectedAt = NowTimeString();
-        Logger::Info(L"右键菜单动态采集完成");
+        Logger::Info(L"右键菜单动态采集完成：分组 " +
+                     std::to_wstring(report.groups.size()) +
+                     L"，处理器 " + std::to_wstring(handlers.size()));
     }
     catch (...)
     {
@@ -544,6 +903,9 @@ void CollectDynamicItems(ContextMenuReport& report)
 
 using nlohmann::json;
 
+// 缓存格式版本：整理规则一变就换号，老缓存自动作废重采
+const int kCacheVersion = 2;
+
 json ItemToJson(const ContextMenuItem& item)
 {
     json j;
@@ -559,6 +921,9 @@ json ItemToJson(const ContextMenuItem& item)
     j["isSeparator"]  = item.isSeparator;
     j["disabled"]     = item.disabled;
     j["failed"]       = item.failed;
+    j["fromRegistry"] = item.fromRegistry;
+    j["fromExtension"]= item.fromExtension;
+    j["isSystemBuiltin"] = item.isSystemBuiltin;
     j["failReason"]   = ToUtf8(item.failReason);
     return j;
 }
@@ -584,6 +949,9 @@ ContextMenuItem ItemFromJson(const json& j)
     item.isSeparator = j.contains("isSeparator") && j["isSeparator"].get<bool>();
     item.disabled    = j.contains("disabled") && j["disabled"].get<bool>();
     item.failed      = j.contains("failed") && j["failed"].get<bool>();
+    item.fromRegistry = j.contains("fromRegistry") && j["fromRegistry"].get<bool>();
+    item.fromExtension = j.contains("fromExtension") && j["fromExtension"].get<bool>();
+    item.isSystemBuiltin = j.contains("isSystemBuiltin") && j["isSystemBuiltin"].get<bool>();
     item.failReason  = str("failReason");
     return item;
 }
@@ -597,6 +965,7 @@ void SaveCache(const ContextMenuReport& report)
     }
 
     json root;
+    root["version"]     = kCacheVersion;
     root["collectedAt"] = ToUtf8(report.collectedAt);
 
     json groups = json::array();
@@ -644,6 +1013,15 @@ bool LoadCache(ContextMenuReport& report)
     {
         Logger::Warn(std::wstring(L"菜单缓存 JSON 解析失败：") +
                      FromUtf8(e.what()));
+        return false;
+    }
+
+    // 老格式缓存（没有 version 或版本号不符）直接作废，让上层重采
+    const int version = root.contains("version") && root["version"].is_number()
+                            ? root["version"].get<int>() : 0;
+    if (version != kCacheVersion)
+    {
+        Logger::Info(L"菜单缓存版本不匹配，作废重采");
         return false;
     }
 
