@@ -385,6 +385,57 @@ struct RawHandler
     std::wstring displayName; // 套显示名
 };
 
+// ---------------------------------------------------------------------------
+// 处理器用途黑名单（二期）
+//
+// 有些软件注册角标处理器并不是为了「同步 / 版本状态」。最典型的是豆包「操作电脑」：
+// 它注册了 aPipIconOverlay（pip_remote.dll），实际是远程协助 / 影子会话的外壳扩展，
+// 判定结果跟文件同步状态毫无关系，出现在配置列表里只会让人困惑「这为什么有同步角标」。
+// 同类还有系统的便携设备加密（EnhancedStorageShell / EhStorShell.dll）与
+// 脱机文件（Offline Files / cscui.dll）。
+//
+// 这里按 CLSID 与 DLL 文件名排除：既不进配置列表，也不参与判定。
+//   · 只比 DLL 文件名、不写死绝对路径——豆包装在用户目录下，会随版本换目录；
+//   · 不做白名单（只放行已知同步类）：靠猜类别容易误杀以后新装的合法工具。
+// ---------------------------------------------------------------------------
+
+// 按 CLSID 排除的处理器（大写带花括号，与 ClsidToString 输出格式一致，比较时忽略大小写）
+const wchar_t* const kBlockedClsids[] = {
+    L"{61135E38-1A85-4B66-A170-7E764DE2842A}",  // 豆包操作电脑（aPipIconOverlay）
+};
+
+// 按 DLL 文件名排除的处理器（一律小写，与 ToLower 后的文件名比较）
+const wchar_t* const kBlockedDllNames[] = {
+    L"pip_remote.dll",    // 豆包操作电脑：远程协助 / 影子会话外壳扩展
+    L"ehstorshell.dll",   // 便携设备加密（EnhancedStorageShell）
+    L"cscui.dll",         // 脱机文件（Offline Files）
+};
+
+// 该处理器是否命中用途黑名单（命中即跳过：不列配置、不参与判定）
+bool IsBlockedHandler(const CLSID& clsid, const std::wstring& dllPath)
+{
+    // 先按 CLSID 判：即使 DLL 路径读不到也能拦住
+    const std::wstring clsidStr = ClsidToString(clsid);
+    for (const wchar_t* blocked : kBlockedClsids)
+    {
+        if (_wcsicmp(clsidStr.c_str(), blocked) == 0)
+        {
+            return true;
+        }
+    }
+
+    // 再按 DLL 文件名判（去目录、转小写，不依赖安装路径）
+    const std::wstring fileName = ToLower(BaseName(dllPath));
+    for (const wchar_t* blocked : kBlockedDllNames)
+    {
+        if (fileName == blocked)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 读 HKLM/HKCU 注册表，按名排序、前 15 上限，查 DLL 归并键；纯注册表操作，不碰 COM
 std::vector<RawHandler> ScanRegistry()
 {
@@ -471,6 +522,17 @@ std::vector<RawHandler> ScanRegistry()
 
         // 显示名综合 CLSID 描述 / DLL 版本资源 / 文件名多来源择优
         rawItem.displayName = BuildDisplayName(entry.regName, entry.clsid, rawItem.dll);
+
+        // 用途黑名单：非同步 / 非版本控制类直接跳过，不进配置列表也不参与判定。
+        // 注意：这一步排在「前 15 槽位截断」之后是有意的——保持与原生资源管理器
+        // 一致（系统也只认前 15 个槽位），不让第 16 位以后的处理器因为我们过滤了
+        // 黑名单项而"补位"显示出来。
+        if (IsBlockedHandler(entry.clsid, rawItem.dll))
+        {
+            Logger::Info(L"角标处理器按用途黑名单跳过：" + rawItem.regName + L"（" +
+                         rawItem.displayName + L"）");
+            continue;
+        }
 
         raw.push_back(std::move(rawItem));
     }
