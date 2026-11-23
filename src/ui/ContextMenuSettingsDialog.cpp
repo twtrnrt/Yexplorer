@@ -569,244 +569,121 @@ void ContextMenuSettingsDialog::RebuildSysTree()
         return;
     }
 
-    // 软件顺序：先按簇的品牌顺序（BuildClusters 已按重要度排好），
-    // 再把只在非文件场景里出现的品牌补到后面。
-    std::vector<std::wstring> brands;
-    auto addBrand = [&brands](const std::wstring& brand)
+    // 统计有效扩展名总数，用来判断某个范围组是不是「全部文件」
+    size_t allCount = 0;
+    for (const shell::CensusExtension& ext : m_report.extensions)
     {
-        for (const std::wstring& existing : brands)
+        if (ext.ok) ++allCount;
+    }
+
+    // ---- 唯一的一级项：系统（不分软件品牌、不分簇） ----
+    SysNode systemNode;
+    systemNode.kind  = SysNode::Software;
+    systemNode.brand = L"系统";
+    m_sysNodes.push_back(systemNode);
+    const int systemIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+    const HTREEITEM systemItem = AddTreeItem(
+        m_hSysTree, TVI_ROOT,
+        L"系统　（所有软件合并，按出现范围分组）",
+        std::wstring(), systemIndex + 1);
+
+    // 递归展开一份合并菜单（叶子节点的扩展名范围存在 systemNode->exts 里）
+    std::function<void(const shell::CensusSystemNode&, HTREEITEM, const std::wstring&, unsigned int)> appendNode =
+        [&](const shell::CensusSystemNode& node, HTREEITEM parentItem,
+            const std::wstring& parentPath, unsigned int sceneBit)
+    {
+        SysNode itemNode;
+        itemNode.kind       = SysNode::Item;
+        itemNode.brand      = L"系统";
+        itemNode.itemScene  = sceneBit;
+        itemNode.systemNode = &node;
+        itemNode.systemPath = parentPath;
+        m_sysNodes.push_back(itemNode);
+        const int itemNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+        const std::wstring text = node.text.empty() ? L"（无文字）" : node.text;
+        const HTREEITEM newItem = AddTreeItem(m_hSysTree, parentItem, text,
+                                              node.iconFile, itemNodeIndex + 1);
+        const std::wstring childPath = parentPath + text + L"\x1f";
+        for (const shell::CensusSystemNode& child : node.children)
         {
-            if (existing == brand) return;
+            appendNode(child, newItem, childPath, sceneBit);
         }
-        brands.push_back(brand);
     };
 
-    for (const shell::CensusCluster& cluster : m_report.clusters) addBrand(cluster.brand);
+    // ---- 单选文件：按「覆盖的扩展名完全相同」归成若干范围组 ----
+    {
+        SysNode fileScene;
+        fileScene.kind  = SysNode::Scene;
+        fileScene.brand = L"系统";
+        fileScene.scene = shell::SceneFile;
+        m_sysNodes.push_back(fileScene);
+        const int fileSceneIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+        unsigned int fileItemCount = 0;
+        for (const shell::CensusMenuGroup& group : m_report.fileGroups)
+        {
+            fileItemCount += static_cast<unsigned int>(group.items.size());
+        }
+
+        const HTREEITEM fileSceneItem = AddTreeItem(
+            m_hSysTree, systemItem,
+            L"单选文件　（" + std::to_wstring(m_report.fileGroups.size()) + L" 类 / " +
+                std::to_wstring(fileItemCount) + L" 项）",
+            std::wstring(), fileSceneIndex + 1);
+
+        for (int g = 0; g < static_cast<int>(m_report.fileGroups.size()); ++g)
+        {
+            const shell::CensusMenuGroup& group = m_report.fileGroups[g];
+
+            SysNode groupNode;
+            groupNode.kind       = SysNode::Group;
+            groupNode.brand      = L"系统";
+            groupNode.groupIndex = g;
+            m_sysNodes.push_back(groupNode);
+            const int groupNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+            const std::wstring label =
+                ExtSummary(group.exts, allCount) + L"　（" + std::to_wstring(group.items.size()) + L" 项）";
+            const HTREEITEM groupItem = AddTreeItem(m_hSysTree, fileSceneItem, label,
+                                                    std::wstring(), groupNodeIndex + 1);
+
+            for (const shell::CensusSystemNode& node : group.items)
+            {
+                appendNode(node, groupItem, std::wstring(), shell::SceneFile);
+            }
+            ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(groupItem));
+        }
+        ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(fileSceneItem));
+    }
+
+    // ---- 文件夹 / 空白区 / 多选：各自一份合并菜单 ----
     for (const shell::CensusScene& scene : m_report.scenes)
     {
-        for (const shell::CensusItem& item : scene.items)
+        if (scene.scene == shell::SceneFile) continue;
+        if (scene.mergedMenu.empty()) continue;
+
+        SysNode sceneNode;
+        sceneNode.kind  = SysNode::Scene;
+        sceneNode.brand = L"系统";
+        sceneNode.scene = scene.scene;
+        m_sysNodes.push_back(sceneNode);
+        const int sceneNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
+
+        const HTREEITEM sceneItem = AddTreeItem(
+            m_hSysTree, systemItem,
+            SceneName(scene.scene) + L"　（" + std::to_wstring(scene.mergedMenu.size()) + L" 项）",
+            std::wstring(), sceneNodeIndex + 1);
+
+        for (const shell::CensusSystemNode& node : scene.mergedMenu)
         {
-            if (!item.separator) addBrand(item.brand.empty() ? L"其它" : item.brand);
+            appendNode(node, sceneItem, std::wstring(), scene.scene);
         }
+        ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(sceneItem));
     }
 
-    if (!m_report.systemMenu.empty()) addBrand(L"系统");
-
-    for (const std::wstring& brand : brands)
-    {
-        const bool mergedSystem = (brand == L"系统" && !m_report.systemMenu.empty());
-
-        // 该品牌在本机"单选文件"场景下的簇
-        std::vector<int> ownClusters;
-        for (int i = 0; i < static_cast<int>(m_report.clusters.size()); ++i)
-        {
-            if (m_report.clusters[i].brand == brand) ownClusters.push_back(i);
-        }
-
-        // 该品牌在三个非文件场景里的条目
-        std::vector<std::pair<unsigned int, std::vector<int>>> ownScenes;
-        for (int s = 0; s < static_cast<int>(m_report.scenes.size()); ++s)
-        {
-            const shell::CensusScene& scene = m_report.scenes[s];
-            std::vector<int> indexes;
-            for (int i = 0; i < static_cast<int>(scene.items.size()); ++i)
-            {
-                const shell::CensusItem& item = scene.items[i];
-                if (item.separator) continue;
-                const std::wstring itemBrand = item.brand.empty() ? L"其它" : item.brand;
-                if (itemBrand == brand) indexes.push_back(i);
-            }
-            if (!indexes.empty()) ownScenes.push_back({ scene.scene, indexes });
-        }
-
-        if (ownClusters.empty() && ownScenes.empty() && !mergedSystem) continue;
-
-        SysNode software;
-        software.kind  = SysNode::Software;
-        software.brand = brand;
-        m_sysNodes.push_back(software);
-        const int softwareIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-        std::wstring softwareText = brand;
-        if (mergedSystem)
-        {
-            softwareText += L"　（合并菜单，不分簇）";
-        }
-        else if (!ownClusters.empty())
-        {
-            softwareText += L"　（" + std::to_wstring(ownClusters.size()) + L" 簇）";
-        }
-        const HTREEITEM softwareItem = AddTreeItem(m_hSysTree, TVI_ROOT, softwareText,
-                                                   shell::BrandIconFile(brand),
-                                                   softwareIndex + 1);
-
-        // ---- 单选文件场景：系统用合并菜单；其它软件按扩展名分簇 ----
-        if (mergedSystem)
-        {
-            SysNode fileScene;
-            fileScene.kind  = SysNode::Scene;
-            fileScene.brand = brand;
-            fileScene.scene = shell::SceneFile;
-            m_sysNodes.push_back(fileScene);
-            const int fileSceneIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-            const HTREEITEM fileSceneItem = AddTreeItem(
-                m_hSysTree, softwareItem,
-                L"单选文件　（合并后 " + std::to_wstring(m_report.systemMenu.size()) +
-                    L" 个顶层项）",
-                std::wstring(), fileSceneIndex + 1);
-
-            // 递归展开合并后的系统菜单（节点带自己的扩展名范围）
-            std::function<void(const shell::CensusSystemNode&, HTREEITEM, const std::wstring&)> appendNode =
-                [&](const shell::CensusSystemNode& node, HTREEITEM parentItem, const std::wstring& parentPath)
-            {
-                SysNode itemNode;
-                itemNode.kind       = SysNode::Item;
-                itemNode.brand      = L"系统";
-                itemNode.itemScene  = shell::SceneFile;
-                itemNode.systemNode = &node;
-                itemNode.systemPath = parentPath;
-                m_sysNodes.push_back(itemNode);
-                const int itemNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-                const std::wstring text = node.text.empty() ? L"（无文字）" : node.text;
-                const HTREEITEM newItem = AddTreeItem(m_hSysTree, parentItem, text,
-                                                      node.iconFile, itemNodeIndex + 1);
-                const std::wstring childPath = parentPath + text + L"\x1f";
-                for (const shell::CensusSystemNode& child : node.children)
-                {
-                    appendNode(child, newItem, childPath);
-                }
-            };
-
-            for (const shell::CensusSystemNode& node : m_report.systemMenu)
-            {
-                appendNode(node, fileSceneItem, std::wstring());
-            }
-            ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE,
-                           reinterpret_cast<LPARAM>(fileSceneItem));
-        }
-        else if (!ownClusters.empty())
-        {
-            SysNode fileScene;
-            fileScene.kind  = SysNode::Scene;
-            fileScene.brand = brand;
-            fileScene.scene = shell::SceneFile;
-            m_sysNodes.push_back(fileScene);
-            const int fileSceneIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-            unsigned int extTotal = 0;
-            for (int clusterIndex : ownClusters)
-            {
-                extTotal += static_cast<unsigned int>(m_report.clusters[clusterIndex].exts.size());
-            }
-            const HTREEITEM fileSceneItem = AddTreeItem(
-                m_hSysTree, softwareItem,
-                L"单选文件　（" + std::to_wstring(extTotal) + L" 种扩展名）",
-                std::wstring(), fileSceneIndex + 1);
-
-            for (int clusterIndex : ownClusters)
-            {
-                const shell::CensusCluster& cluster = m_report.clusters[clusterIndex];
-
-                SysNode clusterNode;
-                clusterNode.kind         = SysNode::Cluster;
-                clusterNode.brand        = brand;
-                clusterNode.clusterIndex = clusterIndex;
-                m_sysNodes.push_back(clusterNode);
-                const int clusterNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-                const HTREEITEM clusterItem = AddTreeItem(m_hSysTree, fileSceneItem,
-                                                          cluster.label, std::wstring(),
-                                                          clusterNodeIndex + 1);
-
-                // 簇内条目：按 level 搭出子菜单层级
-                std::vector<HTREEITEM> parents;
-                for (int i = 0; i < static_cast<int>(cluster.items.size()); ++i)
-                {
-                    const shell::CensusItem& item = cluster.items[i];
-                    if (item.separator) continue;
-
-                    SysNode itemNode;
-                    itemNode.kind             = SysNode::Item;
-                    itemNode.brand            = brand;
-                    itemNode.clusterIndex     = clusterIndex;
-                    itemNode.clusterItemIndex = i;
-                    itemNode.itemScene        = shell::SceneFile;
-                    m_sysNodes.push_back(itemNode);
-                    const int itemNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-                    const int level = item.level;
-                    while (static_cast<int>(parents.size()) > level) parents.pop_back();
-                    HTREEITEM parentItem = parents.empty() ? clusterItem : parents.back();
-
-                    const HTREEITEM newItem = AddTreeItem(m_hSysTree, parentItem,
-                                                          ItemDisplayText(item),
-                                                          item.iconFile,
-                                                          itemNodeIndex + 1);
-                    parents.resize(level + 1);
-                    parents[level] = newItem;
-                }
-                ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(clusterItem));
-            }
-            ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(fileSceneItem));
-        }
-
-        // ---- 其它三个场景 ----
-        for (const auto& sceneEntry : ownScenes)
-        {
-            const unsigned int sceneBit = sceneEntry.first;
-            SysNode sceneNode;
-            sceneNode.kind  = SysNode::Scene;
-            sceneNode.brand = brand;
-            sceneNode.scene = sceneBit;
-            m_sysNodes.push_back(sceneNode);
-            const int sceneNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-            const HTREEITEM sceneItem = AddTreeItem(
-                m_hSysTree, softwareItem,
-                SceneName(sceneBit) + L"　（" + std::to_wstring(sceneEntry.second.size()) + L" 项）",
-                std::wstring(), sceneNodeIndex + 1);
-
-            std::vector<HTREEITEM> parents;
-            for (int itemIndex : sceneEntry.second)
-            {
-                // 找到这个场景在报告里的下标（同一场景只出现一次）
-                int sceneIndex = -1;
-                for (int s = 0; s < static_cast<int>(m_report.scenes.size()); ++s)
-                {
-                    if (m_report.scenes[s].scene == sceneBit) { sceneIndex = s; break; }
-                }
-                if (sceneIndex < 0) continue;
-                const shell::CensusScene& sourceScene = m_report.scenes[sceneIndex];
-                if (itemIndex < 0 || itemIndex >= static_cast<int>(sourceScene.items.size())) continue;
-
-                const shell::CensusItem& item = sourceScene.items[itemIndex];
-
-                SysNode itemNode;
-                itemNode.kind          = SysNode::Item;
-                itemNode.brand         = brand;
-                itemNode.sceneItemIndex = itemIndex;
-                itemNode.itemScene     = sceneBit;
-                m_sysNodes.push_back(itemNode);
-                const int itemNodeIndex = static_cast<int>(m_sysNodes.size()) - 1;
-
-                const int level = item.level;
-                while (static_cast<int>(parents.size()) > level) parents.pop_back();
-                HTREEITEM parentItem = parents.empty() ? sceneItem : parents.back();
-
-                const HTREEITEM newItem = AddTreeItem(m_hSysTree, parentItem,
-                                                      ItemDisplayText(item),
-                                                      item.iconFile,
-                                                      itemNodeIndex + 1);
-                parents.resize(level + 1);
-                parents[level] = newItem;
-            }
-            ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(sceneItem));
-        }
-
-        ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(softwareItem));
-    }
+    ::SendMessageW(m_hSysTree, TVM_EXPAND, TVE_COLLAPSE, reinterpret_cast<LPARAM>(systemItem));
 }
 
 // ============================================================================
@@ -1405,11 +1282,12 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         }
     };
 
-    // 「系统」品牌的合并菜单：按节点自带的范围展开（每个节点的扩展名范围不同）
-    std::function<void(const shell::CensusSystemNode&, int, const std::wstring&)> appendSystemTree;
+    // 「系统」合并菜单：按节点自带的范围展开（每个节点的扩展名范围不同）
+    std::function<void(const shell::CensusSystemNode&, int, const std::wstring&, unsigned int)> appendSystemTree;
     appendSystemTree = [&out, &appendSystemTree](const shell::CensusSystemNode& node,
                                                  int depth,
-                                                 const std::wstring& parentPath)
+                                                 const std::wstring& parentPath,
+                                                 unsigned int scenes)
     {
         DropItem drop;
         drop.text     = node.text;
@@ -1417,7 +1295,7 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         drop.verb     = node.verb;
         drop.iconFile = node.iconFile;
         drop.level    = depth;
-        drop.scenes   = shell::SceneFile;
+        drop.scenes   = scenes;
         drop.exts     = node.exts;
         drop.pathKey  = L"系统|" + node.verb + L"|" + parentPath + node.text;
         out.push_back(drop);
@@ -1425,7 +1303,7 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         const std::wstring childPath = parentPath + node.text + L"\x1f";
         for (const shell::CensusSystemNode& child : node.children)
         {
-            appendSystemTree(child, depth + 1, childPath);
+            appendSystemTree(child, depth + 1, childPath, scenes);
         }
     };
 
@@ -1434,7 +1312,8 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
     case SysNode::Item:
         if (node.systemNode != nullptr)
         {
-            appendSystemTree(*node.systemNode, 0, node.systemPath);
+            appendSystemTree(*node.systemNode, 0, node.systemPath,
+                             node.itemScene != 0 ? node.itemScene : static_cast<unsigned int>(shell::SceneFile));
         }
         else if (node.itemScene == shell::SceneFile && node.clusterIndex >= 0)
         {
@@ -1467,20 +1346,27 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         appendCluster(node.clusterIndex, -1);
         break;
 
+    case SysNode::Group:
+        if (node.groupIndex >= 0 &&
+            node.groupIndex < static_cast<int>(m_report.fileGroups.size()))
+        {
+            for (const shell::CensusSystemNode& root : m_report.fileGroups[node.groupIndex].items)
+            {
+                appendSystemTree(root, 0, std::wstring(), shell::SceneFile);
+            }
+        }
+        break;
+
     case SysNode::Scene:
         if (node.scene == shell::SceneFile)
         {
-            if (node.brand == L"系统" && !m_report.systemMenu.empty())
+            // 单选文件：所有范围组一次性带过去
+            for (const shell::CensusMenuGroup& group : m_report.fileGroups)
             {
-                for (const shell::CensusSystemNode& root : m_report.systemMenu)
+                for (const shell::CensusSystemNode& root : group.items)
                 {
-                    appendSystemTree(root, 0, std::wstring());
+                    appendSystemTree(root, 0, std::wstring(), shell::SceneFile);
                 }
-                break;
-            }
-            for (int i = 0; i < static_cast<int>(m_report.clusters.size()); ++i)
-            {
-                if (m_report.clusters[i].brand == node.brand) appendCluster(i, -1);
             }
         }
         else
@@ -1488,12 +1374,9 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
             for (const shell::CensusScene& scene : m_report.scenes)
             {
                 if (scene.scene != node.scene) continue;
-                for (const shell::CensusItem& item : scene.items)
+                for (const shell::CensusSystemNode& root : scene.mergedMenu)
                 {
-                    if (item.separator) continue;
-                    const std::wstring brand = item.brand.empty() ? L"其它" : item.brand;
-                    if (brand != node.brand) continue;
-                    fill(item, 0, item.level, node.scene, {});
+                    appendSystemTree(root, 0, std::wstring(), scene.scene);
                 }
                 break;
             }
@@ -1501,25 +1384,19 @@ void ContextMenuSettingsDialog::BuildDropItems(int sysNodeIndex, std::vector<Dro
         break;
 
     case SysNode::Software:
-        if (node.brand == L"系统" && !m_report.systemMenu.empty())
+        // 「系统」总节点：单选文件的全部范围组 + 三个场景的合并菜单
+        for (const shell::CensusMenuGroup& group : m_report.fileGroups)
         {
-            for (const shell::CensusSystemNode& root : m_report.systemMenu)
+            for (const shell::CensusSystemNode& root : group.items)
             {
-                appendSystemTree(root, 0, std::wstring());
+                appendSystemTree(root, 0, std::wstring(), shell::SceneFile);
             }
-        }
-        for (int i = 0; i < static_cast<int>(m_report.clusters.size()); ++i)
-        {
-            if (m_report.clusters[i].brand == node.brand) appendCluster(i, -1);
         }
         for (const shell::CensusScene& scene : m_report.scenes)
         {
-            for (const shell::CensusItem& item : scene.items)
+            for (const shell::CensusSystemNode& root : scene.mergedMenu)
             {
-                if (item.separator) continue;
-                const std::wstring brand = item.brand.empty() ? L"其它" : item.brand;
-                if (brand != node.brand) continue;
-                fill(item, 0, item.level, scene.scene, {});
+                appendSystemTree(root, 0, std::wstring(), scene.scene);
             }
         }
         break;
@@ -1701,8 +1578,7 @@ void ContextMenuSettingsDialog::StartCensus()
         report->scannedAt  = NowText();
         report->extensions = std::move(results);
         shell::CollectNonFileScenes(report->scenes);
-        shell::BuildClusters(*report);
-        shell::BuildSystemMenu(*report);
+        shell::BuildMenuGroups(*report);
 
         ::PostMessageW(window, WM_APP + 3, 0, reinterpret_cast<LPARAM>(report));
     });
@@ -1731,8 +1607,8 @@ void ContextMenuSettingsDialog::OnCensusDone(shell::CensusReport* report)
     RebuildPreview();
 
     std::wstring status = L"普查完成：" + std::to_wstring(m_report.extensions.size()) +
-                          L" 种扩展名，" + std::to_wstring(m_report.clusters.size()) +
-                          L" 个菜单簇";
+                          L" 种扩展名，" + std::to_wstring(m_report.fileGroups.size()) +
+                          L" 类范围组";
     const int broken = m_report.BrokenCount();
     if (broken > 0)
     {
@@ -1859,6 +1735,20 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wPa
                                  ExtSummary(node.systemNode->exts, allCount) +
                                  L"　（拖到右侧即可加入我们的菜单）";
                     }
+                    else if (node.kind == SysNode::Group &&
+                             node.groupIndex >= 0 &&
+                             node.groupIndex < static_cast<int>(m_report.fileGroups.size()))
+                    {
+                        const shell::CensusMenuGroup& group = m_report.fileGroups[node.groupIndex];
+                        size_t allCount = 0;
+                        for (const shell::CensusExtension& ext : m_report.extensions)
+                        {
+                            if (ext.ok) ++allCount;
+                        }
+                        status = L"这一类适用于 " + ExtSummary(group.exts, allCount) +
+                                 L"，共 " + std::to_wstring(group.items.size()) +
+                                 L" 个顶层项　（拖到右侧即可加入我们的菜单）";
+                    }
                     else if (node.kind == SysNode::Cluster &&
                              node.clusterIndex >= 0 &&
                              node.clusterIndex < static_cast<int>(m_report.clusters.size()))
@@ -1918,15 +1808,22 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wPa
                 return 0;
             }
             std::vector<std::wstring> brands;
-            for (const shell::CensusCluster& cluster : m_report.clusters)
+            auto addBrand = [&brands](const std::wstring& brand)
             {
-                if (cluster.brand == L"系统") continue;
-                bool exists = false;
-                for (const std::wstring& brand : brands)
+                if (brand.empty() || brand == L"系统") return;
+                for (const std::wstring& existing : brands)
                 {
-                    if (brand == cluster.brand) { exists = true; break; }
+                    if (existing == brand) return;
                 }
-                if (!exists) brands.push_back(cluster.brand);
+                brands.push_back(brand);
+            };
+            for (const shell::CensusExtension& ext : m_report.extensions)
+            {
+                for (const shell::CensusItem& item : ext.items) addBrand(item.brand);
+            }
+            for (const shell::CensusScene& scene : m_report.scenes)
+            {
+                for (const shell::CensusItem& item : scene.items) addBrand(item.brand);
             }
 
             int filledBrands = 0;
@@ -1936,13 +1833,12 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wPa
                 if (icon.empty()) continue;
                 ++filledBrands;
 
-                // 给这个品牌下"原本没有图标"的条目补上
-                for (shell::CensusCluster& cluster : m_report.clusters)
+                // 给这个品牌下"原本没有图标"的条目补上（原始采集数据 + 场景数据）
+                for (shell::CensusExtension& ext : m_report.extensions)
                 {
-                    if (cluster.brand != brand) continue;
-                    for (shell::CensusItem& item : cluster.items)
+                    for (shell::CensusItem& item : ext.items)
                     {
-                        if (item.iconFile.empty()) item.iconFile = icon;
+                        if (item.iconFile.empty() && item.brand == brand) item.iconFile = icon;
                     }
                 }
                 for (shell::CensusScene& scene : m_report.scenes)
@@ -1960,6 +1856,7 @@ LRESULT ContextMenuSettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wPa
                 return 0;
             }
             shell::SaveCensus(m_report);
+            shell::BuildMenuGroups(m_report);   // 图标补完后重算合并树
             RebuildSysTree();
             RebuildCfgTree();
             RebuildPreview();

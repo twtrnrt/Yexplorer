@@ -743,7 +743,7 @@ void BuildClusters(CensusReport& report)
         if (!ext.ok) continue;
         for (const std::wstring& brand : knownBrands)
         {
-            if (brand == L"系统") continue;   // 系统品牌走 BuildSystemMenu（合并成一份菜单，不分簇）
+            if (brand == L"系统") continue;   // 系统品牌走 BuildMenuGroups（按出现范围分组，不分软件簇）
             const std::wstring signature = BrandSignature(ext.items, brand);
             if (signature.empty()) continue;   // 这一家在这类文件上没菜单
 
@@ -834,7 +834,7 @@ void BuildClusters(CensusReport& report)
 }
 
 // ---------------------------------------------------------------------------
-// 系统品牌合并菜单
+// 合并菜单 + 按「出现范围完全相同」分组
 // ---------------------------------------------------------------------------
 namespace
 {
@@ -849,14 +849,144 @@ std::wstring LowerText(const std::wstring& text)
     return lowered;
 }
 
+// 一份菜单快照（扩展名菜单或场景菜单）
+struct MenuSnapshot
+{
+    const std::vector<CensusItem>* items = nullptr;
+    std::wstring ext;             // 空 = 场景菜单（不记扩展名）
+};
+
+// 把多份菜单快照合并成一片森林：
+//   · 合并键 = 同级同父 + 文字 + 命令（命令忽略大小写），不区分软件品牌；
+//   · 每个节点的 exts = 它出现过的扩展名并集；
+//   · 用「索引 + 父索引」建树，避免 vector 扩容让指针失效。
+std::vector<CensusSystemNode> MergeMenuSnapshots(const std::vector<MenuSnapshot>& sources)
+{
+    struct Flat
+    {
+        std::wstring text;
+        std::wstring verb;
+        std::wstring iconFile;
+        std::vector<std::wstring> exts;
+        int parent = -1;
+    };
+
+    std::vector<Flat> flat;
+    std::map<std::wstring, int> byKey;   // 合并键 → Flat 下标
+    std::vector<int> stack;              // 层级 → 当前节点下标
+
+    for (const MenuSnapshot& source : sources)
+    {
+        if (source.items == nullptr) continue;
+        stack.clear();
+
+        for (const CensusItem& item : *source.items)
+        {
+            if (item.separator) continue;
+
+            const int level = item.level;
+            int parent = -1;
+            if (level > 0 && static_cast<int>(stack.size()) >= level)
+            {
+                parent = stack[level - 1];
+            }
+
+            std::wstring key = std::to_wstring(parent);
+            key.push_back(L'\x1f');
+            key += LowerText(item.text);
+            key.push_back(L'\x1f');
+            key += LowerText(item.verb);
+
+            int index = -1;
+            auto found = byKey.find(key);
+            if (found != byKey.end())
+            {
+                index = found->second;
+                Flat& existing = flat[index];
+                if (existing.iconFile.empty() && !item.iconFile.empty())
+                {
+                    existing.iconFile = item.iconFile;
+                }
+                if (!source.ext.empty())
+                {
+                    bool known = false;
+                    for (const std::wstring& knownExt : existing.exts)
+                    {
+                        if (knownExt == source.ext) { known = true; break; }
+                    }
+                    if (!known) existing.exts.push_back(source.ext);
+                }
+            }
+            else
+            {
+                Flat fresh;
+                fresh.text     = item.text;
+                fresh.verb     = item.verb;
+                fresh.iconFile = item.iconFile;
+                fresh.parent   = parent;
+                if (!source.ext.empty()) fresh.exts.push_back(source.ext);
+                flat.push_back(std::move(fresh));
+                index = static_cast<int>(flat.size()) - 1;
+                byKey[key] = index;
+            }
+
+            stack.resize(static_cast<size_t>(level) + 1, -1);
+            stack[level] = index;
+        }
+    }
+
+    // 装回树（childrenByParent 按创建顺序，菜单顺序保持原样）
+    std::vector<std::vector<int>> childrenByParent(flat.size());
+    std::vector<int> roots;
+    for (int i = 0; i < static_cast<int>(flat.size()); ++i)
+    {
+        if (flat[i].parent >= 0) childrenByParent[flat[i].parent].push_back(i);
+        else roots.push_back(i);
+    }
+
+    std::function<CensusSystemNode(int)> buildNode = [&](int index) -> CensusSystemNode
+    {
+        CensusSystemNode node;
+        node.text     = flat[index].text;
+        node.verb     = flat[index].verb;
+        node.iconFile = flat[index].iconFile;
+        node.exts     = flat[index].exts;
+        for (int child : childrenByParent[index])
+        {
+            node.children.push_back(buildNode(child));
+        }
+        return node;
+    };
+
+    std::vector<CensusSystemNode> result;
+    for (int root : roots)
+    {
+        result.push_back(buildNode(root));
+    }
+    return result;
+}
+
+// 扩展名集合 → 稳定的分组键（排序后拼接）
+std::wstring ExtSetKey(std::vector<std::wstring>& exts)
+{
+    std::sort(exts.begin(), exts.end());
+    std::wstring key;
+    for (const std::wstring& ext : exts)
+    {
+        key += ext;
+        key.push_back(L'\x1f');
+    }
+    return key;
+}
+
 } // namespace
 
-void BuildSystemMenu(CensusReport& report)
+void BuildMenuGroups(CensusReport& report)
 {
-    report.systemMenu.clear();
+    report.fileGroups.clear();
 
-    // 代表样本优先用最常见的类型，保证系统菜单的顺序看起来眼熟；
-    // 其余扩展名按字母序补在后面（只影响"先看到哪些项"，不影响合并结果）。
+    // 代表样本优先用最常见的类型，保证菜单顺序看起来眼熟；
+    // 其余扩展名按字母序补在后面（只影响先后顺序，不影响合并结果）。
     static const wchar_t* const kPreferred[] = { L".txt", L".docx", L".jpg", L".png", L".zip", L".pdf" };
 
     std::vector<const CensusExtension*> ordered;
@@ -878,106 +1008,52 @@ void BuildSystemMenu(CensusReport& report)
         if (!already) ordered.push_back(&candidate);
     }
 
-    // 第一步：先把所有项拍平成「索引 + 父索引」的列表。
-    // 用索引而不是指针，是因为 vector 扩容会把指针全部搞失效。
-    struct Flat
-    {
-        std::wstring text;
-        std::wstring verb;
-        std::wstring iconFile;
-        std::vector<std::wstring> exts;
-        int parent = -1;       // 父节点在 Flat 列表里的下标，-1 = 顶层
-    };
-
-    std::vector<Flat> flat;
-    std::map<std::wstring, int> byKey;   // 合并键 → Flat 下标
-    std::vector<int> stack;              // 层级 → 当前节点下标
-
+    std::vector<MenuSnapshot> sources;
+    sources.reserve(ordered.size());
     for (const CensusExtension* ext : ordered)
     {
-        stack.clear();
-
-        for (const CensusItem& item : ext->items)
-        {
-            if (item.separator) continue;
-            if (item.brand != L"系统") continue;
-
-            const int level = item.level;
-            int parent = -1;
-            if (level > 0 && static_cast<int>(stack.size()) >= level)
-            {
-                parent = stack[level - 1];
-            }
-
-            // 合并键：同级同父 + 文字 + 命令（命令忽略大小写）
-            std::wstring key = std::to_wstring(parent);
-            key.push_back(L'\x1f');
-            key += LowerText(item.text);
-            key.push_back(L'\x1f');
-            key += LowerText(item.verb);
-
-            int index = -1;
-            auto found = byKey.find(key);
-            if (found != byKey.end())
-            {
-                index = found->second;
-                Flat& existing = flat[index];
-                if (existing.iconFile.empty() && !item.iconFile.empty())
-                {
-                    existing.iconFile = item.iconFile;
-                }
-                bool known = false;
-                for (const std::wstring& knownExt : existing.exts)
-                {
-                    if (knownExt == ext->ext) { known = true; break; }
-                }
-                if (!known) existing.exts.push_back(ext->ext);
-            }
-            else
-            {
-                Flat fresh;
-                fresh.text     = item.text;
-                fresh.verb     = item.verb;
-                fresh.iconFile = item.iconFile;
-                fresh.parent   = parent;
-                fresh.exts.push_back(ext->ext);
-                flat.push_back(std::move(fresh));
-                index = static_cast<int>(flat.size()) - 1;
-                byKey[key] = index;
-            }
-
-            stack.resize(static_cast<size_t>(level) + 1, -1);
-            stack[level] = index;
-        }
+        sources.push_back({ &ext->items, ext->ext });
     }
 
-    // 第二步：把拍平列表按父子关系装回树（childrenByParent 按创建顺序，菜单顺序保持原样）
-    std::vector<std::vector<int>> childrenByParent(flat.size());
-    std::vector<int> roots;
-    for (int i = 0; i < static_cast<int>(flat.size()); ++i)
+    std::vector<CensusSystemNode> roots = MergeMenuSnapshots(sources);
+
+    // 顶层项按「覆盖的扩展名完全相同」归组：这就是界面上的「一类」
+    std::map<std::wstring, size_t> groupIndex;
+    for (CensusSystemNode& root : roots)
     {
-        if (flat[i].parent >= 0) childrenByParent[flat[i].parent].push_back(i);
-        else roots.push_back(i);
+        std::vector<std::wstring> exts = root.exts;
+        const std::wstring key = ExtSetKey(exts);
+
+        auto found = groupIndex.find(key);
+        size_t index = 0;
+        if (found == groupIndex.end())
+        {
+            CensusMenuGroup group;
+            group.exts = exts;
+            report.fileGroups.push_back(std::move(group));
+            index = report.fileGroups.size() - 1;
+            groupIndex[key] = index;
+        }
+        else
+        {
+            index = found->second;
+        }
+        report.fileGroups[index].items.push_back(std::move(root));
     }
 
-    // 递归装树（层级最多个位数，不会爆栈）
-    std::function<CensusSystemNode(int)> buildNode = [&](int index) -> CensusSystemNode
-    {
-        CensusSystemNode node;
-        node.text     = flat[index].text;
-        node.verb     = flat[index].verb;
-        node.iconFile = flat[index].iconFile;
-        node.exts     = flat[index].exts;
-        for (int child : childrenByParent[index])
-        {
-            node.children.push_back(buildNode(child));
-        }
-        return node;
-    };
+    // 排序：覆盖扩展名多的组在前（"全部通用"自然排第一），同样多的按扩展名排序
+    std::sort(report.fileGroups.begin(), report.fileGroups.end(),
+              [](const CensusMenuGroup& a, const CensusMenuGroup& b)
+              {
+                  if (a.exts.size() != b.exts.size()) return a.exts.size() > b.exts.size();
+                  return a.exts < b.exts;
+              });
 
-    for (int root : roots)
+    // 三个非文件场景各自合并成一份菜单（不分组、不按软件拆）
+    for (CensusScene& scene : report.scenes)
     {
-        report.systemMenu.push_back(buildNode(root));
+        std::vector<MenuSnapshot> one = { { &scene.items, std::wstring() } };
+        scene.mergedMenu = MergeMenuSnapshots(one);
     }
 }
 
@@ -1083,7 +1159,7 @@ bool LoadCensus(CensusReport& report)
     }
 
     BuildClusters(report);
-    BuildSystemMenu(report);
+    BuildMenuGroups(report);
     return true;
 }
 

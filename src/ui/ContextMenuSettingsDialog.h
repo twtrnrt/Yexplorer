@@ -63,13 +63,14 @@ private:
     // ------------------------------------------------------------------
     struct SysNode
     {
-        enum Kind { Software, Scene, Cluster, Item };
+        enum Kind { Software, Scene, Cluster, Group, Item };
 
         Kind         kind = Software;
         std::wstring brand;                    // 软件品牌（四种节点都带）
         unsigned int scene = 0;                // Scene 节点：场景位
         int          clusterIndex = -1;        // Cluster 节点：m_report.clusters 下标
         int          clusterItemIndex = -1;    // Item 节点：簇内条目下标
+        int          groupIndex = -1;          // Group 节点：m_report.fileGroups 下标
         int          sceneItemIndex = -1;      // Item 节点（非文件场景）：场景条目下标
         unsigned int itemScene = 0;            // Item 节点：所属场景位
         // 「系统」品牌的合并菜单节点（不分簇）；非空时用这个而不是簇下标
