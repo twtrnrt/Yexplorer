@@ -8,7 +8,6 @@
 #include "NavigationPane.h"
 #include "core/Logger.h"
 #include "shell/ShellFolder.h"   // shell::IsFileSystemPath（右键判断节点有没有真实路径）
-#include "shell/ShellOverlay.h"  // OverlayManager：导航栏也要打同步状态角标
 
 #include <ShlObj.h>    // SHGetKnownFolderPath / FOLDERID_*
 #include <uxtheme.h>   // SetWindowTheme
@@ -20,29 +19,11 @@
 #pragma comment(lib, "uxtheme.lib")
 
 // ============================================================================
-// 内部常量与消息
-// ============================================================================
-
-// 「导航栏角标判定已完成」：判定线程 PostMessage 到 TreeView 窗口，
-// 由下面的子类过程接住、回到 UI 线程换图标索引。
-// 用 WM_APP + 102：避开主窗口已用的 +1~+7 和 FileListView 的 +101。
-constexpr UINT kMsgNavOverlayDone = WM_APP + 102;
-
-// TreeView 子类化 ID（同一个控件只挂一个子类过程）
-constexpr UINT_PTR kNavOverlaySubclassId = 1;
-
-// 导航栏用的是系统小图标（16px），合成角标也按这个尺寸取
-constexpr int kNavIconPixel = 16;
-
-// ============================================================================
 // 构造 / 析构
 // ============================================================================
 
 NavigationPane::~NavigationPane()
 {
-    // 先收掉判定线程：那个线程捕获了 this，必须先 join 再释放成员
-    StopOverlayThread();
-
     if (m_hFont != nullptr)
     {
         ::DeleteObject(m_hFont);
@@ -89,11 +70,6 @@ bool NavigationPane::Create(HWND parent, HINSTANCE hInstance, shell::IconCache* 
     }
 
     ApplyFont();
-
-    // 挂子类过程：只为了接「角标判定已完成」这条自定义消息
-    // （TreeView 是子控件，自定义消息只有子类过程能看到）
-    ::SetWindowSubclass(m_hWnd, &NavigationPane::OverlaySubclassProc,
-                        kNavOverlaySubclassId, reinterpret_cast<DWORD_PTR>(this));
 
     // 每个导航项目的高度：默认行高偏挤，撑到 30 像素（按当前 DPI 换算）
     ::SendMessageW(m_hWnd, TVM_SETITEMHEIGHT,
@@ -227,9 +203,6 @@ void NavigationPane::BuildTree()
 
     Logger::Info(L"左侧导航栏构建完成，节点数=" + std::to_wstring(m_nodes.size()) +
                  L"，固定项=" + std::to_wstring(m_pinnedItems.size()));
-
-    // 树建完再异步问一遍角标：节点路径都定了，一次性批量判定最省事
-    RequestOverlayResolve();
 }
 
 // 插入一条分隔线用的占位节点
@@ -265,7 +238,6 @@ void NavigationPane::InsertLeaf(HTREEITEM parentItem, const std::wstring& text,
 
     NodeData nodeData;
     nodeData.path = path;
-    nodeData.baseImageIndex = iconIndex;   // 合成角标时以它为底，不会叠加
     m_nodes.push_back(nodeData);
 
     TVINSERTSTRUCTW insert = {};
@@ -301,7 +273,6 @@ void NavigationPane::InsertPinned(HTREEITEM parentItem, const core::PinnedItem& 
     nodeData.path         = item.path;
     nodeData.isPinned     = true;
     nodeData.isFolderLike = item.isFolder;   // 程序类固定项：右键时只给「取消固定」
-    nodeData.baseImageIndex = iconIndex;     // 合成角标时以它为底，不会叠加
     m_nodes.push_back(nodeData);
 
     TVINSERTSTRUCTW insert = {};
@@ -838,182 +809,4 @@ LRESULT NavigationPane::HandleNotify(LPARAM lParam)
     }
 
     return 0;
-}
-
-// ============================================================================
-// 同步状态角标（导航栏）
-//
-// 导航栏是系统 TreeView，不画 HICON，只能靠"换 ImageList 索引"来显示角标。
-// 所以流程是：收集节点路径 → 后台线程判定 → 回来后合成新图标、换掉节点索引。
-// ============================================================================
-
-LRESULT CALLBACK NavigationPane::OverlaySubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
-                                                     LPARAM lParam, UINT_PTR uIdSubclass,
-                                                     DWORD_PTR dwRefData)
-{
-    UNREFERENCED_PARAMETER(uIdSubclass);   // 只有一个子类过程，用不到这个 ID
-
-    NavigationPane* self = reinterpret_cast<NavigationPane*>(dwRefData);
-
-    if (msg == kMsgNavOverlayDone && self != nullptr)
-    {
-        self->ApplyOverlayResults();
-        return 0;
-    }
-
-    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
-}
-
-void NavigationPane::StopOverlayThread()
-{
-    if (m_overlayThread.joinable())
-    {
-        // 这个线程会捕获 this，而且结果要写回成员，所以必须等它结束，
-        // 不能 detach。它一般几十毫秒内就返回。
-        m_overlayThread.join();
-    }
-}
-
-void NavigationPane::RequestOverlayResolve()
-{
-    // 上一轮还挂着就先收掉，避免两轮结果互相覆盖
-    StopOverlayThread();
-
-    if (m_hWnd == nullptr || m_iconCache == nullptr)
-    {
-        return;
-    }
-
-    // 只挑"真实文件夹"节点：分隔线、提示行、程序类固定项都没有目录可判
-    std::vector<std::wstring> paths;
-    std::vector<size_t>       nodes;
-    paths.reserve(m_nodes.size());
-    nodes.reserve(m_nodes.size());
-
-    for (size_t i = 0; i < m_nodes.size(); ++i)
-    {
-        const NodeData& node = m_nodes[i];
-        if (node.isSeparator || node.isHint || node.path.empty() || !node.isFolderLike)
-        {
-            continue;
-        }
-        paths.push_back(node.path);
-        nodes.push_back(i);
-    }
-
-    if (paths.empty())
-    {
-        return;
-    }
-
-    // 路径集合与上一轮完全一致：判定结果直接复用，不用再起线程问一遍处理器。
-    // 树重建后节点是新句柄，所以仍要把图标索引重新写一遍。
-    if (paths == m_overlayLastPaths && m_overlayLastHits.size() == paths.size())
-    {
-        // 轮次不递增：这批结果仍然属于当前这一轮，之后 Apply 时不用作废
-        m_overlayHits      = m_overlayLastHits;
-        m_overlayNodes     = nodes;
-        m_overlayResultGen = m_overlayGeneration;
-        ApplyOverlayResults();
-        return;
-    }
-
-    // 标记本轮次：树若在结果回来之前被重建，旧结果要作废
-    const int  generation = ++m_overlayGeneration;
-    const HWND hwnd       = m_hWnd;
-
-    // 判定要走 COM（首次还要实例化处理器），几十到上百毫秒，不能压在 UI 线程
-    m_overlayThread = std::thread([this, hwnd, paths, nodes, generation]()
-    {
-        const std::vector<int> hits =
-            shell::OverlayManager::Instance().ResolvePaths(paths);
-
-        {
-            std::lock_guard<std::mutex> lock(m_overlayMutex);
-            m_overlayHits      = hits;
-            m_overlayNodes     = nodes;
-            m_overlayResultGen = generation;
-            // 记住这一轮问了哪些路径、结果是什么，下次树重建时可直接复用
-            m_overlayLastPaths = paths;
-            m_overlayLastHits  = hits;
-        }
-
-        // 回 UI 线程换图标索引；窗口已销毁时 PostMessage 只是失败，不会崩
-        ::PostMessageW(hwnd, kMsgNavOverlayDone, 0, 0);
-    });
-}
-
-void NavigationPane::ApplyOverlayResults()
-{
-    std::vector<int>    hits;
-    std::vector<size_t> nodes;
-    int                 resultGen = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_overlayMutex);
-        hits.swap(m_overlayHits);
-        nodes.swap(m_overlayNodes);
-        resultGen = m_overlayResultGen;
-    }
-
-    // 轮次对不上说明树已经重建过，这批结果对应的是旧节点，直接丢掉
-    if (resultGen != m_overlayGeneration)
-    {
-        return;
-    }
-
-    if (hits.empty() || hits.size() != nodes.size() ||
-        m_iconCache == nullptr || m_hWnd == nullptr)
-    {
-        return;
-    }
-
-    for (size_t k = 0; k < nodes.size(); ++k)
-    {
-        const size_t nodeIndex = nodes[k];
-        if (nodeIndex >= m_nodes.size())
-        {
-            continue;
-        }
-
-        NodeData& node = m_nodes[nodeIndex];
-        if (node.item == nullptr)
-        {
-            continue;
-        }
-
-        // 默认回到"原始图标"：这样总开关关掉、或配置改了导致不再命中时，
-        // 导航栏上的旧角标会被撤掉，而不是一直挂着
-        int targetIndex = node.baseImageIndex;
-
-        if (hits[k] >= 0)
-        {
-            HICON overlayIcon = shell::OverlayManager::Instance().GetOverlayIcon(
-                static_cast<size_t>(hits[k]), kNavIconPixel);
-            if (overlayIcon != nullptr)
-            {
-                // 以"原始图标索引"为底合成：即使重复触发也不会把角标叠在角标上
-                const int composited = m_iconCache->GetCompositeIconIndex(
-                    node.baseImageIndex, overlayIcon, shell::IconCache::IconSize::Small);
-                if (composited >= 0)
-                {
-                    targetIndex = composited;
-                }
-            }
-        }
-
-        TVITEMW setItem = {};
-        setItem.mask           = TVIF_HANDLE | TVIF_IMAGE | TVIF_SELECTEDIMAGE;
-        setItem.hItem          = node.item;
-        setItem.iImage         = targetIndex;
-        setItem.iSelectedImage = targetIndex;
-        TreeView_SetItem(m_hWnd, &setItem);
-    }
-}
-
-void NavigationPane::RefreshOverlay()
-{
-    // 配置 / 总开关变了：上一轮的路径与结果都不再可信，清掉再重问一遍
-    m_overlayLastPaths.clear();
-    m_overlayLastHits.clear();
-    RequestOverlayResolve();
 }

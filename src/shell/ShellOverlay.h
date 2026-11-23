@@ -100,15 +100,6 @@ public:
     // ------------------------------------------------------------------
     void Annotate(std::vector<ShellEntry>& entries);
 
-    // ------------------------------------------------------------------
-    // 一批路径的判定（导航栏这类「数量少、路径固定」的场景用）。
-    //
-    // 传入路径列表，返回每个路径命中的处理器下标（-1 = 未命中）。
-    // 内部走与主列表同一条常驻 STA 线程，可在任意线程调用；
-    // 不写主列表的 m_resultCache（那个缓存是"切目录就清"的语义，别污染）。
-    // ------------------------------------------------------------------
-    std::vector<int> ResolvePaths(const std::vector<std::wstring>& paths);
-
     // 启用处理器列表（按优先级 + 配置顺序）。当前仅供调试查看；
     // 合成阶段请走 GetOverlayIcon（内部加锁），直接持有这个引用会在
     // 常驻线程整体替换处理器时失效。
@@ -173,21 +164,15 @@ private:
     // ------------------------------------------------------------------
     enum class TaskKind
     {
-        Annotate,      // 对一批条目做角标判定（含懒加载处理器）
-        ResolvePaths,  // 对一批路径单独判定（导航栏用）
-        Shutdown       // 释放处理器与判定缓存
+        Annotate,   // 对一批条目做角标判定（含懒加载处理器）
+        Shutdown    // 释放处理器与判定缓存
     };
 
     bool StartWorkerThread();                 // 懒启动常驻线程，重复调用安全；失败返回 false
     void StopWorkerThread();                  // 请求退出并 join
     void WorkerLoop();                        // 常驻线程主循环（内部自己 CoInitializeEx）
-    void PostTaskAndWait(TaskKind kind,
-                         std::vector<ShellEntry>* entries = nullptr,
-                         const std::vector<std::wstring>* paths = nullptr,
-                         std::vector<int>* hits = nullptr);
+    void PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries);
     void RunAnnotateOnWorker(std::vector<ShellEntry>& entries);  // 只允许在常驻线程执行
-    void RunResolvePathsOnWorker(const std::vector<std::wstring>& paths,
-                                 std::vector<int>& results);      // 只允许在常驻线程执行
     void RunShutdownOnWorker();                                  // 只允许在常驻线程执行
 
     bool m_loaded = false;
@@ -208,10 +193,6 @@ private:
     std::mutex m_taskMutex;                  // 保护下面两个任务字段
     TaskKind   m_taskKind = TaskKind::Annotate;
     std::vector<ShellEntry>* m_taskEntries = nullptr;   // Annotate 任务的目标列表
-
-    // ResolvePaths 任务的输入 / 输出（与 m_taskEntries 一样受 m_taskMutex 保护）
-    const std::vector<std::wstring>* m_taskPaths = nullptr;
-    std::vector<int>*                m_taskHits  = nullptr;
 
     // 串行化「投递 + 等待」整个过程：枚举线程投递 Annotate、UI 线程投递 Shutdown
     // 有可能撞在一起，同一时刻只允许一个任务在飞。worker 线程不取这把锁，

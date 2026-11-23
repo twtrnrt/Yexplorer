@@ -27,9 +27,7 @@
 #include "shell/ShellIcon.h"
 
 #include <functional>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 class NavigationPane
@@ -54,9 +52,6 @@ public:
     // 空白处、分隔条、或者不是文件夹的节点，返回空串
     // （拖放时用来判断"放到了哪个目录"）
     std::wstring HitTestPath(POINT ptClient) const;
-
-    // 角标配置 / 总开关变了之后重新判定一遍（丢掉上一轮结果，重新问处理器）
-    void RefreshOverlay();
 
     // 拖放：这个坐标落在哪个「可以放东西」的节点上。
     // 返回 nullptr 表示这里不能放（空白处、分隔条、或者压在展开箭头上）。
@@ -132,27 +127,7 @@ private:
     // 取系统已知文件夹路径（桌面/下载/文档/图片/音乐）
     static bool GetKnownFolderPath(const GUID& folderId, std::wstring& outPath);
 
-    // ==================================================================
-    // 同步状态角标（导航栏也打角标）
-    //
-    // 【为什么和主列表做法不同】
-    //   主列表是自绘，拿 HICON 直接画；导航栏是系统 TreeView + ImageList，
-    //   只能把"主图标 + 角标"合成成一张新图、换掉节点的图像列表索引。
-    //
-    // 【为什么要有后台线程】
-    //   判定走 COM（首次还要实例化处理器），几十到上百毫秒，
-    //   压在 UI 线程会让窗口启动发顿。所以丢到一次性后台线程，
-    //   结果回来再 PostMessage 让 UI 线程去换索引。
-    // ==================================================================
-    void RequestOverlayResolve();   // 收集节点路径 → 起线程判定
-    void ApplyOverlayResults();     // UI 线程：把判定结果换成合成图标索引
-    void StopOverlayThread();       // 收掉上一轮线程（重建 / 析构前调用）
-
-    // TreeView 子类过程：只为了接"判定结果已就绪"这条自定义消息
-    static LRESULT CALLBACK OverlaySubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
-                                                LPARAM lParam, UINT_PTR uIdSubclass,
-                                                DWORD_PTR dwRefData);
-
+private:
     HWND              m_hWnd      = nullptr;
     HFONT             m_hFont     = nullptr;
     HIMAGELIST        m_hImageList = nullptr;
@@ -169,23 +144,8 @@ private:
         bool         isHint       = false;  // 这一行是"把文件夹拖到这里"的提示文字
         bool         isFolderLike = true;   // 这一行能不能当目录用（程序类固定项为 false）
         HTREEITEM    item         = nullptr; // 这一行对应的树节点句柄（用来反选中）
-        int          baseImageIndex = I_IMAGENONE; // 原始图标索引（合成角标时以它为底，避免叠加）
     };
     std::vector<NodeData> m_nodes;
-
-    // ---- 角标判定的线程与结果 ----
-    std::thread         m_overlayThread;         // 一次性判定线程（每轮重建前先收掉）
-    std::mutex          m_overlayMutex;          // 保护下面几个字段
-    std::vector<int>    m_overlayHits;           // 每个路径命中的处理器下标（-1 未命中）
-    std::vector<size_t> m_overlayNodes;          // 与 m_overlayHits 一一对应的 m_nodes 下标
-    int                 m_overlayResultGen = 0;  // 结果对应的轮次
-
-    // 上一轮的路径与结果：树重建时若路径没变，直接复用、不再问一次处理器
-    std::vector<std::wstring> m_overlayLastPaths;
-    std::vector<int>          m_overlayLastHits;
-
-    // UI 线程递增：节点重建后旧结果要作废（防止旧线程的 PostMessage 换了新树）
-    int                 m_overlayGeneration = 0;
 
     // 固定区现在的显示内容（数据真身在 core::Settings 里）
     std::vector<core::PinnedItem> m_pinnedItems;
