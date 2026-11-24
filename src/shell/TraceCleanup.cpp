@@ -72,7 +72,24 @@ bool DeleteAllUserTraces()
         ok = false;
     }
 
-    // ---- 2. HKCU\Software\FileExplorer 整棵注册表键 ----
+    // ---- 2. %LOCALAPPDATA%\FileExplorer：图标 / 缩略图磁盘缓存 ----
+    // 这个目录是"成品缓存"（一个图标一个文件），不属于配置，但在本软件名下，
+    // 选「清除所有痕迹」时必须一起删，否则重建后还会读到旧的图标。
+    LPWSTR localAppData = nullptr;
+    if (::SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData) == S_OK &&
+        localAppData != nullptr)
+    {
+        const std::wstring localCacheDir = std::wstring(localAppData) + L"\\" + kConfigFolderName;
+        ::CoTaskMemFree(localAppData);
+        ok = RemoveDirectoryIfPresent(localCacheDir) && ok;
+    }
+    else
+    {
+        Logger::Warn(L"痕迹清理：取不到 LocalAppData 目录，跳过图标缓存");
+        ok = false;
+    }
+
+    // ---- 3. HKCU\Software\FileExplorer 整棵注册表键 ----
     // RegDeleteTreeW 递归删子键和值；键不存在也算成功。
     const LONG regResult = ::RegDeleteTreeW(HKEY_CURRENT_USER, kRegistryRoot);
     if (regResult == ERROR_SUCCESS || regResult == ERROR_FILE_NOT_FOUND)
@@ -85,7 +102,7 @@ bool DeleteAllUserTraces()
         ok = false;
     }
 
-    // ---- 3. %TEMP%\Yexp 解压缓存 ----
+    // ---- 4. %TEMP%\Yexp 解压缓存 ----
     wchar_t tempBuffer[MAX_PATH] = {};
     const DWORD tempLength = ::GetTempPathW(ARRAYSIZE(tempBuffer), tempBuffer);
     if (tempLength != 0 && tempLength < ARRAYSIZE(tempBuffer))
