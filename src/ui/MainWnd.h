@@ -173,6 +173,9 @@ private:
     // 窗口创建（WM_CREATE 的处理体）
     void OnCreate();
 
+    // 启动空闲预热：把常用扩展名的图标先问一遍（只跑一次，见实现里的说明）
+    void WarmUpExtensionIcons();
+
     // 创建工具栏按钮、地址栏、状态栏、字体
     void CreateChildControls();
 

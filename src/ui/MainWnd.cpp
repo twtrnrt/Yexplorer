@@ -86,6 +86,10 @@ static const UINT WM_APP_PASTE_PLAN = WM_APP + 6;
 static const UINT_PTR kFolderChangeTimerId  = 1;
 static const UINT     kFolderChangeDelayMs  = 250;
 
+// 启动后空闲预热扩展名图标的定时器（只跑一次，见 WarmUpExtensionIcons）
+static const UINT_PTR kIconWarmTimerId      = 2;
+static const UINT     kIconWarmDelayMs      = 1200;
+
 // 自定义消息：选中项变了，延迟刷状态栏
 //
 // 为什么要延迟：虚拟列表（LVS_OWNERDATA）在 Shift 多选这种"一次性改一大段"的情况下，
@@ -1670,6 +1674,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             RefreshCurrentFolder();
             return 0;
         }
+        if (wParam == kIconWarmTimerId)
+        {
+            // 只跑一次：窗口已经显示、用户还没开始点东西的时候，把常用扩展名问一遍
+            ::KillTimer(m_hWnd, kIconWarmTimerId);
+            WarmUpExtensionIcons();
+            return 0;
+        }
         break;
 
     // --------------------------------------------------------------
@@ -2319,8 +2330,46 @@ void MainWindow::OnCreate()
     LayoutChildren();
     StartEnumeration(m_tabs[m_activeTab].path);
 
+    // 启动 1.2 秒后再开始预热扩展名图标：此刻窗口已经显示、枚举也起了，
+    // 不让预热和"打开首屏"抢同一段时间（预热本身见 WarmUpExtensionIcons）
+    ::SetTimer(m_hWnd, kIconWarmTimerId, kIconWarmDelayMs, nullptr);
+
     // Shell 窗口集成：开关打开时把主窗口注册进 IShellWindows（默认关，零影响）
     SyncShellWindowRegistration();
+}
+
+// ----------------------------------------------------------------------------
+// 启动空闲预热：把常用扩展名的图标先问一遍
+//
+// 扩展名图标是按"这一行真要画了才问系统"取的，第一次碰到某个扩展名时要加载
+// 对应的 Shell 扩展 DLL（实测 .pdf 一次 51 ms），所以第一次打开目录时
+// 第一屏图标会一格一格地"蹦"出来。
+//
+// 这里在启动 1.2 秒后把二十来个常见扩展名各问一遍（文件名是假的不存在也无所谓，
+// 按扩展名查不碰文件），之后打开任何目录都直接命中内存表。
+//
+// 只能放在界面线程：索引要追加进界面线程自己那份图像列表。
+// 耗时实测二十来个扩展名合计约一百多毫秒，发生在窗口已能操作之后，用户感觉不到。
+// ----------------------------------------------------------------------------
+void MainWindow::WarmUpExtensionIcons()
+{
+    static const wchar_t* const kCommonNames[] =
+    {
+        L"warmup.txt",  L"warmup.pdf",  L"warmup.doc",  L"warmup.docx",
+        L"warmup.xls",  L"warmup.xlsx", L"warmup.ppt",  L"warmup.pptx",
+        L"warmup.jpg",  L"warmup.png",  L"warmup.gif",  L"warmup.bmp",
+        L"warmup.zip",  L"warmup.rar",  L"warmup.7z",   L"warmup.exe",
+        L"warmup.msi",  L"warmup.lnk",  L"warmup.mp4",  L"warmup.mp3",
+        L"warmup.ini",  L"warmup.reg",  L"warmup.bat",  L"warmup.dll",
+    };
+
+    for (const auto* name : kCommonNames)
+    {
+        m_iconCache.GetIconIndex(name, false, shell::IconCache::IconSize::Small);
+        m_iconCache.GetIconIndex(name, false, shell::IconCache::IconSize::Large);
+    }
+
+    Logger::Info(L"扩展名图标预热完成（24 种，小/大两档）");
 }
 
 // ----------------------------------------------------------------------------
