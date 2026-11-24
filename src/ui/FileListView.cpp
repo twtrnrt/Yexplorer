@@ -285,14 +285,16 @@ bool FileListView::Create(HWND parent, HINSTANCE hInstance)
     return true;
 }
 
-void FileListView::SetIconCache(shell::IconCache* iconCache)
-{
+void FileListView::SetIconCache(shell::IconCache* iconCache){
     m_iconCache = iconCache;
 
     if (m_hWnd == nullptr || iconCache == nullptr || iconCache->ImageList() == nullptr)
     {
         return;
     }
+
+    // 后台取好图标后，往这个窗口发通知（只重画，不动布局）
+    iconCache->SetNotifyWindow(m_hWnd);
 
     // 把小图标图像列表挂到列表控件上
     ListView_SetImageList(m_hWnd, iconCache->ImageList(), LVSIL_SMALL);
@@ -303,6 +305,25 @@ void FileListView::SetIconCache(shell::IconCache* iconCache)
         ListView_SetImageList(m_hWnd,
                               iconCache->ImageList(shell::IconCache::IconSize::Large),
                               LVSIL_NORMAL);
+    }
+}
+
+// ============================================================================
+// 后台图标取好了
+//
+// 后台线程只负责"读文件、转像素、存盘"，不能碰图像列表（那是界面线程的东西）。
+// 这里收到消息后把像素塞进图像列表，然后只重画可见区 —— 控件会重新问每行的图标。
+// ============================================================================
+void FileListView::OnIconsReady()
+{
+    if (m_iconCache == nullptr || m_hWnd == nullptr)
+    {
+        return;
+    }
+
+    if (m_iconCache->ConsumeReadyIcons())
+    {
+        ::InvalidateRect(m_hWnd, nullptr, FALSE);
     }
 }
 
@@ -694,11 +715,19 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
         }
         else if (NeedsOwnIcon(entry.name))
         {
-            iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize,
-                                                            entry.size, entry.modified);
+            // exe / lnk 这类必须读文件本身：交给后台取。
+            // 先给一张全透明占位（保留图标位、不留假图案），后台取到后只重画这一行。
+            const int asyncIndex = m_iconCache->GetIconIndexAsync(entry.fullPath, entry.size,
+                                                                 entry.modified, iconSize);
+            if (asyncIndex < 0)
+            {
+                return m_iconCache->PlaceholderIndex(iconSize);   // 占位不叠半透明/角标
+            }
+
+            iconIndex = asyncIndex;
             if (iconIndex <= 0)
             {
-                // 读不出图标（被占用、权限不足等）时退回按扩展名
+                // 读不出图标（被占用、权限不足、没有图标资源）时退回按扩展名
                 iconIndex = m_iconCache->GetIconIndex(entry.name, false, iconSize);
             }
         }
@@ -2375,6 +2404,12 @@ LRESULT CALLBACK FileListView::ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM 
     {
         // 控件自己进入改名后，补设"只选主文件名、不选扩展名"
         self->SelectMainNameInEdit();
+        return 0;
+    }
+    else if (msg == shell::kMessageIconReady && self != nullptr)
+    {
+        // 后台取好图标了：塞图像列表 + 重画可见区
+        self->OnIconsReady();
         return 0;
     }
     else if (msg == WM_COMMAND && self != nullptr && self->m_hEdit != nullptr &&

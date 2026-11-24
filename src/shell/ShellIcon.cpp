@@ -210,8 +210,7 @@ bool ExtractIconBits(HICON icon, std::vector<BYTE>& pixels, int& width, int& hei
 // 把存盘的像素还原成 HICON（透明度靠 alpha，掩码给全 0）
 // ----------------------------------------------------------------------------
 HICON CreateIconFromBits(int width, int height, const std::vector<BYTE>& pixels)
-{
-    if (width <= 0 || height <= 0 ||
+{    if (width <= 0 || height <= 0 ||
         pixels.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
     {
         return nullptr;
@@ -253,6 +252,23 @@ HICON CreateIconFromBits(int width, int height, const std::vector<BYTE>& pixels)
     return icon;
 }
 
+// ----------------------------------------------------------------------------
+// 全透明图标：后台还没取到图标时，用它先占住格子
+//
+// 不用"通用文件图标"是因为那会显示一个错图案；全透明就是"留空"，
+// 但图标位仍然占着，文字不会因为没图标而左移。
+// ----------------------------------------------------------------------------
+HICON CreateTransparentIcon(int side)
+{
+    if (side <= 0)
+    {
+        return nullptr;
+    }
+
+    std::vector<BYTE> pixels(static_cast<size_t>(side) * static_cast<size_t>(side) * 4u, 0);
+    return CreateIconFromBits(side, side, pixels);
+}
+
 } // namespace
 
 namespace shell
@@ -262,6 +278,9 @@ IconCache::IconCache() = default;
 
 IconCache::~IconCache()
 {
+    // 先停后台线程：它可能还在写磁盘缓存，不能让它踩着正在析构的对象跑
+    StopWorker();
+
     // 退出时打一条统计：验证"第二次打开走磁盘、不再读源文件"靠它
     if (m_diskCache != nullptr)
     {
@@ -270,9 +289,11 @@ IconCache::~IconCache()
                      L" 次，本次新增约 " + std::to_wstring(m_diskCache->CurrentBytes() / 1024) + L" KB");
 
         // 真去系统挖图标的次数和总耗时：第一次打开目录的"卡"花在哪，看这条
-        long long averageMs = (m_extractCount > 0) ? (m_extractTotalMs / m_extractCount) : 0;
-        Logger::Info(L"图标提取：去系统挖 " + std::to_wstring(m_extractCount) +
-                     L" 次，合计 " + std::to_wstring(m_extractTotalMs) +
+        const long long extractCount = m_extractCount.load();
+        const long long extractTotalMs = m_extractTotalMs.load();
+        const long long averageMs = (extractCount > 0) ? (extractTotalMs / extractCount) : 0;
+        Logger::Info(L"图标提取：去系统挖 " + std::to_wstring(extractCount) +
+                     L" 次，合计 " + std::to_wstring(extractTotalMs) +
                      L" ms（平均 " + std::to_wstring(averageMs) + L" ms/次）");
     }
 
@@ -318,6 +339,21 @@ bool IconCache::Initialize()
     // 文件夹图标只查一次，之后所有文件夹共用
     m_folderIconIndex      = QueryFolderIconIndex(false);
     m_largeFolderIconIndex = QueryFolderIconIndex(true);
+
+    // 全透明占位图标：后台还没取到图标时先占住格子（屏幕上什么都不显示）
+    if (HICON placeholder = CreateTransparentIcon(16))
+    {
+        m_placeholderSmall = ::ImageList_ReplaceIcon(m_hImageList, -1, placeholder);
+        ::DestroyIcon(placeholder);
+    }
+    if (m_hLargeImageList != nullptr)
+    {
+        if (HICON largePlaceholder = CreateTransparentIcon(48))
+        {
+            m_placeholderLarge = ::ImageList_ReplaceIcon(m_hLargeImageList, -1, largePlaceholder);
+            ::DestroyIcon(largePlaceholder);
+        }
+    }
 
     // 磁盘成品缓存：exe/lnk 这类"必须读文件"的图标，第一次挖出来后存成小图，
     // 以后直接读小图，不再碰源文件（资源管理器不卡就是靠这一层）
@@ -672,6 +708,288 @@ void IconCache::SaveIconToDisk(const std::wstring& key, HICON icon)
     entry.pixels = std::move(pixels);
 
     m_diskCache->Save(IconDiskCache::Kind::Icon, key, entry);
+}
+
+// ============================================================================
+// 后台取图标
+//
+// 界面线程只查内存/磁盘；查不到就把任务丢给后台线程，先返回 -1。
+// 后台取好 → 存盘 → 放进"待处理"队列 → 给界面窗口发一条消息。
+// 界面线程收到消息后把像素塞进图像列表，再重画。
+// ============================================================================
+
+int IconCache::GetIconIndexAsync(const std::wstring& path, unsigned long long fileSize,
+                                 FILETIME modified, IconSize size)
+{
+    if (!m_initialized || path.empty() || size == IconSize::Medium)
+    {
+        return -1;
+    }
+
+    // 没有大小/修改时间（虚拟项、驱动器），或者不是真实文件系统路径：不走这条路
+    if (modified.dwLowDateTime == 0 && modified.dwHighDateTime == 0)
+    {
+        return -1;
+    }
+    if (path.compare(0, 2, L"::") == 0 || path.compare(0, 6, L"shell:") == 0)
+    {
+        return -1;
+    }
+
+    std::wstring normalized = path;
+    if (normalized.size() == 2 && normalized[1] == L':')
+    {
+        normalized += L'\\';
+    }
+
+    const std::wstring key = BuildDiskKey(normalized, size, fileSize, modified);
+
+    // 1. 本次运行取过
+    auto memory = m_diskIndexCache.find(key);
+    if (memory != m_diskIndexCache.end())
+    {
+        return memory->second;
+    }
+
+    // 2. 确认取不到（负缓存）→ 返回 0，让调用方退回按扩展名的通用图标
+    if (m_diskNegativeKeys.find(key) != m_diskNegativeKeys.end())
+    {
+        return 0;
+    }
+
+    // 3. 磁盘缓存：读一个几 KB 的小文件，几十微秒，可以直接在界面线程做
+    const int diskIndex = LoadIconFromDisk(key, size);
+    if (diskIndex >= 0)
+    {
+        m_diskIndexCache[key] = diskIndex;
+        return diskIndex;
+    }
+    if (diskIndex == -2)
+    {
+        m_diskNegativeKeys.insert(key);
+        return 0;
+    }
+
+    // 4. 都没有 → 交给后台（同一个 key 不重复排队；队列上限 512，超了也不影响正确性）
+    EnsureWorkerStarted();
+    {
+        std::lock_guard<std::mutex> lock(m_workerMutex);
+        if (m_pendingKeys.find(key) == m_pendingKeys.end() && m_taskQueue.size() < 512)
+        {
+            m_pendingKeys.insert(key);
+
+            IconTask task;
+            task.key  = key;
+            task.path = normalized;
+            task.size = size;
+            m_taskQueue.push_back(std::move(task));
+        }
+    }
+    m_workerSignal.notify_one();
+    return -1;
+}
+
+int IconCache::PlaceholderIndex(IconSize size) const
+{
+    return (size == IconSize::Large) ? m_placeholderLarge : m_placeholderSmall;
+}
+
+void IconCache::EnsureWorkerStarted()
+{
+    std::lock_guard<std::mutex> lock(m_workerMutex);
+    if (m_worker.joinable())
+    {
+        return;
+    }
+    m_workerStop = false;
+    m_worker = std::thread(&IconCache::WorkerMain, this);
+}
+
+void IconCache::StopWorker()
+{
+    if (!m_worker.joinable())
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_workerMutex);
+        m_workerStop = true;
+    }
+    m_workerSignal.notify_all();
+    m_worker.join();
+}
+
+bool IconCache::ExtractTaskIcon(const IconTask& task, std::vector<BYTE>& pixels,
+                                int& width, int& height)
+{
+    if (task.path.empty())
+    {
+        return false;
+    }
+
+    const DWORD sizeFlag = (task.size == IconSize::Large) ? SHGFI_LARGEICON : SHGFI_SMALLICON;
+
+    SHFILEINFOW fileInfo = {};
+    const DWORD_PTR result = ::SHGetFileInfoW(task.path.c_str(), 0, &fileInfo, sizeof(fileInfo),
+                                              SHGFI_SYSICONINDEX | sizeFlag);
+    if (result == 0)
+    {
+        return false;
+    }
+
+    // 用后台线程自己那份系统图像列表取图标（COM 对象不能跨线程用）
+    IImageList* list = (task.size == IconSize::Large) ? m_workerLargeList : m_workerSmallList;
+    if (list == nullptr)
+    {
+        return false;
+    }
+
+    HICON icon = nullptr;
+    if (FAILED(list->GetIcon(fileInfo.iIcon, ILD_TRANSPARENT, &icon)) || icon == nullptr)
+    {
+        return false;
+    }
+
+    const bool ok = ExtractIconBits(icon, pixels, width, height);
+    ::DestroyIcon(icon);
+    return ok;
+}
+
+void IconCache::WorkerMain()
+{
+    // 后台线程里调 Shell 接口，先把 COM 初始化好（单线程套间，和资源管理器一致）
+    ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // 系统图像列表按线程各拿一份
+    ::SHGetImageList(SHIL_SMALL, IID_IImageList, reinterpret_cast<void**>(&m_workerSmallList));
+    ::SHGetImageList(SHIL_EXTRALARGE, IID_IImageList, reinterpret_cast<void**>(&m_workerLargeList));
+
+    for (;;)
+    {
+        IconTask task;
+        {
+            std::unique_lock<std::mutex> lock(m_workerMutex);
+            m_workerSignal.wait(lock, [this]() { return m_workerStop || !m_taskQueue.empty(); });
+            if (m_workerStop && m_taskQueue.empty())
+            {
+                break;
+            }
+            task = std::move(m_taskQueue.front());
+            m_taskQueue.pop_front();
+        }
+
+        std::vector<BYTE> pixels;
+        int width  = 0;
+        int height = 0;
+
+        const auto extractStart = std::chrono::steady_clock::now();
+        const bool extracted = ExtractTaskIcon(task, pixels, width, height);
+        const long long elapsedMs = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - extractStart).count());
+
+        m_extractCount.fetch_add(1);
+        m_extractTotalMs.fetch_add(elapsedMs);
+
+        // 顺手落盘（后台线程写，不占界面）
+        if (m_diskCache != nullptr)
+        {
+            IconDiskCache::Entry entry;
+            if (extracted)
+            {
+                entry.width  = width;
+                entry.height = height;
+                entry.pixels = pixels;
+            }
+            else
+            {
+                entry.negative = true;
+            }
+            m_diskCache->Save(IconDiskCache::Kind::Icon, task.key, entry);
+        }
+
+        // 交给界面线程去塞图像列表（GDI/图像列表只在界面线程碰）
+        {
+            std::lock_guard<std::mutex> lock(m_readyMutex);
+            IconReady ready;
+            ready.key      = task.key;
+            ready.size     = task.size;
+            ready.negative = !extracted;
+            ready.width    = width;
+            ready.height   = height;
+            ready.pixels   = std::move(pixels);
+            m_readyIcons.push_back(std::move(ready));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_workerMutex);
+            m_pendingKeys.erase(task.key);
+        }
+
+        if (m_notifyWindow != nullptr)
+        {
+            ::PostMessageW(m_notifyWindow, kMessageIconReady, 0, 0);
+        }
+    }
+
+    if (m_workerSmallList != nullptr)
+    {
+        m_workerSmallList->Release();
+        m_workerSmallList = nullptr;
+    }
+    if (m_workerLargeList != nullptr)
+    {
+        m_workerLargeList->Release();
+        m_workerLargeList = nullptr;
+    }
+
+    ::CoUninitialize();
+}
+
+bool IconCache::ConsumeReadyIcons()
+{
+    std::vector<IconReady> ready;
+    {
+        std::lock_guard<std::mutex> lock(m_readyMutex);
+        ready.swap(m_readyIcons);
+    }
+
+    if (ready.empty())
+    {
+        return false;
+    }
+
+    for (auto& item : ready)
+    {
+        if (item.negative)
+        {
+            m_diskNegativeKeys.insert(item.key);
+            continue;
+        }
+
+        HICON icon = CreateIconFromBits(item.width, item.height, item.pixels);
+        if (icon == nullptr)
+        {
+            continue;
+        }
+
+        HIMAGELIST target = TargetImageList(item.size);
+        if (target == nullptr)
+        {
+            ::DestroyIcon(icon);
+            continue;
+        }
+
+        const int index = ::ImageList_ReplaceIcon(target, -1, icon);
+        ::DestroyIcon(icon);
+        if (index >= 0)
+        {
+            m_diskIndexCache[item.key] = index;
+        }
+    }
+
+    return true;
 }
 
 // ============================================================================

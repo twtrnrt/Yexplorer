@@ -24,9 +24,14 @@
 #include <commoncontrols.h> // IImageList / SHGetImageList
 #include <wil/com.h>
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <map>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -34,6 +39,9 @@
 
 namespace shell
 {
+
+// 后台线程取好图标后，往界面窗口发的通知消息（wParam/lParam 都不用，数据在 IconCache 里）
+inline constexpr UINT kMessageIconReady = WM_APP + 301;
 
 // 图标缓存
 class IconCache
@@ -129,6 +137,28 @@ public:
                                FILETIME modified = {});
 
     // ------------------------------------------------------------------
+    // 异步版：只用于 exe/lnk 这类"要读文件"的项
+    //
+    //   内存表/磁盘命中 → 立即返回索引（>=0），和同步版一样快；
+    //   没命中      → 把提取任务丢给后台线程，返回 -1
+    //
+    // 返回 -1 时调用方用 PlaceholderIndex() 顶住格子（全透明，屏幕上不显示图案），
+    // 后台取到后会发 kMessageIconReady，界面重画即可拿到真图标。
+    // ------------------------------------------------------------------
+    int GetIconIndexAsync(const std::wstring& path, unsigned long long fileSize,
+                          FILETIME modified, IconSize size = IconSize::Small);
+
+    // 全透明占位图标的索引（保留图标位，文字不会因为没图标而左移）
+    int PlaceholderIndex(IconSize size = IconSize::Small) const;
+
+    // 后台取好图标后往哪个窗口发通知（列表控件创建时设置）
+    void SetNotifyWindow(HWND window) { m_notifyWindow = window; }
+
+    // 界面线程收到 kMessageIconReady 后调用：把后台结果塞进图像列表
+    // 返回 true 表示有新图标进来，调用方重画即可
+    bool ConsumeReadyIcons();
+
+    // ------------------------------------------------------------------
     // 按「绝对 PIDL」取图标
     //
     // 为什么需要它：控制面板里那些项（「字体」「恢复」「程序和功能」…）的
@@ -158,6 +188,35 @@ public:
     int GetCompositeIconIndex(int baseIndex, HICON overlay, IconSize size = IconSize::Small);
 
 private:
+    // ---- 后台取图标 ----
+
+    // 一条提取任务：只带纯数据（key、路径、边长），不带任何 COM 指针
+    struct IconTask
+    {
+        std::wstring key;
+        std::wstring path;
+        IconSize     size = IconSize::Small;
+    };
+
+    // 后台取好的结果，交给界面线程处理（界面线程负责塞图像列表）
+    struct IconReady
+    {
+        std::wstring      key;
+        IconSize          size = IconSize::Small;
+        bool              negative = false;
+        int               width  = 0;
+        int               height = 0;
+        std::vector<BYTE> pixels;
+    };
+
+    void EnsureWorkerStarted();
+    void StopWorker();
+    void WorkerMain();
+
+    // 在后台线程里真正去系统取图标，并转成 32 位像素
+    bool ExtractTaskIcon(const IconTask& task, std::vector<BYTE>& pixels,
+                         int& width, int& height);
+
     // ---- 磁盘缓存（只服务 exe/lnk 这类"必须读文件"的图标）----
 
     // 统一小写：缓存 key 里的路径必须大小写无关（同一个文件不应存两份）
@@ -208,8 +267,30 @@ private:
     std::unique_ptr<IconDiskCache>             m_diskCache;
 
     // 诊断：真正去系统"挖图标"的次数和合计耗时（验证磁盘缓存的收益靠它们）
-    long long m_extractCount   = 0;
-    long long m_extractTotalMs = 0;
+    // 后台线程也会累加，所以用原子变量
+    std::atomic<long long> m_extractCount{0};
+    std::atomic<long long> m_extractTotalMs{0};
+
+    // ---- 后台线程 ----
+    std::thread                       m_worker;
+    std::mutex                        m_workerMutex;
+    std::condition_variable           m_workerSignal;
+    std::deque<IconTask>              m_taskQueue;      // 待提取队列
+    std::unordered_set<std::wstring>  m_pendingKeys;    // 已在队列里的 key，避免重复排队
+    bool                              m_workerStop = false;
+    HWND                              m_notifyWindow = nullptr;
+
+    // 后台取好、等界面线程处理的图标
+    std::mutex                       m_readyMutex;
+    std::vector<IconReady>           m_readyIcons;
+
+    // 全透明占位图标（16 / 48）的索引
+    int m_placeholderSmall = -1;
+    int m_placeholderLarge = -1;
+
+    // 后台线程自己的系统图像列表：COM 对象不能跨线程用，线程里自己拿一份
+    IImageList* m_workerSmallList = nullptr;
+    IImageList* m_workerLargeList = nullptr;
     std::unordered_map<int, int>          m_dimmedIconCache;          // 小图标原索引 → 半透明索引
     std::unordered_map<int, int>          m_largeDimmedIconCache;     // 大图标原索引 → 半透明索引
     std::map<std::pair<int, const void*>, int> m_overlayCompositeCache;      // 小：(主索引, overlay) → 合成索引

@@ -292,6 +292,9 @@ private:
     // 算某一项该用哪个图标索引（绘图和回调共用一套逻辑）
     int IconIndexForEntry(const shell::ShellEntry& entry) const;
 
+    // 后台图标取好了（收到 shell::kMessageIconReady）：把结果塞进图像列表并重画
+    void OnIconsReady();
+
     // 平铺视图：把一个格子（图标 + 名称 + 容量 + 进度条）整块画出来
     void DrawTile(HDC dc, const RECT& tileRect, size_t index, bool selected);
 
