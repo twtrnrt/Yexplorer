@@ -18,6 +18,9 @@
 namespace shell
 {
 
+// 全局停写开关的定义（声明在头文件里）
+std::atomic<bool> IconDiskCache::s_writesDisabled{false};
+
 namespace
 {
 
@@ -350,11 +353,25 @@ bool IconDiskCache::Load(Kind kind, const std::wstring& key, Entry& entry)
 }
 
 // ============================================================================
+// 全局停写（只在「清除所有痕迹」时调用一次，见头文件说明）
+// ============================================================================
+void IconDiskCache::DisableAllWrites()
+{
+    s_writesDisabled.store(true);
+}
+
+// ============================================================================
 // 写
 // ============================================================================
 
 bool IconDiskCache::Save(Kind kind, const std::wstring& key, const Entry& entry)
 {
+    // 「清除所有痕迹」按下后不再写：否则刚删掉的目录会被后台线程立刻写回来
+    if (s_writesDisabled.load())
+    {
+        return false;
+    }
+
     if (m_root.empty() || key.empty())
     {
         return false;
@@ -473,6 +490,12 @@ bool IconDiskCache::Save(Kind kind, const std::wstring& key, const Entry& entry)
 
 void IconDiskCache::Touch(Kind kind, const std::wstring& key)
 {
+    // 停写后也不再刷时间（文件马上就要被删了）
+    if (s_writesDisabled.load())
+    {
+        return;
+    }
+
     if (m_root.empty() || key.empty() || !m_lockReady)
     {
         return;

@@ -14,6 +14,7 @@
 #include <string>
 
 #include "core/Logger.h"
+#include "shell/IconDiskCache.h"
 
 namespace shell
 {
@@ -56,6 +57,11 @@ bool RemoveDirectoryIfPresent(const std::wstring& path)
 bool DeleteAllUserTraces()
 {
     bool ok = true;
+
+    // ---- 0. 先停掉图标缓存的写入口 ----
+    // 后台取图标的线程可能正好手里有一条要存盘的任务；不先关掉，
+    // 目录刚删掉就会被它写回一个 .icn 文件，用户看起来就是"没清干净"。
+    IconDiskCache::DisableAllWrites();
 
     // ---- 1. %APPDATA%\FileExplorer 整个目录 ----
     LPWSTR appData = nullptr;
