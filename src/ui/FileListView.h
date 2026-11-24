@@ -116,6 +116,11 @@ public:
     // 同一个目录里复制/移动完再枚举时用这个，前面没变的行不重画，看着不闪。
     void MergeResult(std::shared_ptr<shell::EnumerateResult> result);
 
+    // 后台角标判定完成后补角标：按完整路径找到对应项，改 overlayIndex 再重画。
+    // path 是判定针对的目录，和当前显示目录不一致（用户已切走）就整批忽略。
+    void ApplyOverlayIndices(const std::wstring& path,
+                             const std::vector<std::pair<std::wstring, int>>& updates);
+
     // 设置「被剪切的项」：这些行显示成半透明灰（和资源管理器一致）
     void SetCutPaths(const std::vector<std::wstring>& paths);
 

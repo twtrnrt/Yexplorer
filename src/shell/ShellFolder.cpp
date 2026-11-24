@@ -462,6 +462,208 @@ void FillDriveInfo(shell::ShellEntry& entry)
 namespace shell
 {
 
+// ----------------------------------------------------------------------------
+// 快速通道：普通磁盘目录用一次 FindFirstFile 扫完
+//
+// 【为什么加这条路】
+//   以前所有目录都走 Shell 的 IShellFolder 枚举，每个子项还要再问三次属性
+//   （路径、大小、修改时间）。本地盘每项一两毫秒不明显，网络盘（\\server\share）
+//   每项都是一次网络往返——实测 261 个 PDF 要 1025 ms，全花在逐项查属性上。
+//
+//   FindFirstFile / FindNextFile 是批量接口：一次请求拿回一整批目录项，
+//   名字、大小、修改时间、属性都在同一份数据里，同样 261 项通常几十毫秒。
+//
+// 【什么时候不用这条路】（照样走原来的 Shell 枚举，行为一点不变）
+//   · 虚拟命名空间：此电脑、控制面板、主文件夹、网络、回收站、库；
+//   · 压缩包本身和压缩包内部（.zip 里那些项磁盘上并不存在）；
+//   · 桌面目录（用户桌面 / 公共桌面）：Shell 那边是"两个目录合并显示"的视图，
+//     自己扫目录会漏掉另一半；
+//   · 目录不存在、没权限、网络断了：退回 Shell 老路，由它给出和以前一样的错误。
+//
+// 【和 Shell 枚举对齐的细节】
+//   · .lnk / .url 的显示名去掉后缀（系统也是这么显示的，否则列表里会突然多出 ".lnk"）；
+//     真实路径仍然带后缀，图标、打开、重命名都用真实路径；
+//   · 隐藏 / 系统文件的过滤规则和两个开关的语义完全照旧；
+//   · 压缩包扩展名（zip/rar/7z…）照旧标成"能双击进去的容器文件"；
+//   · 大小、修改时间取自同一个磁盘数据源，和 Shell 给的一致。
+// ----------------------------------------------------------------------------
+
+// 显示名：系统对快捷方式类不显示后缀，这里照做，保持列表文字和以前一样
+static std::wstring PlainEntryDisplayName(const std::wstring& fileName)
+{
+    static const wchar_t* const kHideSuffixes[] = { L".lnk", L".url" };
+
+    for (const wchar_t* suffix : kHideSuffixes)
+    {
+        const size_t suffixLength = ::wcslen(suffix);
+        if (fileName.size() > suffixLength &&
+            ::_wcsicmp(fileName.c_str() + (fileName.size() - suffixLength), suffix) == 0)
+        {
+            return fileName.substr(0, fileName.size() - suffixLength);
+        }
+    }
+
+    return fileName;
+}
+
+// 桌面目录（用户桌面 / 公共桌面）判断：这两个目录 Shell 会合并显示，不能自己扫
+static bool IsDesktopDirectoryPath(const std::wstring& path)
+{
+    auto samePath = [](const std::wstring& left, const std::wstring& right)
+    {
+        std::wstring a = left;
+        std::wstring b = right;
+        while (!a.empty() && (a.back() == L'\\' || a.back() == L'/')) { a.pop_back(); }
+        while (!b.empty() && (b.back() == L'\\' || b.back() == L'/')) { b.pop_back(); }
+        return !a.empty() && ::_wcsicmp(a.c_str(), b.c_str()) == 0;
+    };
+
+    return samePath(path, DesktopDirectory()) || samePath(path, PublicDesktopDirectory());
+}
+
+static bool TryEnumeratePlainDirectory(const std::wstring& path,
+                                       const core::CancellationToken* token,
+                                       EnumerateResult& result)
+{
+    // 目录本身得是磁盘上真实存在的目录；否则交给 Shell 老路
+    const DWORD folderAttributes = ::GetFileAttributesW(WithLongPathPrefix(path).c_str());
+    if (folderAttributes == INVALID_FILE_ATTRIBUTES ||
+        (folderAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+    {
+        return false;
+    }
+    if (!IsFileSystemPath(path) || IsDesktopDirectoryPath(path))
+    {
+        return false;
+    }
+
+    // 拼搜索串：C:\ → C:\*；\\server\share → \\server\share\*
+    std::wstring pattern = path;
+    if (!pattern.empty() && (pattern.back() == L'\\' || pattern.back() == L'/'))
+    {
+        pattern.pop_back();
+    }
+    pattern += L"\\*";
+
+    WIN32_FIND_DATAW findData = {};
+    HANDLE findHandle = ::FindFirstFileW(WithLongPathPrefix(pattern).c_str(), &findData);
+    if (findHandle == INVALID_HANDLE_VALUE)
+    {
+        // 空目录是正常情况：FindFirstFile 报"找不到文件"，这时算成功、零条目
+        if (::GetLastError() == ERROR_FILE_NOT_FOUND)
+        {
+            result.hr = S_OK;
+            return true;
+        }
+
+        // 没权限、网络断开等：退回 Shell 老路，让它给出和以前一样的提示
+        return false;
+    }
+
+    const core::Settings& settings   = core::Settings::Instance();
+    const bool            needHidden = settings.NeedHiddenItems();
+
+    // 拼 fullPath 的前缀：保证"目录 + 一个反斜杠 + 文件名"
+    std::wstring folderPrefix = path;
+    if (folderPrefix.empty() || (folderPrefix.back() != L'\\' && folderPrefix.back() != L'/'))
+    {
+        folderPrefix += L'\\';
+    }
+
+    bool cancelled = false;
+
+    do
+    {
+        if (token != nullptr && token->IsCancelled())
+        {
+            cancelled = true;
+            break;
+        }
+
+        const std::wstring fileName(findData.cFileName);
+
+        // "." 和 ".." 正常不会出现，保险起见跳过
+        if (fileName == L"." || fileName == L"..")
+        {
+            continue;
+        }
+
+        const bool isFolder = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        const bool isHidden = (findData.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+        const bool isSystem = (findData.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0;
+
+        // 隐藏 / 系统文件的显示规则，和 Shell 那条老路完全一致：
+        //   两个开关都关 → 隐藏项不显示（系统文件通常也带隐藏位，跟着一起不显示）
+        //   开了开关   → 系统文件只看"显示系统文件"，普通隐藏项只看"显示隐藏文件"
+        if (!needHidden)
+        {
+            if (isHidden)
+            {
+                continue;
+            }
+        }
+        else
+        {
+            const bool shouldShow = isSystem ? settings.ShowSystemFiles()
+                                             : (!isHidden || settings.ShowHiddenFiles());
+            if (!shouldShow)
+            {
+                continue;
+            }
+        }
+
+        ShellEntry entry;
+        entry.name     = PlainEntryDisplayName(fileName);
+        entry.fullPath = folderPrefix + fileName;
+
+        // 文件夹：能进去；压缩包（zip/rar/7z…）：显示按文件、双击能进去看内容
+        entry.isFolder        = isFolder;
+        entry.isContainerFile = (!isFolder) && IsContainerFileExtension(entry.fullPath);
+        entry.canEnter        = isFolder || entry.isContainerFile;
+
+        // 这两个标记只在开了"显示隐藏/系统"时才填（和以前一样：没开就不淡化）
+        if (needHidden)
+        {
+            entry.isHidden     = isHidden;
+            entry.isSystemFile = isSystem;
+        }
+
+        if (!isFolder)
+        {
+            entry.size = (static_cast<uint64_t>(findData.nFileSizeHigh) << 32) |
+                         static_cast<uint64_t>(findData.nFileSizeLow);
+        }
+
+        entry.modified = findData.ftLastWriteTime;
+
+        // 「主文件夹」里要区分系统项和桌面上的东西，别的目录里恒为 false
+        entry.isSystemItem = IsDesktopSystemItem(entry.fullPath);
+
+        if (entry.name.empty())
+        {
+            continue;
+        }
+
+        if (entry.isFolder)
+        {
+            ++result.folderCount;
+        }
+        else
+        {
+            ++result.fileCount;
+        }
+
+        result.entries.push_back(std::move(entry));
+    }
+    while (::FindNextFileW(findHandle, &findData));
+
+    ::FindClose(findHandle);
+
+    result.cancelled = cancelled;
+    result.hr        = S_OK;
+    return true;
+}
+
 EnumerateResult EnumerateFolder(const std::wstring& path,
                                 const core::CancellationToken* token)
 {
@@ -525,6 +727,25 @@ EnumerateResult EnumerateFolder(const std::wstring& path,
     // 父目录的绝对 PIDL（子项拼绝对 PIDL 用）。
     // 放在 try 外面是为了函数末尾统一释放——包括中途抛异常的情况。
     PIDLIST_ABSOLUTE folderPidl = nullptr;
+
+    // ------------------------------------------------------------------
+    // 快速通道：普通磁盘目录（不是压缩包、不是桌面这种合并视图）
+    //
+    // 放在 COM 初始化之后：这条路虽然不建 IShellFolder，但判断"系统项"时会问
+    // 系统已知文件夹（SHGetKnownFolderItem），没初始化 COM 会直接崩。
+    // 能用就直接返回，不建 IShellFolder、不逐项查属性，网络盘大目录省得最多。
+    // ------------------------------------------------------------------
+    if (!result.isContainer && IsFileSystemPath(path) && !IsTopDesktopPath(path))
+    {
+        if (TryEnumeratePlainDirectory(path, token, result))
+        {
+            if (needUninitialize)
+            {
+                ::CoUninitialize();
+            }
+            return result;
+        }
+    }
 
     try
     {
@@ -942,19 +1163,38 @@ bool KnownFolderDisplayName(const std::wstring& path, std::wstring& displayName)
         return false;
     }
 
-    for (const KNOWNFOLDERID* id : kKnownFolderIds)
+    struct CachedFolder
     {
-        std::wstring folderPath;
+        std::wstring path;
         std::wstring name;
+    };
 
-        if (!GetKnownFolderInfo(*id, folderPath, name))
+    // 已知文件夹的位置在运行期间不会变（用户改了位置要重启程序才生效），查一次缓存住。
+    // 列表里每个条目都要问一次"是不是桌面上的东西"，261 个文件就是 1800 多次，
+    // 不缓存的话这里比自己扫目录还贵。
+    static const std::vector<CachedFolder> cachedFolders = []
+    {
+        std::vector<CachedFolder> list;
+
+        for (const KNOWNFOLDERID* id : kKnownFolderIds)
         {
-            continue;
+            std::wstring folderPath;
+            std::wstring name;
+
+            if (GetKnownFolderInfo(*id, folderPath, name))
+            {
+                list.push_back(CachedFolder{ folderPath, name });
+            }
         }
 
-        if (::_wcsicmp(folderPath.c_str(), path.c_str()) == 0)
+        return list;
+    }();
+
+    for (const auto& folder : cachedFolders)
+    {
+        if (::_wcsicmp(folder.path.c_str(), path.c_str()) == 0)
         {
-            displayName = name;
+            displayName = folder.name;
             return true;
         }
     }

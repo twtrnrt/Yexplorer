@@ -98,6 +98,10 @@ static const UINT     kIconWarmDelayMs      = 1200;
 // 丢一条消息到队尾，等控件把状态提交完再算一次就准了。
 static const UINT WM_APP_SELECTION_CHANGED = WM_APP + 7;
 
+// 自定义消息：后台角标判定做完了，按路径把 overlayIndex 补到列表项上
+// （列表早就显示了，这条只是"补角标"；数据在 MainWindow::m_overlayUpdates / m_overlayPath）
+static const UINT WM_APP_OVERLAY_DONE = WM_APP + 8;
+
 // 起始路径
 static const wchar_t* kInitialPath = L"C:\\";
 
@@ -1543,6 +1547,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     // --------------------------------------------------------------
     case WM_APP_ENUM_DONE:
         OnEnumerationDone();
+        return 0;
+
+    // --------------------------------------------------------------
+    // 后台角标判定完成：列表已经在屏幕上，这里只补角标
+    // --------------------------------------------------------------
+    case WM_APP_OVERLAY_DONE:
+        OnOverlayDone();
         return 0;
 
     // --------------------------------------------------------------
@@ -3847,28 +3858,64 @@ void MainWindow::StartEnumeration(const std::wstring& path)
 
         auto enumResult = shell::EnumerateFolder(path, &m_enumToken);
 
-        // 同步状态角标判定：EnumerateFolder 返回前已配对 CoUninitialize，这里重新
-        // 初始化 STA 再问处理器；结果写进 entries.overlayIndex，UI 线程只取图标合成。
-        HRESULT overlayInit = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        shell::OverlayManager::Instance().Annotate(enumResult.entries);
-        if (overlayInit == S_OK || overlayInit == S_FALSE)
-        {
-            ::CoUninitialize();
-        }
+        const auto enumEndTime = std::chrono::steady_clock::now();
+        const long long enumMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            enumEndTime - startTime).count();
 
-        auto endTime = std::chrono::steady_clock::now();
-        double elapsedMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
-
+        // 先把枚举结果发回去显示：用户要的是"点开就有内容"，角标慢不能拖住列表。
+        // 这里必须复制一份交给 UI：UI 会按当前排序就地 std::sort 这份 entries，
+        // 而本线程接着还要往自己的 enumResult 里写 overlayIndex，共用会打架。
         {
             std::lock_guard<std::mutex> lock(m_resultMutex);
-            m_result      = std::make_shared<shell::EnumerateResult>(std::move(enumResult));
-            m_elapsedMs   = elapsedMs;
+            m_result      = std::make_shared<shell::EnumerateResult>(enumResult);
+            m_elapsedMs   = static_cast<double>(enumMs);
             m_resultReady = true;
         }
 
         if (hwnd != nullptr)
         {
             ::PostMessageW(hwnd, WM_APP_ENUM_DONE, 0, 0);
+        }
+
+        // ------------------------------------------------------------
+        // 列表已经在屏幕上了，这里再补同步状态角标（慢的部分）。
+        // 用户切走目录时 StartEnumeration 会 Cancel 令牌并 join 本线程，
+        // Annotate 内部逐条目检查取消，所以最多几十毫秒就能收手。
+        // ------------------------------------------------------------
+        HRESULT overlayInit = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        const auto overlayStart = std::chrono::steady_clock::now();
+        shell::OverlayManager::Instance().Annotate(enumResult.entries, &m_enumToken);
+        if (overlayInit == S_OK || overlayInit == S_FALSE)
+        {
+            ::CoUninitialize();
+        }
+
+        Logger::Info(L"[角标后台] " + std::to_wstring(enumResult.entries.size()) + L" 项判定" +
+                     (m_enumToken.IsCancelled() ? L"被取消" : L"完成") + L"，用时 " +
+                     std::to_wstring(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - overlayStart).count()) +
+                     L" ms（已先交给界面，不挡列表显示）");
+
+        // 把判定结果按完整路径打包，交给 UI 线程按路径套到列表项上
+        auto updates = std::make_shared<std::vector<std::pair<std::wstring, int>>>();
+        updates->reserve(enumResult.entries.size());
+        for (const auto& entry : enumResult.entries)
+        {
+            if (!entry.fullPath.empty())
+            {
+                updates->emplace_back(entry.fullPath, entry.overlayIndex);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_resultMutex);
+            m_overlayUpdates = std::move(updates);
+            m_overlayPath    = path;
+        }
+
+        if (hwnd != nullptr)
+        {
+            ::PostMessageW(hwnd, WM_APP_OVERLAY_DONE, 0, 0);
         }
     });
 }
@@ -7668,6 +7715,33 @@ void MainWindow::HandleTempRootEnumerationFailure(const std::wstring& missingPat
     }
 
     NavigateToPath(fallback);
+}
+
+// ============================================================================
+// 后台角标判定完成：列表已经在屏幕上，这里只补角标
+// ============================================================================
+
+void MainWindow::OnOverlayDone()
+{
+    std::shared_ptr<std::vector<std::pair<std::wstring, int>>> updates;
+    std::wstring                                               path;
+
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        updates = std::move(m_overlayUpdates);
+        path    = m_overlayPath;
+        m_overlayUpdates.reset();
+        m_overlayPath.clear();
+    }
+
+    if (updates == nullptr)
+    {
+        return;
+    }
+
+    // 传给列表控件时它自己会核对「当前显示目录是不是这批结果对应的目录」，
+    // 用户已切走就整批丢掉（角标晚到没关系，不能贴错）。
+    m_fileListView.ApplyOverlayIndices(path, *updates);
 }
 
 void MainWindow::OnEnumerationDone()

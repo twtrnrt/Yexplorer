@@ -20,6 +20,7 @@
 #include <vssym32.h>  // 主题部件、状态、属性常量（LVP_LISTITEM、LISS_SELECTED、TMT_TEXTCOLOR）
 #include <algorithm>
 #include <cwctype>   // towlower
+#include <unordered_map>   // 角标补齐时按路径找行号
 
 #pragma comment(lib, "uxtheme.lib")
 
@@ -1323,6 +1324,65 @@ void FileListView::MergeResult(std::shared_ptr<shell::EnumerateResult> result)
         // 是"删掉了尾巴"，重画最后几行让空白区补上
         int from = (std::max)(0, newCount - 1);
         ListView_RedrawItems(m_hWnd, from, newCount - 1);
+        ::UpdateWindow(m_hWnd);
+    }
+}
+
+// ============================================================================
+// 后台角标补齐
+// ============================================================================
+
+void FileListView::ApplyOverlayIndices(const std::wstring& path,
+                                       const std::vector<std::pair<std::wstring, int>>& updates)
+{
+    // 数据还没到 / 用户已经切到别的目录：这批结果作废（不能把 A 目录的角标贴到 B 目录）
+    if (m_result == nullptr || updates.empty() ||
+        _wcsicmp(m_result->path.c_str(), path.c_str()) != 0)
+    {
+        return;
+    }
+
+    // 路径 → 行号。判定结果是按枚举顺序给的，界面这份已经按用户点的排序重排过，
+    // 所以只能按完整路径对回来，不能按下标对。
+    std::unordered_map<std::wstring, size_t> indexByPath;
+    indexByPath.reserve(m_result->entries.size());
+    for (size_t i = 0; i < m_result->entries.size(); ++i)
+    {
+        const std::wstring& fullPath = m_result->entries[i].fullPath;
+        if (fullPath.empty())
+        {
+            continue;
+        }
+        std::wstring lowered = fullPath;
+        ::_wcslwr_s(lowered.data(), lowered.size() + 1);
+        indexByPath.emplace(std::move(lowered), i);
+    }
+
+    bool changed = false;
+    for (const auto& [fullPath, overlayIndex] : updates)
+    {
+        std::wstring lowered = fullPath;
+        ::_wcslwr_s(lowered.data(), lowered.size() + 1);
+
+        auto found = indexByPath.find(lowered);
+        if (found == indexByPath.end())
+        {
+            continue;   // 判定期间这一项被删了/改名了：跳过
+        }
+
+        shell::ShellEntry& entry = m_result->entries[found->second];
+        if (entry.overlayIndex != overlayIndex)
+        {
+            entry.overlayIndex = overlayIndex;
+            changed = true;
+        }
+    }
+
+    // 只重画有变化的那几行没必要逐个挑：角标是整批到的，一次全刷也就几百行，
+    // 而且用户此刻多半正在等角标出现，视觉上刚好是"角标一起出来"。
+    if (changed && m_hWnd != nullptr && !m_result->entries.empty())
+    {
+        ListView_RedrawItems(m_hWnd, 0, static_cast<int>(m_result->entries.size()) - 1);
         ::UpdateWindow(m_hWnd);
     }
 }

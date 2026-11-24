@@ -511,6 +511,9 @@ void AddPinnedItems(const std::vector<std::wstring>& sources);
     // 后台枚举完成
     void OnEnumerationDone();
 
+    // 后台角标判定完成：按路径把 overlayIndex 补到当前列表项上（列表可能已换目录，需核对）
+    void OnOverlayDone();
+
     // Shell 窗口集成（实验性，默认关）：按设置注册/注销
     void SyncShellWindowRegistration();
 
@@ -828,6 +831,11 @@ private:
     bool                                         m_resultReady = false;
     double                                       m_elapsedMs   = 0.0;
     std::wstring                                 m_enumPath;
+
+    // 后台角标判定结果（枚举线程打包、UI 线程取走）：路径 → overlayIndex
+    // 和 m_result 一样由 m_resultMutex 保护
+    std::shared_ptr<std::vector<std::pair<std::wstring, int>>> m_overlayUpdates;
+    std::wstring                                 m_overlayPath;
 
     // ---- 当前窗口标题 ----
     // 记一份，只在标题真的变了才去设置：

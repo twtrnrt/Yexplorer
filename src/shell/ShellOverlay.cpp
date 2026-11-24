@@ -691,10 +691,12 @@ void OverlayManager::WorkerLoop()
         {
             TaskKind kind = TaskKind::Annotate;
             std::vector<ShellEntry>* entries = nullptr;
+            const core::CancellationToken* token = nullptr;
             {
                 std::lock_guard<std::mutex> lock(m_taskMutex);
                 kind    = m_taskKind;
                 entries = m_taskEntries;
+                token   = m_taskToken;
             }
 
             if (kind == TaskKind::Shutdown)
@@ -703,7 +705,7 @@ void OverlayManager::WorkerLoop()
             }
             else if (entries != nullptr)
             {
-                RunAnnotateOnWorker(*entries);
+                RunAnnotateOnWorker(*entries, token);
             }
 
             // 手动重置事件：保持置位，等下一次投递前由投递方 ResetEvent
@@ -719,7 +721,8 @@ void OverlayManager::WorkerLoop()
     m_workerThreadId = 0;
 }
 
-void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries)
+void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries,
+                                     const core::CancellationToken* token)
 {
     // 同一时刻只允许一个任务在飞：枚举线程的 Annotate 与 UI 线程的 Shutdown
     // 可能并发，撞车会互相覆盖任务字段
@@ -731,7 +734,7 @@ void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* ent
         // 行为退化成加固前，但功能不丢
         if (kind == TaskKind::Annotate && entries != nullptr)
         {
-            RunAnnotateOnWorker(*entries);
+            RunAnnotateOnWorker(*entries, token);
         }
         else
         {
@@ -744,6 +747,7 @@ void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* ent
         std::lock_guard<std::mutex> lock(m_taskMutex);
         m_taskKind    = kind;
         m_taskEntries = entries;
+        m_taskToken   = token;
     }
 
     ::ResetEvent(m_doneEvent);
@@ -756,6 +760,7 @@ void OverlayManager::PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* ent
     {
         std::lock_guard<std::mutex> lock(m_taskMutex);
         m_taskEntries = nullptr;
+        m_taskToken   = nullptr;
     }
 }
 
@@ -1135,7 +1140,8 @@ void OverlayManager::NoteHandlerSuccess(size_t index)
     }
 }
 
-void OverlayManager::Annotate(std::vector<ShellEntry>& entries)
+void OverlayManager::Annotate(std::vector<ShellEntry>& entries,
+                              const core::CancellationToken* token)
 {
     if (!core::Settings::Instance().OverlayEnabled())
     {
@@ -1145,10 +1151,11 @@ void OverlayManager::Annotate(std::vector<ShellEntry>& entries)
     // 真正的判定与处理器懒加载 / 实例化全部投递到常驻 STA 线程执行，
     // 这里同步等结果。调用方（后台枚举线程）在等待期间不会碰 entries，
     // 两边靠完成事件建立先后关系，不会出现数据竞争。
-    PostTaskAndWait(TaskKind::Annotate, &entries);
+    PostTaskAndWait(TaskKind::Annotate, &entries, token);
 }
 
-void OverlayManager::RunAnnotateOnWorker(std::vector<ShellEntry>& entries)
+void OverlayManager::RunAnnotateOnWorker(std::vector<ShellEntry>& entries,
+                                         const core::CancellationToken* token)
 {
     // 只允许在常驻 STA 线程执行：处理器 COM 对象全部由这根线程持有
     EnsureLoaded();
@@ -1156,6 +1163,12 @@ void OverlayManager::RunAnnotateOnWorker(std::vector<ShellEntry>& entries)
 
     for (ShellEntry& entry : entries)
     {
+        // 用户已经在看别的目录：尽快收手，别让下一次枚举干等这根线程
+        if (token != nullptr && token->IsCancelled())
+        {
+            break;
+        }
+
         if (entry.isGroupHeader || entry.isSpacer)
         {
             entry.overlayIndex = -1;

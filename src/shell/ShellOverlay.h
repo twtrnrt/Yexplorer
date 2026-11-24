@@ -31,6 +31,7 @@
 
 #include "ShellFolder.h"       // ShellEntry
 #include "../core/Settings.h"  // core::OverlaySet
+#include "../core/AsyncTask.h" // core::CancellationToken
 
 namespace shell
 {
@@ -97,8 +98,11 @@ public:
     // 对条目列表做角标判定，把命中处理器下标写进 ShellEntry::overlayIndex。
     // 可在任意线程调用：内部把任务投递到常驻 STA 线程执行并同步等结果；
     // 等待期间调用方不要再碰 entries。
+    //
+    // token 不为空时，判定过程中逐条目检查取消：一旦取消就立刻停手，
+    // 剩下的条目保持 overlayIndex = -1（用户切走目录时不必等这批判定跑完）。
     // ------------------------------------------------------------------
-    void Annotate(std::vector<ShellEntry>& entries);
+    void Annotate(std::vector<ShellEntry>& entries, const core::CancellationToken* token = nullptr);
 
     // 启用处理器列表（按优先级 + 配置顺序）。当前仅供调试查看；
     // 合成阶段请走 GetOverlayIcon（内部加锁），直接持有这个引用会在
@@ -171,8 +175,10 @@ private:
     bool StartWorkerThread();                 // 懒启动常驻线程，重复调用安全；失败返回 false
     void StopWorkerThread();                  // 请求退出并 join
     void WorkerLoop();                        // 常驻线程主循环（内部自己 CoInitializeEx）
-    void PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries);
-    void RunAnnotateOnWorker(std::vector<ShellEntry>& entries);  // 只允许在常驻线程执行
+    void PostTaskAndWait(TaskKind kind, std::vector<ShellEntry>* entries,
+                         const core::CancellationToken* token = nullptr);
+    // 只允许在常驻线程执行；token 非空时逐条目检查取消
+    void RunAnnotateOnWorker(std::vector<ShellEntry>& entries, const core::CancellationToken* token);
     void RunShutdownOnWorker();                                  // 只允许在常驻线程执行
 
     bool m_loaded = false;
@@ -190,9 +196,10 @@ private:
     HANDLE m_stopEvent = nullptr;            // 手动重置事件：请求常驻线程退出
     HANDLE m_doneEvent = nullptr;            // 手动重置事件：当前任务已执行完毕
 
-    std::mutex m_taskMutex;                  // 保护下面两个任务字段
+    std::mutex m_taskMutex;                  // 保护下面三个任务字段
     TaskKind   m_taskKind = TaskKind::Annotate;
     std::vector<ShellEntry>* m_taskEntries = nullptr;   // Annotate 任务的目标列表
+    const core::CancellationToken* m_taskToken = nullptr; // Annotate 任务的取消令牌（可空）
 
     // 串行化「投递 + 等待」整个过程：枚举线程投递 Annotate、UI 线程投递 Shutdown
     // 有可能撞在一起，同一时刻只允许一个任务在飞。worker 线程不取这把锁，
