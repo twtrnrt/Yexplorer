@@ -6,8 +6,11 @@
 // ============================================================================
 
 #include "ShellIcon.h"
+#include "core/Logger.h"
 
+#include <cstring>
 #include <cwctype>
+#include <vector>
 #include <shlobj.h>      // SHParseDisplayName（虚拟项取图标要靠它换成 PIDL）
 #include <shlwapi.h>
 
@@ -70,6 +73,185 @@ int QueryFolderIconIndex(bool large)
     return fileInfo.iIcon;
 }
 
+// ----------------------------------------------------------------------------
+// 把 HICON 拆成 32 位 BGRA 像素（落盘用）
+//
+// 图标里真正决定外观的是颜色位图，透明靠 alpha 通道。
+// 有些老图标只有 24 位色（没有 alpha），这时用它的 1 位掩码反推 alpha，
+// 免得存下来的图变成"整块不透明"。
+// ----------------------------------------------------------------------------
+bool ExtractIconBits(HICON icon, std::vector<BYTE>& pixels, int& width, int& height)
+{
+    if (icon == nullptr)
+    {
+        return false;
+    }
+
+    ICONINFO info = {};
+    if (!::GetIconInfo(icon, &info))
+    {
+        return false;
+    }
+
+    const auto cleanup = [&info]()
+    {
+        if (info.hbmColor != nullptr) { ::DeleteObject(info.hbmColor); }
+        if (info.hbmMask  != nullptr) { ::DeleteObject(info.hbmMask);  }
+    };
+
+    if (info.hbmColor == nullptr)
+    {
+        cleanup();
+        return false;
+    }
+
+    BITMAP bitmap = {};
+    if (::GetObjectW(info.hbmColor, sizeof(bitmap), &bitmap) == 0)
+    {
+        cleanup();
+        return false;
+    }
+
+    width  = bitmap.bmWidth;
+    height = bitmap.bmHeight;
+
+    // 图标最大就到 256；超过这个范围的当作异常数据，不存
+    if (width <= 0 || height <= 0 || width > 256 || height > 256)
+    {
+        cleanup();
+        return false;
+    }
+
+    // 负高度 = 自上而下存，和屏幕显示顺序一致，省得后面又要翻
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth       = width;
+    bitmapInfo.bmiHeader.biHeight      = -height;
+    bitmapInfo.bmiHeader.biPlanes      = 1;
+    bitmapInfo.bmiHeader.biBitCount    = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    pixels.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
+
+    HDC screenDc = ::GetDC(nullptr);
+    const int lines = ::GetDIBits(screenDc, info.hbmColor, 0, height,
+                                  pixels.data(), &bitmapInfo, DIB_RGB_COLORS);
+    ::ReleaseDC(nullptr, screenDc);
+
+    if (lines == 0)
+    {
+        cleanup();
+        pixels.clear();
+        return false;
+    }
+
+    // 先看有没有 alpha
+    bool hasAlpha = false;
+    for (size_t index = 3; index < pixels.size(); index += 4)
+    {
+        if (pixels[index] != 0)
+        {
+            hasAlpha = true;
+            break;
+        }
+    }
+
+    if (!hasAlpha && info.hbmMask != nullptr)
+    {
+        // 掩码是 1 位：1 = 透明，0 = 不透明
+        const int maskStride = ((width + 31) / 32) * 4;
+        std::vector<BYTE> mask(static_cast<size_t>(maskStride) * static_cast<size_t>(height), 0);
+
+        BITMAPINFO maskInfo = {};
+        maskInfo.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        maskInfo.bmiHeader.biWidth       = width;
+        maskInfo.bmiHeader.biHeight      = -height;
+        maskInfo.bmiHeader.biPlanes      = 1;
+        maskInfo.bmiHeader.biBitCount    = 1;
+        maskInfo.bmiHeader.biCompression = BI_RGB;
+        maskInfo.bmiColors[0].rgbBlue = 0;
+        maskInfo.bmiColors[0].rgbGreen = 0;
+        maskInfo.bmiColors[0].rgbRed = 0;
+        maskInfo.bmiColors[0].rgbReserved = 0;
+        maskInfo.bmiColors[1].rgbBlue = 255;
+        maskInfo.bmiColors[1].rgbGreen = 255;
+        maskInfo.bmiColors[1].rgbRed = 255;
+        maskInfo.bmiColors[1].rgbReserved = 0;
+
+        HDC maskDc = ::GetDC(nullptr);
+        ::GetDIBits(maskDc, info.hbmMask, 0, height, mask.data(), &maskInfo, DIB_RGB_COLORS);
+        ::ReleaseDC(nullptr, maskDc);
+
+        for (int y = 0; y < height; ++y)
+        {
+            const BYTE* row = mask.data() + static_cast<size_t>(maskStride) * y;
+            for (int x = 0; x < width; ++x)
+            {
+                const bool transparent = ((row[x / 8] >> (7 - (x % 8))) & 1) != 0;
+                pixels[(static_cast<size_t>(y) * width + x) * 4 + 3] = transparent ? 0 : 255;
+            }
+        }
+    }
+    else if (!hasAlpha)
+    {
+        // 连掩码都没有：当作不透明
+        for (size_t index = 3; index < pixels.size(); index += 4)
+        {
+            pixels[index] = 255;
+        }
+    }
+
+    cleanup();
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// 把存盘的像素还原成 HICON（透明度靠 alpha，掩码给全 0）
+// ----------------------------------------------------------------------------
+HICON CreateIconFromBits(int width, int height, const std::vector<BYTE>& pixels)
+{
+    if (width <= 0 || height <= 0 ||
+        pixels.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
+    {
+        return nullptr;
+    }
+
+    BITMAPINFO colorInfo = {};
+    colorInfo.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    colorInfo.bmiHeader.biWidth       = width;
+    colorInfo.bmiHeader.biHeight      = -height;
+    colorInfo.bmiHeader.biPlanes      = 1;
+    colorInfo.bmiHeader.biBitCount    = 32;
+    colorInfo.bmiHeader.biCompression = BI_RGB;
+
+    void*   colorBits = nullptr;
+    HBITMAP colorBitmap = ::CreateDIBSection(nullptr, &colorInfo, DIB_RGB_COLORS,
+                                             &colorBits, nullptr, 0);
+    if (colorBitmap == nullptr || colorBits == nullptr)
+    {
+        if (colorBitmap != nullptr) { ::DeleteObject(colorBitmap); }
+        return nullptr;
+    }
+    std::memcpy(colorBits, pixels.data(), pixels.size());
+
+    // 掩码给全 0（不透明）：透明像素靠 alpha = 0 藏起来，ImageList 走 ILC_COLOR32 认 alpha
+    const int maskStride = ((width + 15) / 16) * 2;   // CreateBitmap 的 1 位位图按 2 字节对齐
+    std::vector<BYTE> maskBits(static_cast<size_t>(maskStride) * static_cast<size_t>(height), 0);
+    HBITMAP maskBitmap = ::CreateBitmap(width, height, 1, 1, maskBits.data());
+
+    ICONINFO info = {};
+    info.fIcon    = TRUE;
+    info.hbmColor = colorBitmap;
+    info.hbmMask  = maskBitmap;
+
+    HICON icon = ::CreateIconIndirect(&info);
+
+    ::DeleteObject(colorBitmap);
+    if (maskBitmap != nullptr) { ::DeleteObject(maskBitmap); }
+
+    return icon;
+}
+
 } // namespace
 
 namespace shell
@@ -79,6 +261,14 @@ IconCache::IconCache() = default;
 
 IconCache::~IconCache()
 {
+    // 退出时打一条统计：验证"第二次打开走磁盘、不再读源文件"靠它
+    if (m_diskCache != nullptr)
+    {
+        Logger::Info(L"图标磁盘缓存统计：命中 " + std::to_wstring(m_diskCache->HitCount()) +
+                     L" 次，未命中 " + std::to_wstring(m_diskCache->MissCount()) +
+                     L" 次，本次新增约 " + std::to_wstring(m_diskCache->CurrentBytes() / 1024) + L" KB");
+    }
+
     // m_systemImageList / m_mediumSystemImageList / m_largeSystemImageList 由 wil::com_ptr 自动释放
     m_hImageList       = nullptr;
     m_hMediumImageList = nullptr;
@@ -121,6 +311,14 @@ bool IconCache::Initialize()
     // 文件夹图标只查一次，之后所有文件夹共用
     m_folderIconIndex      = QueryFolderIconIndex(false);
     m_largeFolderIconIndex = QueryFolderIconIndex(true);
+
+    // 磁盘成品缓存：exe/lnk 这类"必须读文件"的图标，第一次挖出来后存成小图，
+    // 以后直接读小图，不再碰源文件（资源管理器不卡就是靠这一层）
+    m_diskCache = std::make_unique<IconDiskCache>();
+    if (!m_diskCache->Initialize(L"icons", 32LL * 1024 * 1024))
+    {
+        m_diskCache.reset();    // 建不出目录就退回"不缓存"，功能不受影响
+    }
 
     m_initialized = true;
     return true;
@@ -207,15 +405,13 @@ int IconCache::GetIconIndexByPath(const std::wstring& path, IconSize size)
 // 结果按路径缓存，同一个文件只问一次。
 // ============================================================================
 
-int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size)
+int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size,
+                                      unsigned long long fileSize, FILETIME modified)
 {
     if (!m_initialized || path.empty())
     {
         return 0;
     }
-
-    // Small 用 16px 那套；Medium(32) 和 Large(48) 共用大图标那套查询与索引
-    const bool large = (size != IconSize::Small);
 
     // 「C:」这种光秃秃的盘符要补成「C:\」：不补的话系统会把它当成"当前目录"，
     // 取回来的不是驱动器图标
@@ -225,7 +421,82 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size)
         normalized += L'\\';
     }
 
-    auto& cache = large ? m_largePathIconCache : m_pathIconCache;
+    // Small 走 16px；Medium(32) / Large(48) 走大图标那套查询。
+    // 磁盘缓存只服务 Small / Large：Medium 只有「打开方式」窗口用，量很小，
+    // 而且它的 32px 索引和 48px 索引不一定同一套，单独缓存更稳。
+    const bool  medium   = (size == IconSize::Medium);
+    const bool  large    = (size == IconSize::Large);
+    const DWORD sizeFlag = (medium || large) ? SHGFI_LARGEICON : SHGFI_SMALLICON;
+
+    const bool isShellNamespace = (normalized.compare(0, 2, L"::") == 0) ||
+                                  (normalized.compare(0, 6, L"shell:") == 0);
+
+    // 只有"真实文件 + 带大小和修改时间"才走磁盘缓存。
+    // 这两个值列表枚举时已经有了，直接传进来，省掉一次属性查询；
+    // 文件被替换（大小或时间变了）时 key 跟着变，图标自动更新。
+    const bool hasIdentity = (modified.dwLowDateTime != 0 || modified.dwHighDateTime != 0);
+    const bool useDisk = (m_diskCache != nullptr) && hasIdentity && !medium && !isShellNamespace;
+
+    if (useDisk)
+    {
+        const std::wstring key = BuildDiskKey(normalized, size, fileSize, modified);
+
+        auto memory = m_diskIndexCache.find(key);
+        if (memory != m_diskIndexCache.end())
+        {
+            return memory->second;      // 本次运行已经取过，连磁盘都不用读
+        }
+
+        if (m_diskNegativeKeys.find(key) != m_diskNegativeKeys.end())
+        {
+            return 0;                   // 确认取不到（例如 exe 里压根没有图标资源）
+        }
+
+        const int diskIndex = LoadIconFromDisk(key, size);
+        if (diskIndex >= 0)
+        {
+            m_diskIndexCache[key] = diskIndex;
+            return diskIndex;
+        }
+        if (diskIndex == -2)
+        {
+            m_diskNegativeKeys.insert(key);
+            return 0;
+        }
+
+        // 磁盘没有 → 真正去问系统（这一步会读文件，是最贵的）
+        SHFILEINFOW fileInfo = {};
+        DWORD_PTR result = ::SHGetFileInfoW(normalized.c_str(),
+                                            0,
+                                            &fileInfo,
+                                            sizeof(fileInfo),
+                                            SHGFI_SYSICONINDEX | SHGFI_ICON | sizeFlag);
+
+        int iconIndex = 0;
+        if (result != 0 && fileInfo.hIcon != nullptr)
+        {
+            iconIndex = fileInfo.iIcon;
+
+            // 顺手把图标转成像素存盘：下次（包括重启程序以后）不再读这个文件
+            SaveIconToDisk(key, fileInfo.hIcon);
+            ::DestroyIcon(fileInfo.hIcon);
+        }
+        else
+        {
+            // 确定取不到：记负缓存，避免每次打开目录都重试
+            IconDiskCache::Entry negativeEntry;
+            negativeEntry.negative = true;
+            m_diskCache->Save(IconDiskCache::Kind::Icon, key, negativeEntry);
+            m_diskNegativeKeys.insert(key);
+        }
+
+        m_diskIndexCache[key] = iconIndex;
+        return iconIndex;
+    }
+
+    // ---- 旧逻辑（中图标 / 没有大小时间 / Shell 命名空间虚拟项）----
+    auto& cache = medium ? m_mediumPathIconCache
+                         : (large ? m_largePathIconCache : m_pathIconCache);
 
     auto cached = cache.find(normalized);
     if (cached != cache.end())
@@ -234,15 +505,11 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size)
     }
 
     int iconIndex = 0;
-    const DWORD sizeFlag = large ? SHGFI_LARGEICON : SHGFI_SMALLICON;
 
     // Shell 命名空间里的虚拟项（「::{GUID}…」「shell:…」这种解析名）
     // 千万不能直接把字符串丢给 SHGetFileInfo：实测它一律返回 0，
     // 结果就是主文件夹 / 控制面板 / 网络 / 回收站全都显示成普通黄色文件夹。
     // 正确做法是先 SHParseDisplayName 换成 PIDL，再用 SHGFI_PIDL 问图标。
-    const bool isShellNamespace = (normalized.compare(0, 2, L"::") == 0) ||
-                                  (normalized.compare(0, 6, L"shell:") == 0);
-
     if (isShellNamespace)
     {
         PIDLIST_ABSOLUTE pidl = nullptr;
@@ -283,6 +550,114 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size)
 
     cache[normalized] = iconIndex;
     return iconIndex;
+}
+
+// ============================================================================
+// 磁盘缓存：key 组装、读入、落盘
+// ============================================================================
+
+std::wstring IconCache::Lowercase(std::wstring text)
+{
+    for (auto& character : text)
+    {
+        character = static_cast<wchar_t>(::towlower(character));
+    }
+    return text;
+}
+
+std::wstring IconCache::BuildDiskKey(const std::wstring& path, IconSize size,
+                                     unsigned long long fileSize, const FILETIME& modified) const
+{
+    const unsigned long long stamp =
+        (static_cast<unsigned long long>(modified.dwHighDateTime) << 32) |
+        static_cast<unsigned long long>(modified.dwLowDateTime);
+
+    const int side = (size == IconSize::Large) ? 48 : 16;
+
+    wchar_t stampText[17] = {};
+    ::swprintf_s(stampText, L"%016llx", stamp);
+
+    std::wstring key = L"file|";
+    key += Lowercase(path);
+    key += L"|" + std::to_wstring(fileSize);
+    key += L"|" + std::wstring(stampText);
+    key += L"|" + std::to_wstring(side) + L"x" + std::to_wstring(side);
+    key += L"|v1";
+    return key;
+}
+
+HIMAGELIST IconCache::TargetImageList(IconSize size) const
+{
+    if (size == IconSize::Large)
+    {
+        return m_hLargeImageList;
+    }
+    if (size == IconSize::Medium)
+    {
+        return m_hMediumImageList;
+    }
+    return m_hImageList;
+}
+
+int IconCache::LoadIconFromDisk(const std::wstring& key, IconSize size)
+{
+    if (m_diskCache == nullptr)
+    {
+        return -1;
+    }
+
+    IconDiskCache::Entry entry;
+    if (!m_diskCache->Load(IconDiskCache::Kind::Icon, key, entry))
+    {
+        return -1;
+    }
+
+    if (entry.negative)
+    {
+        return -2;
+    }
+
+    HICON icon = CreateIconFromBits(entry.width, entry.height, entry.pixels);
+    if (icon == nullptr)
+    {
+        return -1;
+    }
+
+    HIMAGELIST target = TargetImageList(size);
+    if (target == nullptr)
+    {
+        ::DestroyIcon(icon);
+        return -1;
+    }
+
+    // 追加进图像列表拿索引（-1 表示"不替换，直接加一个"）
+    const int index = ::ImageList_ReplaceIcon(target, -1, icon);
+    ::DestroyIcon(icon);
+
+    return (index >= 0) ? index : -1;
+}
+
+void IconCache::SaveIconToDisk(const std::wstring& key, HICON icon)
+{
+    if (m_diskCache == nullptr || icon == nullptr)
+    {
+        return;
+    }
+
+    std::vector<BYTE> pixels;
+    int width  = 0;
+    int height = 0;
+    if (!ExtractIconBits(icon, pixels, width, height))
+    {
+        return;
+    }
+
+    IconDiskCache::Entry entry;
+    entry.width  = width;
+    entry.height = height;
+    entry.pixels = std::move(pixels);
+
+    m_diskCache->Save(IconDiskCache::Kind::Icon, key, entry);
 }
 
 // ============================================================================

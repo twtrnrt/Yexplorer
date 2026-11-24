@@ -24,9 +24,13 @@
 #include <commoncontrols.h> // IImageList / SHGetImageList
 #include <wil/com.h>
 
+#include <memory>
 #include <string>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
+
+#include "IconDiskCache.h"  // 磁盘成品缓存（exe/lnk 这类图标的落盘层）
 
 namespace shell
 {
@@ -115,8 +119,14 @@ public:
     //
     // 代价：每个条目一次 shell 查询（系统有图标缓存，通常零点几毫秒），
     //       所以只在"可见行需要画图标"时才会调用，并且结果按路径缓存。
+    //
+    // fileSize / modified —— 文件大小和修改时间（列表枚举时已经有，直接传进来，
+    //                       省掉一次属性查询）。带上这两个值才会启用磁盘缓存：
+    //                       文件被替换（大小或时间变了）时 key 自动变，图标跟着更新。
     // ------------------------------------------------------------------
-    int GetIconIndexByFullPath(const std::wstring& path, IconSize size = IconSize::Small);
+    int GetIconIndexByFullPath(const std::wstring& path, IconSize size = IconSize::Small,
+                               unsigned long long fileSize = 0,
+                               FILETIME modified = {});
 
     // ------------------------------------------------------------------
     // 按「绝对 PIDL」取图标
@@ -148,6 +158,25 @@ public:
     int GetCompositeIconIndex(int baseIndex, HICON overlay, IconSize size = IconSize::Small);
 
 private:
+    // ---- 磁盘缓存（只服务 exe/lnk 这类"必须读文件"的图标）----
+
+    // 统一小写：缓存 key 里的路径必须大小写无关（同一个文件不应存两份）
+    static std::wstring Lowercase(std::wstring text);
+
+    // 组装缓存 key：路径 + 文件大小 + 修改时间 + 边长 + 版本
+    std::wstring BuildDiskKey(const std::wstring& path, IconSize size,
+                              unsigned long long fileSize, const FILETIME& modified) const;
+
+    // 该尺寸的图标往哪张图像列表里追加
+    HIMAGELIST TargetImageList(IconSize size) const;
+
+    // 从磁盘读一条并塞进图像列表：
+    //   返回 -1 表示没命中（调用方去问系统），-2 表示负缓存（确定取不到），>=0 是索引
+    int LoadIconFromDisk(const std::wstring& key, IconSize size);
+
+    // 把刚挖出来的图标转成像素存盘（失败只影响下次还得重取）
+    void SaveIconToDisk(const std::wstring& key, HICON icon);
+
     // 从名称里提取扩展名（小写，含点号，如 ".dll"；没有扩展名返回空串）
     static std::wstring ExtractExtension(const std::wstring& name);
 
@@ -169,7 +198,14 @@ private:
     std::unordered_map<std::wstring, int> m_extensionIconCache;       // 扩展名 → 小图标索引
     std::unordered_map<std::wstring, int> m_largeExtensionIconCache;  // 扩展名 → 大图标索引
     std::unordered_map<std::wstring, int> m_pathIconCache;            // 完整路径 → 小图标索引
+    std::unordered_map<std::wstring, int> m_mediumPathIconCache;      // 完整路径 → 中图标索引（和大小图标分开）
     std::unordered_map<std::wstring, int> m_largePathIconCache;       // 完整路径 → 大图标索引
+
+    // 磁盘缓存：key（路径+大小+时间+边长）→ 图像列表索引
+    // 这个索引是本进程追加进图像列表时拿到的，重启后失效，所以内存表只活在本次运行
+    std::map<std::wstring, int>                m_diskIndexCache;
+    std::unordered_set<std::wstring>           m_diskNegativeKeys;    // 确认取不到的 key，不再重试
+    std::unique_ptr<IconDiskCache>             m_diskCache;
     std::unordered_map<int, int>          m_dimmedIconCache;          // 小图标原索引 → 半透明索引
     std::unordered_map<int, int>          m_largeDimmedIconCache;     // 大图标原索引 → 半透明索引
     std::map<std::pair<int, const void*>, int> m_overlayCompositeCache;      // 小：(主索引, overlay) → 合成索引

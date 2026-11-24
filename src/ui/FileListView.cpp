@@ -680,7 +680,8 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
 
             if (isDriveLetter || isShellItem)
             {
-                iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize);
+                iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize,
+                                                                entry.size, entry.modified);
                 if (iconIndex <= 0)
                 {
                     iconIndex = m_iconCache->GetIconIndex(entry.name, true, iconSize);
@@ -693,7 +694,8 @@ int FileListView::IconIndexForEntry(const shell::ShellEntry& entry) const
         }
         else if (NeedsOwnIcon(entry.name))
         {
-            iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize);
+            iconIndex = m_iconCache->GetIconIndexByFullPath(entry.fullPath, iconSize,
+                                                            entry.size, entry.modified);
             if (iconIndex <= 0)
             {
                 // 读不出图标（被占用、权限不足等）时退回按扩展名
