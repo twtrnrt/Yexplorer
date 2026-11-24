@@ -206,6 +206,10 @@ private:
     std::map<std::wstring, int>                m_diskIndexCache;
     std::unordered_set<std::wstring>           m_diskNegativeKeys;    // 确认取不到的 key，不再重试
     std::unique_ptr<IconDiskCache>             m_diskCache;
+
+    // 诊断：真正去系统"挖图标"的次数和合计耗时（验证磁盘缓存的收益靠它们）
+    long long m_extractCount   = 0;
+    long long m_extractTotalMs = 0;
     std::unordered_map<int, int>          m_dimmedIconCache;          // 小图标原索引 → 半透明索引
     std::unordered_map<int, int>          m_largeDimmedIconCache;     // 大图标原索引 → 半透明索引
     std::map<std::pair<int, const void*>, int> m_overlayCompositeCache;      // 小：(主索引, overlay) → 合成索引

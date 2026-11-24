@@ -9,6 +9,7 @@
 #include "core/Logger.h"
 
 #include <cstring>
+#include <chrono>
 #include <cwctype>
 #include <vector>
 #include <shlobj.h>      // SHParseDisplayName（虚拟项取图标要靠它换成 PIDL）
@@ -267,6 +268,12 @@ IconCache::~IconCache()
         Logger::Info(L"图标磁盘缓存统计：命中 " + std::to_wstring(m_diskCache->HitCount()) +
                      L" 次，未命中 " + std::to_wstring(m_diskCache->MissCount()) +
                      L" 次，本次新增约 " + std::to_wstring(m_diskCache->CurrentBytes() / 1024) + L" KB");
+
+        // 真去系统挖图标的次数和总耗时：第一次打开目录的"卡"花在哪，看这条
+        long long averageMs = (m_extractCount > 0) ? (m_extractTotalMs / m_extractCount) : 0;
+        Logger::Info(L"图标提取：去系统挖 " + std::to_wstring(m_extractCount) +
+                     L" 次，合计 " + std::to_wstring(m_extractTotalMs) +
+                     L" ms（平均 " + std::to_wstring(averageMs) + L" ms/次）");
     }
 
     // m_systemImageList / m_mediumSystemImageList / m_largeSystemImageList 由 wil::com_ptr 自动释放
@@ -465,12 +472,19 @@ int IconCache::GetIconIndexByFullPath(const std::wstring& path, IconSize size,
         }
 
         // 磁盘没有 → 真正去问系统（这一步会读文件，是最贵的）
-        SHFILEINFOW fileInfo = {};
+        const auto      extractStart = std::chrono::steady_clock::now();
+        SHFILEINFOW     fileInfo = {};
         DWORD_PTR result = ::SHGetFileInfoW(normalized.c_str(),
                                             0,
                                             &fileInfo,
                                             sizeof(fileInfo),
                                             SHGFI_SYSICONINDEX | SHGFI_ICON | sizeFlag);
+        const long long extractMs = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - extractStart).count());
+
+        ++m_extractCount;
+        m_extractTotalMs += extractMs;
 
         int iconIndex = 0;
         if (result != 0 && fileInfo.hIcon != nullptr)
