@@ -18,3 +18,6 @@
   2026-11-23 就因此把一条文档提交落到了 `feature/menu-config` 上（事后用 revert 收拾）。提交前还要看一眼
   `git status --short`：**工作区出现不是自己改的 `M` 文件，说明有人在里面干活，此时不要切分支、不要 reset**；
 - 测试会读写 `%APPDATA%\FileExplorer\settings.json`：先备份，测完还原。
+- **构建目录按分支隔离**：`bin\x64\Release`、`bin\x64\Debug` 只给 master 发布/主分支构建；功能分支必须显式传
+  `/p:OutDir=<仓库>\bin\<分支名>\Release\`、`/p:IntDir=<仓库>\obj\<分支名>\Release\`（Debug 同理），
+  绝不沿用默认 `bin\x64`。
