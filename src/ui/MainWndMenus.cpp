@@ -15,7 +15,9 @@
 
 #include "core/Logger.h"
 #include "core/Settings.h"
+#include "shell/ActionRunner.h"
 #include "shell/ShellClipboard.h"
+#include "ui/MenuLayout.h"
 
 #include <shellapi.h>
 #include <shlobj.h>
@@ -46,6 +48,10 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
     // 每次弹菜单前把上一次的自绘项数据清掉（下面的 owner-draw 项要用到它们）
     m_menuDrawItems.clear();
     m_menuPrimaryIsContainerFile = false;
+
+    // 上一次的自定义动作命令已经执行完（WM_COMMAND 是菜单关闭后才到），
+    // 这里开始新的一轮，旧的运行条目可以丢了。
+    m_customActionEntries.clear();
 
     // 屏蔽「剪切 / 删除」的标记（「主文件夹」里的桌面、文档这些系统入口用），
     // 每次弹菜单先清掉，下面判定场景时再按需要打开
@@ -152,31 +158,63 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
         return;
     }
 
-    // ---- 2. 按场景拼菜单 ----
+    // ---- 2. 按场景构建「这次有哪些项可用」，再按用户配置渲染 ----
     switch (scene)
     {
     case ContextScene::Background:
-        BuildBackgroundMenu(menu);
+        RenderMenu(menu, scene, BuildBackgroundMenuSpecs());
         break;
 
     case ContextScene::SingleFile:
-        BuildSingleFileMenu(menu, primaryPath);
+        // 压缩包内部保持固定菜单：那里的路径不是真实文件系统项，
+        // 不参与自定义（打开 / 复制 两项即可）。
+        if (m_currentIsContainer)
+        {
+            BuildContainerItemMenu(menu);
+        }
+        else
+        {
+            RenderMenu(menu, scene, BuildSingleFileMenuSpecs(primaryPath));
+        }
         break;
 
     case ContextScene::SingleFolder:
-        BuildSingleFolderMenu(menu, primaryPath);
+        if (m_currentIsContainer)
+        {
+            BuildContainerItemMenu(menu);
+        }
+        else
+        {
+            RenderMenu(menu, scene, BuildSingleFolderMenuSpecs(primaryPath));
+        }
         break;
 
     case ContextScene::Multiple:
-        BuildMultipleMenu(menu);
+        if (m_currentIsContainer)
+        {
+            BuildContainerItemMenu(menu);
+        }
+        else
+        {
+            RenderMenu(menu, scene, BuildMultipleMenuSpecs());
+        }
         break;
 
     case ContextScene::ShellItem:
+        // 盘符 / 此电脑 / 控制面板：保持固定菜单，不参与自定义
         BuildShellItemMenu(menu, primaryPath);
         break;
 
     default:
         break;
+    }
+
+    // 用户把这一场景的所有项都隐藏了：不弹一个空菜单
+    if (::GetMenuItemCount(menu) == 0)
+    {
+        ::DestroyMenu(menu);
+        m_menuDrawItems.clear();
+        return;
     }
 
     // TPM_RETURNCMD：菜单自己跑完并返回点了哪一项，省去额外的一层消息往返
@@ -197,81 +235,12 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 }
 
 // ---------------------------------------------------------------------------
-// 文件夹空白处
-//
-// 分组按用户要求：
-//   查看 >
-//   排序 >          （紧在查看下面；此电脑分组视图下隐藏）
-//   刷新            （和「查看」同一组，紧在排序下面）
-//   ─────
-//   粘贴            （剪贴板里有文件才出现）
-//   撤销 / 恢复      （紧跟在「粘贴」那一格的下一格，有才出现）
-//   ─────
-//   新建文件夹
-//   新建 >
-//   ─────
-//   属性
-// ---------------------------------------------------------------------------
-void MainWindow::BuildBackgroundMenu(HMENU menu)
-{
-    FillViewMenu(menu);
-    FillSortMenu(menu);
-    ::AppendMenuW(menu, MF_STRING, kCommandRefresh, L"刷新(&R)");
-
-    // 压缩包内部（不分格式）不显示「粘贴」：
-    // 那里根本写不进去，出现了只会让用户点一次、白等一次。
-    const bool pasteAllowed = !m_currentIsContainer;
-
-    if (pasteAllowed && shellclip::HasFiles())
-    {
-        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        ::AppendMenuW(menu, MF_STRING, kCommandPaste, L"粘贴(&P)");
-    }
-
-    // 撤销 / 恢复 紧跟在「粘贴」的下一格（自带尾分隔线）
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    FillUndoItem(menu);
-
-    FillNewFolderAndNewMenu(menu);
-
-    // 「在终端中打开」：只在真实文件系统目录里给
-    // （压缩包内部是虚拟路径，控制面板那类 "::{GUID}" 也不是真实目录，都没有工作目录可用）
-    if (!m_currentIsContainer && shell::IsFileSystemPath(m_history.Current()))
-    {
-        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        ::AppendMenuW(menu, MF_STRING, kCommandOpenTerminal, L"在终端中打开");
-    }
-
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
-}
-
-// ---------------------------------------------------------------------------
-// 单选一个文件
-//
-//   打开
-//   打开方式 >      （这个扩展名在账本里有程序时才出现）
-//   ─────
-//   剪切
-//   复制
-//   复制文件路径        （只把路径文字放进剪贴板，Ctrl+Shift+C 也能触发）
-//   ─────
-//   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
-//   ─────
-//   删除
-//   ─────
-//   重命名
-//   ─────
-//   属性
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // 「复制 / 剪切」能不能用
 //
 //   · 驱动器（D:\ 这种盘符根）不能剪切 —— 整盘搬不走，资源管理器里也是灰的；
 //   · 控制面板、"此电脑"里的控制项这类虚拟对象（没有真实文件系统路径）
 //     既不能复制也不能剪切。
-// 压缩包文件本身和普通文件一样：zip/rar 都能剪（用户实测系统就是这样，之前
-// 按"除 zip 外禁剪"是记错了，这里已改回）。
+// 压缩包文件本身和普通文件一样：zip/rar 都能剪。
 // 这些判断只查字符串，零成本（符合"右键菜单弹出不查注册表、不碰 COM"的要求）。
 // ---------------------------------------------------------------------------
 static bool CanCopyPath(const std::wstring& path)
@@ -281,183 +250,244 @@ static bool CanCopyPath(const std::wstring& path)
 
 static bool CanCutPath(const std::wstring& path)
 {
-    // 两条"不能剪"：驱动器、虚拟对象
     return shell::IsFileSystemPath(path) &&
            !shell::IsDriveRootPath(path);
 }
 
 // ---------------------------------------------------------------------------
-// 压缩包内部的右键菜单（在 zip / rar / 7z 里选中文件时走这里）
+// 菜单项描述构建
 //
-// 系统实际给的项（用户实测资源管理器）：
-//   · zip 内部      : 打开 / 剪切 / 复制 / 删除 / 属性
-//   · 其它压缩包内部 : 打开 / 复制
-//
-// 但"剪切 / 删除 / 属性"要真能干活，必须走容器内项的 PIDL 通道：
-// 容器里的项没有真实磁盘路径，路径字符串交给 Shell 解析不出来（实测会报
-// "参数错误"，还有过把整个压缩包误删的先例）。这条通道还在做，
-// 所以这里先只给「打开 / 复制」——宁可少给，也不给一个点了会出错/出事的项。
-// 通道接好后再把 zip 的 剪切/删除/属性 补回来。
+// 这一层只回答「这次右键有哪些项、可用不可用」，不管顺序和显隐。
+// 顺序 / 显隐在 RenderMenu 里按 MenuLayout 处理。
 // ---------------------------------------------------------------------------
-void MainWindow::BuildContainerItemMenu(HMENU menu)
-{
-    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+namespace
+{
+
+ui::MenuSpec MakeItem(const wchar_t* id, const wchar_t* text, UINT command,
+                      UINT flags = MF_STRING, bool available = true)
+{
+    ui::MenuSpec spec;
+    spec.id        = id;
+    spec.text      = text;
+    spec.command   = command;
+    spec.flags     = flags;
+    spec.available = available;
+    return spec;
 }
 
-void MainWindow::BuildSingleFileMenu(HMENU menu, const std::wstring& filePath)
+ui::MenuSpec MakeSubmenu(const wchar_t* id, const wchar_t* text,
+                         std::function<void(HMENU)> fill, bool available = true)
 {
-    // 压缩包内部：按容器能力单独给菜单，早退
-    if (m_currentIsContainer)
+    ui::MenuSpec spec;
+    spec.id        = id;
+    spec.text      = text;
+    spec.available = available;
+    spec.fillSubmenu = std::move(fill);
+    return spec;
+}
+
+// 「撤销 / 恢复」的文案和可用状态收在一处，和改造前 FillUndoItem 完全一致。
+ui::MenuSpec MakeUndoRedoSpec(bool redo, const core::UndoRecord* top, UINT command)
+{
+    ui::MenuSpec spec;
+    spec.id      = redo ? L"redo" : L"undo";
+    spec.command = command;
+
+    const wchar_t* verb = nullptr;
+    if (top != nullptr)
     {
-        BuildContainerItemMenu(menu);
-        return;
+        verb = top->batchRename ? L"批量重命名" : core::UndoStack::VerbText(top->kind);
     }
 
-    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
-
-    // 压缩包文件本身和文件夹一样，也能"在新窗口中打开"（Ctrl+双击同理）
-    if (m_menuPrimaryIsContainerFile)
+    spec.available = (verb != nullptr);
+    if (verb != nullptr)
     {
-        ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
+        spec.text = std::wstring(redo ? L"恢复 " : L"撤销 ") + verb +
+                    (redo ? L"(&E)" : L"(&U)");
+    }
+    else
+    {
+        spec.text = redo ? L"恢复(&E)" : L"撤销(&U)";
+    }
+    return spec;
+}
+
+// 去掉多余的分隔线：首尾各一条不要，连续两条只留一条。
+// 用户隐藏菜单项之后，原来位置上的分隔线可能悬空，这里统一收尾。
+void CleanupMenuSeparators(HMENU menu)
+{
+    if (menu == nullptr) return;
+
+    int count = ::GetMenuItemCount(menu);
+    while (count > 0)
+    {
+        const UINT state = ::GetMenuState(menu, 0, MF_BYPOSITION);
+        if (state == static_cast<UINT>(-1) || (state & MF_SEPARATOR) == 0) break;
+        ::DeleteMenu(menu, 0, MF_BYPOSITION);
+        --count;
     }
 
-    // 打开方式：只给"普通文件"；菜单内容全部来自内存里的账本，零成本
+    while (count > 0)
     {
-        const std::wstring extension = shell::ExtensionKeyForPath(filePath);
+        const UINT state = ::GetMenuState(menu, static_cast<UINT>(count - 1), MF_BYPOSITION);
+        if (state == static_cast<UINT>(-1) || (state & MF_SEPARATOR) == 0) break;
+        ::DeleteMenu(menu, static_cast<UINT>(count - 1), MF_BYPOSITION);
+        --count;
+    }
 
-        if (!extension.empty() && shell::IsExtensionHandled(extension))
+    for (int i = count - 1; i > 0; --i)
+    {
+        const UINT current  = ::GetMenuState(menu, static_cast<UINT>(i), MF_BYPOSITION);
+        const UINT previous = ::GetMenuState(menu, static_cast<UINT>(i - 1), MF_BYPOSITION);
+        if (current == static_cast<UINT>(-1) || previous == static_cast<UINT>(-1)) continue;
+        if ((current & MF_SEPARATOR) != 0 && (previous & MF_SEPARATOR) != 0)
         {
-            FillOpenWithMenu(menu, extension);
+            ::DeleteMenu(menu, static_cast<UINT>(i), MF_BYPOSITION);
         }
     }
+}
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING | (CanCutPath(filePath) ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
-    ::AppendMenuW(menu, MF_STRING | (CanCopyPath(filePath) ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
-    ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
+} // namespace
 
-    // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    FillUndoItem(menu);
+// ---------------------------------------------------------------------------
+// 文件夹空白处
+//
+//   查看 / 排序 / 刷新 ┃ 粘贴 ┃ 撤销 / 恢复 ┃ 新建文件夹 / 新建 ┃ 在终端中打开 ┃ 属性
+// ---------------------------------------------------------------------------
+std::vector<ui::MenuSpec> MainWindow::BuildBackgroundMenuSpecs()
+{
+    std::vector<ui::MenuSpec> specs;
+
+    specs.push_back(MakeSubmenu(L"view", L"查看(&V)",
+        [this](HMENU sub) { FillViewMenuContents(sub); }));
+
+    specs.push_back(MakeSubmenu(L"sort", L"排序(&O)",
+        [this](HMENU sub) { FillSortMenuContents(sub); },
+        !IsSortDisabledHere()));
+
+    specs.push_back(MakeItem(L"refresh", L"刷新(&R)", kCommandRefresh));
+
+    const std::wstring currentPath = m_history.Current();
+
+    // 压缩包内部（不分格式）不显示「粘贴」：那里根本写不进去
+    const bool pasteAllowed = !m_currentIsContainer;
+    specs.push_back(MakeItem(L"paste", L"粘贴(&P)", kCommandPaste, MF_STRING,
+                             pasteAllowed && shellclip::HasFiles()));
+
+    specs.push_back(MakeUndoRedoSpec(false, m_undo.TopUndo(), kCommandUndo));
+    specs.push_back(MakeUndoRedoSpec(true, m_undo.TopRedo(), kCommandRedo));
+
+    // 虚拟文件夹（此电脑、控制面板这类）里不能建文件，置灰（和资源管理器一致）
+    const bool canCreate = !currentPath.empty() &&
+                           currentPath.compare(0, 2, L"::") != 0 &&
+                           currentPath.compare(0, 6, L"shell:") != 0;
+    specs.push_back(MakeItem(L"newFolder", L"新建文件夹(&N)", kCommandNewFolder,
+                             MF_STRING | (canCreate ? 0u : MF_GRAYED)));
+
+    specs.push_back(MakeSubmenu(L"new", L"新建(&W)",
+        [this](HMENU sub) { FillNewMenuContents(sub); }));
+
+    // 「在终端中打开」：只在真实文件系统目录里给
+    specs.push_back(MakeItem(L"terminal", L"在终端中打开", kCommandOpenTerminal,
+                             MF_STRING,
+                             pasteAllowed && shell::IsFileSystemPath(currentPath)));
+
+    specs.push_back(MakeItem(L"properties", L"属性(&S)", kCommandProperties));
+    return specs;
+}
+
+// ---------------------------------------------------------------------------
+// 单选一个文件
+//
+//   打开 / 打开方式 ┃ 剪切 / 复制 / 复制文件路径 ┃ 撤销 / 恢复 ┃ 删除 ┃ 重命名 ┃ 属性
+// ---------------------------------------------------------------------------
+std::vector<ui::MenuSpec> MainWindow::BuildSingleFileMenuSpecs(const std::wstring& filePath)
+{
+    std::vector<ui::MenuSpec> specs;
+
+    specs.push_back(MakeItem(L"open", L"打开(&O)", kCommandOpen));
+
+    // 压缩包文件本身和文件夹一样，也能「在新窗口中打开」（Ctrl+双击同理）
+    specs.push_back(MakeItem(L"openInNewWindow", L"在新窗口中打开(&N)",
+                             kCommandOpenInNewWindow, MF_STRING,
+                             m_menuPrimaryIsContainerFile));
+
+    // 打开方式：只给"普通文件"；菜单内容全部来自内存里的账本，零成本
+    const std::wstring extension = shell::ExtensionKeyForPath(filePath);
+    const bool hasOpenWith = !extension.empty() && shell::IsExtensionHandled(extension);
+    specs.push_back(MakeSubmenu(L"openWith", L"打开方式",
+        [this, extension](HMENU sub) { FillOpenWithMenuContents(sub, extension); },
+        hasOpenWith));
+
+    specs.push_back(MakeItem(L"cut", L"剪切(&T)", kCommandCut,
+                             MF_STRING | (CanCutPath(filePath) ? 0u : MF_GRAYED)));
+    specs.push_back(MakeItem(L"copy", L"复制(&C)", kCommandCopy,
+                             MF_STRING | (CanCopyPath(filePath) ? 0u : MF_GRAYED)));
+    specs.push_back(MakeItem(L"copyPath", L"复制文件路径(&A)", kCommandCopyPath));
+
+    specs.push_back(MakeUndoRedoSpec(false, m_undo.TopUndo(), kCommandUndo));
+    specs.push_back(MakeUndoRedoSpec(true, m_undo.TopRedo(), kCommandRedo));
 
     // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
-    ::AppendMenuW(menu, MF_STRING,
-                  m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
-                  L"删除(&D)");
+    specs.push_back(MakeItem(L"delete", L"删除(&D)",
+                             m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete));
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
-
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+    specs.push_back(MakeItem(L"rename", L"重命名(&M)", kCommandRename));
+    specs.push_back(MakeItem(L"properties", L"属性(&S)", kCommandProperties));
+    return specs;
 }
 
 // ---------------------------------------------------------------------------
 // 单选一个文件夹
 //
-//   打开
-//   在新窗口中打开
-//   ─────
-//   剪切
-//   复制
-//   复制文件路径        （只把路径文字放进剪贴板，Ctrl+Shift+C 也能触发）
-//   ─────
-//   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
-//   ─────
-//   删除
-//   ─────
-//   重命名
-//   ─────
-//   属性
+//   打开 / 在新窗口中打开 ┃ 剪切 / 复制 / 复制文件路径 ┃ 撤销 / 恢复
+//   ┃ 删除 ┃ 重命名 ┃ 在终端中打开 ┃ 属性
 // ---------------------------------------------------------------------------
-void MainWindow::BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath)
+std::vector<ui::MenuSpec> MainWindow::BuildSingleFolderMenuSpecs(const std::wstring& folderPath)
 {
-    // 压缩包内部（不管 zip / rar / 7z）：一律只读，只给「打开 / 复制」，
-    // 和系统的只读容器一致。（zip 内部的剪切 / 删除 / 属性还没接。）
-    if (m_currentIsContainer)
-    {
-        BuildContainerItemMenu(menu);
-        return;
-    }
+    std::vector<ui::MenuSpec> specs;
 
-    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
-    ::AppendMenuW(menu, MF_STRING, kCommandOpenInNewWindow, L"在新窗口中打开(&N)");
+    specs.push_back(MakeItem(L"open", L"打开(&O)", kCommandOpen));
+    specs.push_back(MakeItem(L"openInNewWindow", L"在新窗口中打开(&N)",
+                             kCommandOpenInNewWindow));
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // 「主文件夹」里的系统入口（桌面 / 文档 / 下载 / 图片 / 音乐…）不给「剪切」和「删除」
+    specs.push_back(MakeItem(L"cut", L"剪切(&T)", kCommandCut,
+                             MF_STRING | (CanCutPath(folderPath) ? 0u : MF_GRAYED),
+                             !m_menuSuppressDeleteCut));
+    specs.push_back(MakeItem(L"copy", L"复制(&C)", kCommandCopy,
+                             MF_STRING | (CanCopyPath(folderPath) ? 0u : MF_GRAYED)));
+    specs.push_back(MakeItem(L"copyPath", L"复制文件路径(&A)", kCommandCopyPath));
 
-    // 「主文件夹」里的系统入口（桌面 / 文档 / 下载 / 图片 / 音乐…）不给「剪切」：
-    // 这些是 Shell 重定向的已知文件夹，位置由用户配置决定，搬不走；
-    // 系统资源管理器的「主文件夹」里也没有这一项。
-    if (!m_menuSuppressDeleteCut)
-    {
-        ::AppendMenuW(menu, MF_STRING | (CanCutPath(folderPath) ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
-    }
+    specs.push_back(MakeUndoRedoSpec(false, m_undo.TopUndo(), kCommandUndo));
+    specs.push_back(MakeUndoRedoSpec(true, m_undo.TopRedo(), kCommandRedo));
 
-    ::AppendMenuW(menu, MF_STRING | (CanCopyPath(folderPath) ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
-    ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
+    specs.push_back(MakeItem(L"delete", L"删除(&D)",
+                             m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
+                             MF_STRING, !m_menuSuppressDeleteCut));
 
-    // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    FillUndoItem(menu);
-
-    // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
-    // 主文件夹里的系统入口同样不给「删除」（删掉就是删掉整个"桌面/文档"入口）
-    if (!m_menuSuppressDeleteCut)
-    {
-        ::AppendMenuW(menu, MF_STRING,
-                      m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
-                      L"删除(&D)");
-    }
-
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandRename, L"重命名(&M)");
+    specs.push_back(MakeItem(L"rename", L"重命名(&M)", kCommandRename));
 
     // 「在终端中打开」：文件夹是真实目录，可以直接当终端的工作目录
-    // （压缩包内部的子目录在上面已经早退了，走不到这里）
-    if (shell::IsFileSystemPath(folderPath))
-    {
-        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        ::AppendMenuW(menu, MF_STRING, kCommandOpenTerminal, L"在终端中打开");
-    }
+    specs.push_back(MakeItem(L"terminal", L"在终端中打开", kCommandOpenTerminal,
+                             MF_STRING, shell::IsFileSystemPath(folderPath)));
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+    specs.push_back(MakeItem(L"properties", L"属性(&S)", kCommandProperties));
+    return specs;
 }
 
 // ---------------------------------------------------------------------------
 // 选中多个
 //
-//   打开
-//   ─────
-//   剪切
-//   复制
-//   复制文件路径        （多选时一行一条路径，Ctrl+Shift+C 也能触发）
-//   ─────
-//   撤销 / 恢复      （紧跟「复制」的下一格，有才出现）
-//   ─────
-//   删除
-//   ─────
-//   批量重命名          （多个一起改名，系统的「重命名」对多选只改一个，这里给它更全的）
-//   ─────
-//   属性
-//
-// 没有单个「重命名」（系统也不给多选逐个改名），没有新建，没有打开方式。
+//   打开 ┃ 剪切 / 复制 / 复制文件路径 ┃ 撤销 / 恢复 ┃ 删除 ┃ 批量重命名 ┃ 属性
 // ---------------------------------------------------------------------------
-void MainWindow::BuildMultipleMenu(HMENU menu)
+std::vector<ui::MenuSpec> MainWindow::BuildMultipleMenuSpecs()
 {
-    // 压缩包内部多选：和单选文件一样按容器能力给项，早退
-    if (m_currentIsContainer)
-    {
-        BuildContainerItemMenu(menu);
-        return;
-    }
+    std::vector<ui::MenuSpec> specs;
 
-    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+    specs.push_back(MakeItem(L"open", L"打开(&O)", kCommandOpen));
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // 多选：只要里面有一项不能复制/剪切（驱动器、控制面板等），整条就灰掉
     const std::vector<std::wstring> selectedPaths = m_fileListView.GetSelectedPaths();
     bool canCut  = !selectedPaths.empty();
@@ -469,24 +499,210 @@ void MainWindow::BuildMultipleMenu(HMENU menu)
         canCopy = canCopy && CanCopyPath(path);
     }
 
-    ::AppendMenuW(menu, MF_STRING | (canCut ? 0u : MF_GRAYED), kCommandCut, L"剪切(&T)");
-    ::AppendMenuW(menu, MF_STRING | (canCopy ? 0u : MF_GRAYED), kCommandCopy, L"复制(&C)");
-    ::AppendMenuW(menu, MF_STRING, kCommandCopyPath, L"复制文件路径(&A)");
+    specs.push_back(MakeItem(L"cut", L"剪切(&T)", kCommandCut,
+                             MF_STRING | (canCut ? 0u : MF_GRAYED)));
+    specs.push_back(MakeItem(L"copy", L"复制(&C)", kCommandCopy,
+                             MF_STRING | (canCopy ? 0u : MF_GRAYED)));
+    specs.push_back(MakeItem(L"copyPath", L"复制文件路径(&A)", kCommandCopyPath));
 
-    // 撤销 / 恢复 紧跟在「复制」那一格的下一格（自带尾分隔线）
+    specs.push_back(MakeUndoRedoSpec(false, m_undo.TopUndo(), kCommandUndo));
+    specs.push_back(MakeUndoRedoSpec(true, m_undo.TopRedo(), kCommandRedo));
+
+    specs.push_back(MakeItem(L"delete", L"删除(&D)",
+                             m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete));
+
+    specs.push_back(MakeItem(L"batchRename", L"批量重命名(&R)", kCommandBatchRename));
+    specs.push_back(MakeItem(L"properties", L"属性(&S)", kCommandProperties));
+    return specs;
+}
+
+// ---------------------------------------------------------------------------
+// 压缩包内部的右键菜单（在 zip / rar / 7z 里选中文件时走这里）
+//
+// 系统实际给的项（用户实测资源管理器）：
+//   · zip 内部      : 打开 / 剪切 / 复制 / 删除 / 属性
+//   · 其它压缩包内部 : 打开 / 复制
+//
+// 但"剪切 / 删除 / 属性"要真能干活，必须走容器内项的 PIDL 通道；
+// 容器里的项没有真实磁盘路径，路径字符串交给 Shell 解析不出来。
+// 这条通道还在做，所以这里先只给「打开 / 复制」——宁可少给，也不给一个点了会出错的项。
+// ---------------------------------------------------------------------------
+void MainWindow::BuildContainerItemMenu(HMENU menu)
+{
+    ::AppendMenuW(menu, MF_STRING, kCommandOpen, L"打开(&O)");
+
     ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    FillUndoItem(menu);
+    ::AppendMenuW(menu, MF_STRING, kCommandCopy, L"复制(&C)");
+}
 
-    // 按住 Shift 弹的菜单：「删除」改为永久删除（文字不变，行为变，和资源管理器一致）
-    ::AppendMenuW(menu, MF_STRING,
-                  m_menuPermanentDelete ? kCommandDeletePermanent : kCommandDelete,
-                  L"删除(&D)");
+// ---------------------------------------------------------------------------
+// 统一渲染：按配置顺序决定谁出现、谁隐藏
+// ---------------------------------------------------------------------------
+void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
+                            const std::vector<ui::MenuSpec>& specs)
+{
+    if (menu == nullptr) return;
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandBatchRename, L"批量重命名(&R)");
+    ui::MenuScene layoutScene = ui::MenuScene::File;
+    switch (scene)
+    {
+    case ContextScene::Background:   layoutScene = ui::MenuScene::Background; break;
+    case ContextScene::SingleFile:   layoutScene = ui::MenuScene::File;       break;
+    case ContextScene::SingleFolder: layoutScene = ui::MenuScene::Folder;     break;
+    case ContextScene::Multiple:     layoutScene = ui::MenuScene::Multiple;   break;
+    default: return;
+    }
 
-    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    ::AppendMenuW(menu, MF_STRING, kCommandProperties, L"属性(&S)");
+    std::vector<std::wstring> available;
+    available.reserve(specs.size());
+    for (const ui::MenuSpec& spec : specs)
+    {
+        if (spec.available) available.push_back(spec.id);
+    }
+
+    const ui::MenuLayout& layout = ui::CachedMenuLayout();
+
+    // 这一次右键的选中项 / 当前目录，给快捷动作匹配和展开用
+    shell::ActionContext actionContext;
+    actionContext.currentDir = m_history.Current();
+    actionContext.paths      = m_fileListView.GetSelectedPaths();
+    if (layoutScene == ui::MenuScene::Background)
+    {
+        actionContext.paths.clear();
+    }
+
+    const std::wstring actionPrimaryPath =
+        actionContext.paths.empty() ? actionContext.currentDir : actionContext.paths.front();
+
+    std::vector<const ui::CustomAction*> matchingActions;
+    for (const ui::CustomAction& action : layout.actions)
+    {
+        if (action.enabled &&
+            shell::ActionMatchesPath(action, layoutScene, actionPrimaryPath, actionContext.paths))
+        {
+            matchingActions.push_back(&action);
+        }
+    }
+
+    const bool actionsAvailable = !matchingActions.empty();
+    const std::vector<std::wstring> order =
+        ui::ResolveMenuOrder(layout, layoutScene, available, actionsAvailable);
+
+    const bool showIcons = core::Settings::Instance().MenuIcons();
+
+    for (const std::wstring& token : order)
+    {
+        if (token == L"sep")
+        {
+            ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            continue;
+        }
+
+        if (token == L"actions")
+        {
+            if (showIcons)
+            {
+                std::vector<std::wstring> iconPaths;
+                for (const ui::CustomAction* action : matchingActions)
+                {
+                    if (!action->program.empty()) iconPaths.push_back(action->program);
+                }
+                m_menuIcons.PrefetchPaths(iconPaths);
+            }
+
+            for (const ui::CustomAction* action : matchingActions)
+            {
+                if (static_cast<int>(m_customActionEntries.size()) >= kCommandCustomActionMax)
+                {
+                    break;
+                }
+
+                const int commandId = kCommandCustomActionBase +
+                                      static_cast<int>(m_customActionEntries.size());
+
+                CustomActionRuntime runtime;
+                runtime.commandId  = commandId;
+                runtime.action     = *action;
+                runtime.paths      = actionContext.paths;
+                runtime.currentDir = actionContext.currentDir;
+                m_customActionEntries.push_back(std::move(runtime));
+
+                const std::wstring text =
+                    action->title.empty() ? L"（未命名动作）" : action->title;
+
+                HICON icon = showIcons
+                    ? m_menuIcons.Get(MenuIconCache::KeyForPath(action->program))
+                    : nullptr;
+
+                if (icon != nullptr)
+                {
+                    auto drawItem = std::make_unique<MenuDrawItem>();
+                    drawItem->text = text;
+                    drawItem->icon = icon;
+
+                    MenuDrawItem* raw = drawItem.get();
+                    m_menuDrawItems.push_back(std::move(drawItem));
+
+                    ::AppendMenuW(menu, MF_OWNERDRAW, commandId,
+                                  reinterpret_cast<LPCTSTR>(raw));
+                }
+                else
+                {
+                    ::AppendMenuW(menu, MF_STRING, commandId, text.c_str());
+                }
+            }
+            continue;
+        }
+
+        const ui::MenuSpec* spec = nullptr;
+        for (const ui::MenuSpec& candidate : specs)
+        {
+            if (candidate.id == token)
+            {
+                spec = &candidate;
+                break;
+            }
+        }
+        if (spec == nullptr || !spec->available) continue;
+
+        if (spec->IsSubmenu())
+        {
+            HMENU subMenu = ::CreatePopupMenu();
+            if (subMenu == nullptr) continue;
+
+            spec->fillSubmenu(subMenu);
+            if (::GetMenuItemCount(subMenu) > 0)
+            {
+                const UINT flags = MF_POPUP | MF_STRING | (spec->flags & MF_GRAYED);
+                ::AppendMenuW(menu, flags,
+                              reinterpret_cast<UINT_PTR>(subMenu),
+                              spec->text.c_str());
+            }
+            else
+            {
+                ::DestroyMenu(subMenu);
+            }
+            continue;
+        }
+
+        if (spec->icon != nullptr && showIcons)
+        {
+            auto drawItem = std::make_unique<MenuDrawItem>();
+            drawItem->text = spec->text;
+            drawItem->icon = spec->icon;
+
+            MenuDrawItem* raw = drawItem.get();
+            m_menuDrawItems.push_back(std::move(drawItem));
+
+            ::AppendMenuW(menu, MF_OWNERDRAW | (spec->flags & MF_GRAYED),
+                          spec->command, reinterpret_cast<LPCTSTR>(raw));
+            continue;
+        }
+
+        ::AppendMenuW(menu, spec->flags, spec->command, spec->text.c_str());
+    }
+
+    CleanupMenuSeparators(menu);
 }
 
 // ---------------------------------------------------------------------------
@@ -645,89 +861,61 @@ void MainWindow::UnpinPinnedPath(const std::wstring& path)
 }
 
 // ---------------------------------------------------------------------------
-// 「查看」子菜单（和资源管理器一样，当前视图打勾）
+// 「查看」子菜单内容（和资源管理器一样，当前视图打勾）
+// 只往传进来的子菜单里填，不负责挂到父菜单；顺序/显隐由 RenderMenu 管。
 // ---------------------------------------------------------------------------
-void MainWindow::FillViewMenu(HMENU parentMenu)
+void MainWindow::FillViewMenuContents(HMENU subMenu)
 {
-    HMENU viewMenu = ::CreatePopupMenu();
-    if (viewMenu == nullptr)
+    if (subMenu == nullptr)
     {
         return;
     }
 
     const FileListView::ViewMode current = m_fileListView.CurrentViewMode();
 
-    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::LargeIcon) ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | ((current == FileListView::ViewMode::LargeIcon) ? MF_CHECKED : 0),
                   kCommandViewLarge, L"大图标(&L)");
-    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::SmallIcon) ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | ((current == FileListView::ViewMode::SmallIcon) ? MF_CHECKED : 0),
                   kCommandViewSmall, L"小图标(&S)");
-    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::List) ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | ((current == FileListView::ViewMode::List) ? MF_CHECKED : 0),
                   kCommandViewList, L"列表(&T)");
-    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Details) ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | ((current == FileListView::ViewMode::Details) ? MF_CHECKED : 0),
                   kCommandViewDetails, L"详细信息(&D)");
-    ::AppendMenuW(viewMenu, MF_STRING | ((current == FileListView::ViewMode::Tiles) ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | ((current == FileListView::ViewMode::Tiles) ? MF_CHECKED : 0),
                   kCommandViewTiles, L"平铺(&I)");
-
-    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
-                  reinterpret_cast<UINT_PTR>(viewMenu), L"查看(&V)");
 }
 
 // ---------------------------------------------------------------------------
-// 「排序」子菜单（位于「查看」下面）
+// 「排序」子菜单内容
 //
 //   名称 / 修改日期 / 类型 / 大小   当前排序列打勾
 //   ─────
 //   升序 / 降序                    当前方向打勾
 //
-// 「此电脑」是分组视图，排序整体禁用，这里直接不挂这个子菜单。
+// 「此电脑」是分组视图，排序整体禁用：由 MenuSpec.available 控制，不在这里判断。
 // ---------------------------------------------------------------------------
-void MainWindow::FillSortMenu(HMENU parentMenu)
+void MainWindow::FillSortMenuContents(HMENU subMenu)
 {
-    if (IsSortDisabledHere())
+    if (subMenu == nullptr)
     {
         return;
     }
 
-    HMENU sortMenu = ::CreatePopupMenu();
-    if (sortMenu == nullptr)
-    {
-        return;
-    }
-
-    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 0 ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | (m_sortColumn == 0 ? MF_CHECKED : 0),
                   kCommandSortName, L"名称(&N)");
-    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 1 ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | (m_sortColumn == 1 ? MF_CHECKED : 0),
                   kCommandSortDate, L"修改日期(&D)");
-    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 2 ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | (m_sortColumn == 2 ? MF_CHECKED : 0),
                   kCommandSortType, L"类型(&T)");
-    ::AppendMenuW(sortMenu, MF_STRING | (m_sortColumn == 3 ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | (m_sortColumn == 3 ? MF_CHECKED : 0),
                   kCommandSortSize, L"大小(&Z)");
 
-    ::AppendMenuW(sortMenu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(subMenu, MF_SEPARATOR, 0, nullptr);
 
-    ::AppendMenuW(sortMenu, MF_STRING | (m_sortAscending ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | (m_sortAscending ? MF_CHECKED : 0),
                   kCommandSortAsc, L"升序(&A)");
-    ::AppendMenuW(sortMenu, MF_STRING | (!m_sortAscending ? MF_CHECKED : 0),
+    ::AppendMenuW(subMenu, MF_STRING | (!m_sortAscending ? MF_CHECKED : 0),
                   kCommandSortDesc, L"降序(&E)");
-
-    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
-                  reinterpret_cast<UINT_PTR>(sortMenu), L"排序(&O)");
-}
-
-// ---------------------------------------------------------------------------
-// 「新建文件夹」+「新建」子菜单（两者相邻，新建文件夹在上面）
-// ---------------------------------------------------------------------------
-void MainWindow::FillNewFolderAndNewMenu(HMENU menu)
-{
-    const std::wstring currentPath = m_history.Current();
-    const bool canCreate = !currentPath.empty() &&
-                           currentPath.compare(0, 2, L"::") != 0 &&
-                           currentPath.compare(0, 6, L"shell:") != 0;
-
-    ::AppendMenuW(menu, MF_STRING | (canCreate ? 0 : MF_GRAYED),
-                  kCommandNewFolder, L"新建文件夹(&N)");
-
-    FillNewMenu(menu);
 }
 
 // ----------------------------------------------------------------------------
@@ -737,14 +925,8 @@ void MainWindow::FillNewFolderAndNewMenu(HMENU menu)
 // 它们只读内存里的账本 / 新建项快照，弹出时零 IO。
 // ----------------------------------------------------------------------------
 
-void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extension)
+void MainWindow::FillOpenWithMenuContents(HMENU subMenu, const std::wstring& extension)
 {
-    if (parentMenu == nullptr)
-    {
-        return;
-    }
-
-    HMENU subMenu = ::CreatePopupMenu();
     if (subMenu == nullptr)
     {
         return;
@@ -841,19 +1023,10 @@ void MainWindow::FillOpenWithMenu(HMENU parentMenu, const std::wstring& extensio
 
     // 一个程序都没有时，这一项就是"直接进窗口去设置"
     ::AppendMenuW(subMenu, MF_STRING, kCommandOpenWithManage, L"添加或管理程序…");
-
-    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
-                  reinterpret_cast<UINT_PTR>(subMenu), L"打开方式");
 }
 
-void MainWindow::FillNewMenu(HMENU parentMenu)
+void MainWindow::FillNewMenuContents(HMENU subMenu)
 {
-    if (parentMenu == nullptr)
-    {
-        return;
-    }
-
-    HMENU subMenu = ::CreatePopupMenu();
     if (subMenu == nullptr)
     {
         return;
@@ -904,61 +1077,14 @@ void MainWindow::FillNewMenu(HMENU parentMenu)
     {
         ::AppendMenuW(subMenu, MF_STRING, kCommandNewFolder, L"文件夹");
     }
-
-    ::AppendMenuW(parentMenu, MF_STRING | MF_POPUP,
-                  reinterpret_cast<UINT_PTR>(subMenu), L"新建(&W)");
 }
 
 // ----------------------------------------------------------------------------
-// 撤销/恢复菜单项 + 自绘菜单项绘制
+// 自绘菜单项绘制
 //
-// FillUndoItem 只读内存里的撤销栈；DrawMenuItem 是 WM_DRAWITEM 的实现，
-// 用主窗口字体和预取好的小图标画一行。两块都只跟菜单有关。
+// DrawMenuItem 是 WM_DRAWITEM 的实现，用主窗口字体和预取好的小图标画一行。
+// 撤销/恢复的菜单项现在由 Build*MenuSpecs 直接生成，不再单独 Fill。
 // ----------------------------------------------------------------------------
-
-void MainWindow::FillUndoItem(HMENU menu)
-{
-    bool anyItem = false;
-
-    // 「撤销 删除」：撤销栈顶那一步
-    if (const UndoRecord* top = m_undo.TopUndo())
-    {
-        const UndoRecord& record = *top;
-
-        // 批量重命名单独说一句「撤销 批量重命名」，让用户一眼看出这一条
-        // 和单文件改名不是同一档（也就不会奇怪 Ctrl+Z 为什么不动它）
-        const wchar_t* verb = record.batchRename ? L"批量重命名"
-                                                 : core::UndoStack::VerbText(record.kind);
-
-        if (verb != nullptr)
-        {
-            const std::wstring text = std::wstring(L"撤销 ") + verb + L"(&U)";
-            ::AppendMenuW(menu, MF_STRING, kCommandUndo, text.c_str());
-            anyItem = true;
-        }
-    }
-
-    // 「恢复 删除」：重做栈顶那一步（撤销过、还没被新操作冲掉的那些）
-    if (const UndoRecord* top = m_undo.TopRedo())
-    {
-        const UndoRecord& record = *top;
-
-        const wchar_t* verb = record.batchRename ? L"批量重命名"
-                                                 : core::UndoStack::VerbText(record.kind);
-
-        if (verb != nullptr)
-        {
-            const std::wstring text = std::wstring(L"恢复 ") + verb + L"(&E)";
-            ::AppendMenuW(menu, MF_STRING, kCommandRedo, text.c_str());
-            anyItem = true;
-        }
-    }
-
-    if (anyItem)
-    {
-        ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    }
-}
 
 void MainWindow::DrawMenuItem(const DRAWITEMSTRUCT* drawItem)
 {

@@ -43,6 +43,8 @@ namespace ui { class ShellWindowHost; }
 #include "shell/ShellOpenWith.h"
 #include "ui/AddressBar.h"
 #include "ui/FileListView.h"
+#include "ui/MenuLayout.h"
+#include "ui/MenuSpec.h"
 #include "ui/FlatButton.h"
 #include "ui/NavigationPane.h"
 #include "ui/OpenWithDialog.h"
@@ -132,6 +134,10 @@ static const int kCommandOpenTerminal   = 3221;
 static const int kCommandNewTab         = 3222;  // Ctrl+T：新标签（主文件夹）
 static const int kCommandNextTab        = 3223;  // Ctrl+Tab
 static const int kCommandPrevTab        = 3224;  // Ctrl+Shift+Tab
+
+// 自定义快捷动作：命令号段（3700~3799，最多 100 个）
+static const int kCommandCustomActionBase = 3700;
+static const int kCommandCustomActionMax  = 100;
 
 class MainWindow
 {
@@ -307,11 +313,16 @@ private:
 
     void ShowContextMenu(POINT screenPoint);
 
-    // 按场景拼菜单（都是零成本：只用已经加载在内存里的条目数据）
-    void BuildBackgroundMenu(HMENU menu);
-    void BuildSingleFileMenu(HMENU menu, const std::wstring& filePath);
-    void BuildSingleFolderMenu(HMENU menu, const std::wstring& folderPath);
-    void BuildMultipleMenu(HMENU menu);
+    // 按场景构建「这次有哪些菜单项可用」的描述（零成本：只用内存数据）。
+    // 真正的顺序/显隐由 MenuLayout 决定，见 RenderMenu。
+    std::vector<ui::MenuSpec> BuildBackgroundMenuSpecs();
+    std::vector<ui::MenuSpec> BuildSingleFileMenuSpecs(const std::wstring& filePath);
+    std::vector<ui::MenuSpec> BuildSingleFolderMenuSpecs(const std::wstring& folderPath);
+    std::vector<ui::MenuSpec> BuildMultipleMenuSpecs();
+
+    // 按用户配置的顺序/显隐渲染菜单（会跳过不可用项、折叠多余分隔线）
+    void RenderMenu(HMENU menu, ContextScene scene, const std::vector<ui::MenuSpec>& specs);
+
     void BuildShellItemMenu(HMENU menu, const std::wstring& itemPath);
 
     // 压缩包内部的右键菜单（zip 给 打开/剪切/复制/删除/属性；其它给 打开/复制）
@@ -334,9 +345,9 @@ private:
     bool m_menuSuppressDeleteCut = false;
 
     // 查看 / 排序 / 新建文件夹 + 新建 这几块公共片段
-    void FillViewMenu(HMENU parentMenu);
-    void FillSortMenu(HMENU parentMenu);
-    void FillNewFolderAndNewMenu(HMENU menu);
+    // 只负责把内容填进一个已经创建好的子菜单，不再自己往父菜单上挂
+    void FillViewMenuContents(HMENU subMenu);
+    void FillSortMenuContents(HMENU subMenu);
 
     // ---- 撤销 / 恢复（多级，和资源管理器一样 Ctrl+Z / Ctrl+Y）----
     //
@@ -353,7 +364,6 @@ private:
     core::UndoStack m_undo;
 
     void PushUndoRecord(const UndoRecord& record);   // 操作成功后压栈（同时清空重做栈）
-    void FillUndoItem(HMENU menu);                   // 有可撤销/可恢复的步骤才往菜单里加
     void PerformUndo(bool fromKeyboard);             // fromKeyboard=true 是 Ctrl+Z，false 是右键「撤销」
     void PerformRedo(bool fromKeyboard);             // fromKeyboard=true 是 Ctrl+Y，false 是右键「恢复」
     void ClearUndoHistory();                         // 清空两栈
@@ -391,8 +401,8 @@ private:
     // 把某个路径从常用区（固定区）里去掉：删配置 → 存盘 → 重建左栏
     void UnpinPinnedPath(const std::wstring& path);
 
-    // 「新建」菜单（二级菜单：文件夹 + 系统 ShellNew 里登记的各类新文件模板）
-    void FillNewMenu(HMENU parentMenu);
+    // 「新建」菜单内容（二级菜单：文件夹 + 系统 ShellNew 里登记的各类新文件模板）
+    void FillNewMenuContents(HMENU subMenu);
 
     // 按「新建」快照里第 index 项建一个东西出来（文件夹 / 文本文档 / 快捷方式…）
     void DoNewItem(size_t index);
@@ -419,8 +429,8 @@ private:
     //     （用户要求：影响右键菜单速度的事情非必要不做）。
     // -------------------------------------------------------------
 
-    // 右键菜单里的「打开方式」子菜单（零成本：只读已经加载的配置）
-    void FillOpenWithMenu(HMENU parentMenu, const std::wstring& extension);
+    // 右键菜单里的「打开方式」子菜单内容（零成本：只读已经加载的配置）
+    void FillOpenWithMenuContents(HMENU subMenu, const std::wstring& extension);
 
     // 用账本里第 programIndex 个程序打开所有选中文件
     void OpenSelectionWithProgram(size_t programIndex);
@@ -720,6 +730,18 @@ private:
     };
 
     std::vector<std::unique_ptr<MenuDrawItem>> m_menuDrawItems;
+
+    // 自定义快捷动作的运行时条目：命令号 → 动作 + 这一次的目标路径。
+    // 菜单关掉后 WM_COMMAND 才到，所以这个 vector 要留到下一次弹菜单前再清。
+    struct CustomActionRuntime
+    {
+        int                      commandId = 0;
+        ui::CustomAction         action;
+        std::vector<std::wstring> paths;
+        std::wstring             currentDir;
+    };
+
+    std::vector<CustomActionRuntime> m_customActionEntries;
 
     // 画一个自绘菜单项（WM_DRAWITEM 里调）
     void DrawMenuItem(const DRAWITEMSTRUCT* drawItem);

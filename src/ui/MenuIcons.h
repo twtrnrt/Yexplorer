@@ -52,6 +52,10 @@ public:
     void PrefetchPrograms(const std::vector<core::OpenWithItem>& programs);
     void PrefetchNewItems(const std::vector<shell::ShellNewItem>& items);
 
+    // 任意程序/文件路径的图标（自定义快捷动作用）。路径按小写做键。
+    // 同样只在后台取，菜单弹出只查表。
+    void PrefetchPaths(const std::vector<std::wstring>& paths);
+
     // 等后台线程收尾（程序退出前调，避免它还在跑就析构了）
     void Shutdown();
 
@@ -61,6 +65,7 @@ public:
     // ---- 缓存键（键必须稳定，换一次就等于缓存失效）----
     static std::wstring KeyForProgram(const core::OpenWithItem& item);
     static std::wstring KeyForNewItem(const shell::ShellNewItem& item);
+    static std::wstring KeyForPath(const std::wstring& path);
 
 private:
     void StartWorker();
@@ -70,6 +75,9 @@ private:
 
     // 取一个「新建」项的 16px 图标
     static HICON LoadNewItemIcon(const shell::ShellNewItem& item);
+
+    // 取一个任意路径的 16px 图标
+    static HICON LoadPathIcon(const std::wstring& path);
 
     void Store(const std::wstring& key, HICON icon);
 
@@ -83,5 +91,6 @@ private:
     // 待取清单
     std::vector<core::OpenWithItem>     m_pendingPrograms;
     std::vector<shell::ShellNewItem>    m_pendingNewItems;
+    std::vector<std::wstring>           m_pendingPaths;
     std::atomic<bool>                   m_workerRunning { false };
 };

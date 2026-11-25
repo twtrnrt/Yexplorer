@@ -20,6 +20,7 @@
 #include "core/PathUtil.h"
 #include "core/Settings.h"
 #include "shell/ContainerExtract.h"
+#include "shell/ActionRunner.h"
 #include "shell/ShellClipboard.h"
 #include "shell/ShellDragDrop.h"
 #include "shell/ShellOperations.h"
@@ -1892,6 +1893,25 @@ void MainWindow::OnOperationDone(HRESULT hr)
 bool MainWindow::HandleCommandMessage(WPARAM wParam)
 {
     int controlId = LOWORD(wParam);
+
+    // ---- 自定义快捷动作：命令 ID = 3700 + 本次菜单里的动作下标 ----
+    if (controlId >= kCommandCustomActionBase &&
+        controlId < kCommandCustomActionBase + kCommandCustomActionMax)
+    {
+        const int index = controlId - kCommandCustomActionBase;
+        if (index >= 0 && index < static_cast<int>(m_customActionEntries.size()))
+        {
+            const CustomActionRuntime& runtime = m_customActionEntries[index];
+
+            shell::ActionContext context;
+            context.paths      = runtime.paths;
+            context.currentDir = runtime.currentDir;
+
+            std::wstring error;
+            shell::RunCustomAction(runtime.action, context, m_hWnd, &error);
+        }
+        return true;
+    }
 
     // ---- 「打开方式」子菜单里点了某个程序：命令 ID = 3400 + 账本下标 ----
     if (controlId >= kCommandOpenWithBase &&

@@ -159,6 +159,7 @@
     <ClCompile Include="src\shell\ShellDragDrop.cpp" />
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
     <ClCompile Include="src\shell\ShellNew.cpp" />
+    <ClCompile Include="src\shell\ActionRunner.cpp" />
     <ClCompile Include="src\shell\DefaultManager.cpp" />
     <ClCompile Include="src\shell\ExplorerProxy.cpp" />
     <ClCompile Include="src\shell\ListaryIntegration.cpp" />
@@ -183,6 +184,8 @@
     <ClCompile Include="src\ui\CustomWindow.cpp" />
     <ClCompile Include="src\ui\FlatDraw.cpp" />
     <ClCompile Include="src\ui\MenuIcons.cpp" />
+    <ClCompile Include="src\ui\MenuLayout.cpp" />
+    <ClCompile Include="src\ui\ContextMenuDialog.cpp" />
     <ClCompile Include="src\ui\WindowPlacement.cpp" />
     <ClCompile Include="src\ui\WindowRelay.cpp" />
   </ItemGroup>
@@ -208,6 +211,7 @@
     <ClInclude Include="src\shell\ShellDragDrop.h" />
     <ClInclude Include="src\shell\ShellOpenWith.h" />
     <ClInclude Include="src\shell\ShellNew.h" />
+    <ClInclude Include="src\shell\ActionRunner.h" />
     <ClInclude Include="src\shell\DefaultManager.h" />
     <ClInclude Include="src\shell\ExplorerProxy.h" />
     <ClInclude Include="src\shell\ShellOperations.h" />
@@ -227,6 +231,9 @@
     <ClInclude Include="src\ui\CustomWindow.h" />
     <ClInclude Include="src\ui\FlatDraw.h" />
     <ClInclude Include="src\ui\MenuIcons.h" />
+    <ClInclude Include="src\ui\MenuLayout.h" />
+    <ClInclude Include="src\ui\MenuSpec.h" />
+    <ClInclude Include="src\ui\ContextMenuDialog.h" />
     <ClInclude Include="src\ui\ShellWindowHost.h" />
     <ClInclude Include="src\ui\WindowPlacement.h" />
     <ClInclude Include="src\ui\WindowRelay.h" />

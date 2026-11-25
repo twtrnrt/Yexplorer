@@ -12,6 +12,9 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <algorithm>
+#include <cwctype>
+
 #pragma comment(lib, "shell32.lib")
 
 namespace
@@ -64,6 +67,14 @@ std::wstring MenuIconCache::KeyForNewItem(const shell::ShellNewItem& item)
 {
     // 用注册表键名做键：扩展名（".zip"）和 ProgID（"Folder"）都不会撞
     return L"new:" + item.menuKey;
+}
+
+std::wstring MenuIconCache::KeyForPath(const std::wstring& path)
+{
+    std::wstring key = path;
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+    return L"path:" + key;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +256,23 @@ HICON MenuIconCache::LoadNewItemIcon(const shell::ShellNewItem& item)
     return nullptr;
 }
 
+HICON MenuIconCache::LoadPathIcon(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return nullptr;
+    }
+
+    SHFILEINFOW info = {};
+    if (::SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
+                         SHGFI_ICON | SHGFI_SMALLICON))
+    {
+        return NormalizeIcon(info.hIcon, kMenuIconSize);
+    }
+
+    return nullptr;
+}
+
 void MenuIconCache::Store(const std::wstring& key, HICON icon)
 {
     if (key.empty() || icon == nullptr)
@@ -341,6 +369,49 @@ void MenuIconCache::PrefetchNewItems(const std::vector<shell::ShellNewItem>& ite
     StartWorker();
 }
 
+void MenuIconCache::PrefetchPaths(const std::vector<std::wstring>& paths)
+{
+    if (paths.empty())
+    {
+        return;
+    }
+
+    bool needWork = false;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const std::wstring& path : paths)
+        {
+            // 带环境变量的路径这里不解析（取不到图标就留空，别每次弹出都重试）
+            if (path.empty() || path.find(L'%') != std::wstring::npos) continue;
+
+            const DWORD attr = ::GetFileAttributesW(path.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                continue;
+            }
+
+            if (m_icons.find(KeyForPath(path)) == m_icons.end())
+            {
+                needWork = true;
+                break;
+            }
+        }
+    }
+
+    if (!needWork)
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pendingPaths.insert(m_pendingPaths.end(), paths.begin(), paths.end());
+    }
+
+    StartWorker();
+}
+
 void MenuIconCache::StartWorker()
 {
     if (m_workerRunning)
@@ -365,11 +436,13 @@ void MenuIconCache::StartWorker()
         {
             std::vector<core::OpenWithItem>   programs;
             std::vector<shell::ShellNewItem>  newItems;
+            std::vector<std::wstring>         paths;
 
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
 
-                if (m_pendingPrograms.empty() && m_pendingNewItems.empty())
+                if (m_pendingPrograms.empty() && m_pendingNewItems.empty() &&
+                    m_pendingPaths.empty())
                 {
                     m_workerRunning = false;
                     break;
@@ -377,6 +450,7 @@ void MenuIconCache::StartWorker()
 
                 programs.swap(m_pendingPrograms);
                 newItems.swap(m_pendingNewItems);
+                paths.swap(m_pendingPaths);
             }
 
             for (const core::OpenWithItem& item : programs)
@@ -387,6 +461,11 @@ void MenuIconCache::StartWorker()
             for (const shell::ShellNewItem& item : newItems)
             {
                 Store(KeyForNewItem(item), LoadNewItemIcon(item));
+            }
+
+            for (const std::wstring& path : paths)
+            {
+                Store(KeyForPath(path), LoadPathIcon(path));
             }
         }
 

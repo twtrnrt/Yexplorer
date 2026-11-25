@@ -116,6 +116,9 @@ private:
     bool  m_pressedOverlayConfig = false;
     bool  m_overlayConfigDirty = false;
 
+    // 自定义右键菜单入口（原生按钮，点开 ContextMenuDialog）
+    HWND  m_hCtxMenuButton = nullptr;
+
     HFONT m_font        = nullptr;
     HFONT m_fontTitle   = nullptr;
     HFONT m_fontSection = nullptr;

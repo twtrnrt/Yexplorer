@@ -17,6 +17,8 @@
 
 #include "ui/SettingsDialog.h"
 
+#include "ui/ContextMenuDialog.h"
+
 #pragma comment(lib, "uxtheme.lib")
 
 #include "core/Logger.h"
@@ -55,6 +57,7 @@ const int kControlIdBackground     = 4014;
 const int kControlIdWinE           = 4015;
 const int kControlIdTabs           = 4016;
 const int kControlIdSingleInstance = 4017;
+const int kControlIdCustomMenu     = 4020;
 
 const COLORREF kBackgroundColor = RGB(255, 255, 255);
 const COLORREF kTitleColor      = RGB(32, 32, 32);
@@ -409,6 +412,19 @@ bool SettingsDialog::CreateDialogWindow()
     m_hCheckHidden = createCheck(kHiddenCheckText, kControlIdShowHidden, BS_AUTOCHECKBOX);
     m_hCheckSystem = createCheck(kSystemCheckText, kControlIdShowSystem, BS_AUTOCHECKBOX);
 
+    // 自定义右键菜单入口：原生按钮，点了开独立配置窗口
+    m_hCtxMenuButton = ::CreateWindowExW(
+        0, L"BUTTON", L"自定义右键菜单…",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        0, 0, 10, 10, m_hWnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdCustomMenu)),
+        ::GetModuleHandleW(nullptr), nullptr);
+    if (m_hCtxMenuButton != nullptr && m_font != nullptr)
+    {
+        ::SendMessageW(m_hCtxMenuButton, WM_SETFONT,
+                       reinterpret_cast<WPARAM>(m_font), TRUE);
+    }
+
     SetChecked(m_hCheck, core::Settings::Instance().MenuIcons());
     SetChecked(m_hCheckHidden, core::Settings::Instance().ShowHiddenFiles());
     SetChecked(m_hCheckSystem, core::Settings::Instance().ShowSystemFiles());
@@ -479,7 +495,20 @@ void SettingsDialog::Layout()
     };
 
     // 查看
-    place(m_hCheck,       112);
+    const int ctxButtonWidth = Scale(140);
+    const int ctxButtonHeight = Scale(28);
+    const int ctxButtonX = clientRect.right - padding - ctxButtonWidth;
+    if (m_hCtxMenuButton != nullptr)
+    {
+        ::MoveWindow(m_hCtxMenuButton, ctxButtonX, Scale(110),
+                     ctxButtonWidth, ctxButtonHeight, TRUE);
+    }
+    if (m_hCheck != nullptr)
+    {
+        // 给右侧按钮让位，避免复选框的整行点击区盖住按钮
+        ::MoveWindow(m_hCheck, padding, Scale(112),
+                     ctxButtonX - padding - Scale(8), rowHeight, TRUE);
+    }
     place(m_hCheckHidden, 146);
     place(m_hCheckSystem, 180);
 
@@ -1162,6 +1191,13 @@ LRESULT SettingsDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
             // 开关变化：释放旧处理器与缓存，下次枚举按新状态重建
             shell::OverlayManager::Instance().Shutdown();
             RefreshOverlayControls();
+            return 0;
+        }
+
+        if (controlId == kControlIdCustomMenu)
+        {
+            ui::ContextMenuDialog dialog(hWnd);
+            dialog.ShowModal();
             return 0;
         }
 
