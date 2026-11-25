@@ -514,6 +514,7 @@ bool MainWindow::HandleInitMenuPopup(HMENU menu)
         if (live.filled) return true;
         live.filled = true;
 
+
         while (::GetMenuItemCount(menu) > 0)
         {
             ::RemoveMenu(menu, 0, MF_BYPOSITION);
