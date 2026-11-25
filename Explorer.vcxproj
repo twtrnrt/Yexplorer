@@ -160,6 +160,9 @@
     <ClCompile Include="src\shell\ShellOpenWith.cpp" />
     <ClCompile Include="src\shell\ShellNew.cpp" />
     <ClCompile Include="src\shell\ActionRunner.cpp" />
+    <ClCompile Include="src\shell\MenuInventory.cpp" />
+    <ClCompile Include="src\shell\MenuApps.cpp" />
+    <ClCompile Include="src\shell\IconPaths.cpp" />
     <ClCompile Include="src\shell\DefaultManager.cpp" />
     <ClCompile Include="src\shell\ExplorerProxy.cpp" />
     <ClCompile Include="src\shell\ListaryIntegration.cpp" />
@@ -212,6 +215,10 @@
     <ClInclude Include="src\shell\ShellOpenWith.h" />
     <ClInclude Include="src\shell\ShellNew.h" />
     <ClInclude Include="src\shell\ActionRunner.h" />
+    <ClInclude Include="src\shell\MenuInventory.h" />
+    <ClInclude Include="src\shell\MenuApps.h" />
+    <ClInclude Include="src\shell\ContextMenuData.h" />
+    <ClInclude Include="src\shell\IconPaths.h" />
     <ClInclude Include="src\shell\DefaultManager.h" />
     <ClInclude Include="src\shell\ExplorerProxy.h" />
     <ClInclude Include="src\shell\ShellOperations.h" />

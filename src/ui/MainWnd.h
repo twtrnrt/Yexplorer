@@ -41,6 +41,7 @@
 namespace ui { class ShellWindowHost; }
 #include "shell/ShellIcon.h"
 #include "shell/ShellOpenWith.h"
+#include "shell/MenuApps.h"
 #include "ui/AddressBar.h"
 #include "ui/FileListView.h"
 #include "ui/MenuLayout.h"
@@ -138,6 +139,10 @@ static const int kCommandPrevTab        = 3224;  // Ctrl+Shift+Tab
 // 自定义快捷动作：命令号段（3700~3799，最多 100 个）
 static const int kCommandCustomActionBase = 3700;
 static const int kCommandCustomActionMax  = 100;
+
+// 第三方动态组采集出来的项：命令号段（3800~3999，最多 200 个）
+static const int kRuntimeMenuBase = 3800;
+static const int kRuntimeMenuMax  = 200;
 
 class MainWindow
 {
@@ -731,6 +736,9 @@ private:
 
     std::vector<std::unique_ptr<MenuDrawItem>> m_menuDrawItems;
 
+    // AttachMenuIcon 创建的菜单位图，菜单关闭后统一释放
+    std::vector<HBITMAP> m_menuBitmaps;
+
     // 自定义快捷动作的运行时条目：命令号 → 动作 + 这一次的目标路径。
     // 菜单关掉后 WM_COMMAND 才到，所以这个 vector 要留到下一次弹菜单前再清。
     struct CustomActionRuntime
@@ -742,6 +750,37 @@ private:
     };
 
     std::vector<CustomActionRuntime> m_customActionEntries;
+
+    // ---- 第三方动态组：一级空壳 + WM_INITMENUPOPUP 现场采集 ----
+    struct LiveSubMenu
+    {
+        HMENU                    menu = nullptr;
+        shell::AppSourceRow      row;
+        unsigned int             scene = 0;      // 老 MenuScene 位
+        std::wstring             parentFolder;
+        std::vector<std::wstring> targetPaths;
+        bool                     filled = false;
+    };
+
+    std::vector<LiveSubMenu> m_liveSubMenus;
+
+    struct RuntimeMenuEntry
+    {
+        int                       commandId = 0;
+        shell::MenuInventoryItem  item;
+        std::vector<std::wstring> targetPaths;
+        std::wstring              parentFolder;
+    };
+
+    std::vector<RuntimeMenuEntry> m_runtimeMenuEntries;
+
+    void AppendThirdPartyGroup(HMENU parent, const shell::AppSourceRow& row,
+                               unsigned int oldScene,
+                               const std::vector<std::wstring>& targetPaths,
+                               const std::wstring& parentFolder);
+    bool HandleInitMenuPopup(HMENU menu);
+    bool InvokeRuntimeMenuCommand(int commandId);
+    void AttachMenuIcon(HMENU menu, UINT position, HICON icon);
 
     // 画一个自绘菜单项（WM_DRAWITEM 里调）
     void DrawMenuItem(const DRAWITEMSTRUCT* drawItem);

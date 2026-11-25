@@ -24,6 +24,9 @@
 #include <shlwapi.h>
 #include <shobjidl.h>
 
+#include <algorithm>
+#include <vector>
+
 #pragma comment(lib, "shlwapi.lib")
 
 // ============================================================================
@@ -47,6 +50,10 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 {
     // 每次弹菜单前把上一次的自绘项数据清掉（下面的 owner-draw 项要用到它们）
     m_menuDrawItems.clear();
+    for (HBITMAP bitmap : m_menuBitmaps) ::DeleteObject(bitmap);
+    m_menuBitmaps.clear();
+    m_liveSubMenus.clear();
+    m_runtimeMenuEntries.clear();
     m_menuPrimaryIsContainerFile = false;
 
     // 上一次的自定义动作命令已经执行完（WM_COMMAND 是菜单关闭后才到），
@@ -225,8 +232,12 @@ void MainWindow::ShowContextMenu(POINT screenPoint)
 
     ::DestroyMenu(menu);
 
-    // 菜单已经关了，自绘项的数据可以放掉（下次弹菜单前还会再清一次，双保险）
+    // 菜单已经关了，自绘项的数据和挂上去的图标位图都可以放掉
+    // （下次弹菜单前还会再清一次，双保险）
     m_menuDrawItems.clear();
+    m_liveSubMenus.clear();
+    for (HBITMAP bitmap : m_menuBitmaps) ::DeleteObject(bitmap);
+    m_menuBitmaps.clear();
 
     if (command != 0)
     {
@@ -348,7 +359,308 @@ void CleanupMenuSeparators(HMENU menu)
     }
 }
 
+// 把 HICON 颜色位图转成菜单项可用的 32 位预乘 alpha DIB。
+// 动态组的二级项图标走 MENUITEMINFO + MIIM_BITMAP，不能用 SetMenuItemBitmaps
+// （后者是单色勾选图）。这段沿用旧方案已经验证过的 alpha 处理。
+HBITMAP CreateMenuBitmapFromIcon(HBITMAP color, int width, int height)
+{
+    if (color == nullptr || width <= 0 || height <= 0) return nullptr;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = width;
+    bmi.bmiHeader.biHeight      = -height;
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    std::vector<BYTE> pixels(static_cast<size_t>(width) * height * 4);
+    HDC screen = ::CreateCompatibleDC(nullptr);
+    if (screen == nullptr) return nullptr;
+    const int copied = ::GetDIBits(screen, color, 0, static_cast<UINT>(height),
+                                   pixels.data(), &bmi, DIB_RGB_COLORS);
+    ::DeleteDC(screen);
+    if (copied == 0) return nullptr;
+
+    bool hasNonZeroAlpha = false;
+    bool hasNonOpaqueAlpha = false;
+    for (size_t i = 3; i < pixels.size(); i += 4)
+    {
+        const BYTE a = pixels[i];
+        if (a != 0) hasNonZeroAlpha = true;
+        if (a != 255) hasNonOpaqueAlpha = true;
+    }
+
+    if (!hasNonZeroAlpha)
+    {
+        for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
+    }
+    else if (hasNonOpaqueAlpha)
+    {
+        for (size_t i = 0; i < pixels.size(); i += 4)
+        {
+            const BYTE a = pixels[i + 3];
+            if (a == 0)
+            {
+                pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+            }
+            else if (a != 255)
+            {
+                pixels[i]     = static_cast<BYTE>((pixels[i]     * a + 127) / 255);
+                pixels[i + 1] = static_cast<BYTE>((pixels[i + 1] * a + 127) / 255);
+                pixels[i + 2] = static_cast<BYTE>((pixels[i + 2] * a + 127) / 255);
+            }
+        }
+    }
+
+    void* bits = nullptr;
+    HBITMAP bitmap = ::CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bitmap == nullptr || bits == nullptr)
+    {
+        if (bitmap != nullptr) ::DeleteObject(bitmap);
+        return nullptr;
+    }
+    std::copy(pixels.begin(), pixels.end(), static_cast<BYTE*>(bits));
+    return bitmap;
+}
+
 } // namespace
+
+void MainWindow::AttachMenuIcon(HMENU menu, UINT position, HICON icon)
+{
+    if (menu == nullptr || icon == nullptr) return;
+
+    ICONINFO info = {};
+    if (!::GetIconInfo(icon, &info)) return;
+
+    HBITMAP color = info.hbmColor;
+    HBITMAP mask  = info.hbmMask;
+    if (color == nullptr)
+    {
+        if (mask != nullptr) ::DeleteObject(mask);
+        return;
+    }
+
+    BITMAP colorInfo = {};
+    if (::GetObjectW(color, sizeof(colorInfo), &colorInfo) == 0 ||
+        colorInfo.bmBitsPixel < 24)
+    {
+        ::DeleteObject(color);
+        if (mask != nullptr) ::DeleteObject(mask);
+        return;
+    }
+
+    HBITMAP itemBitmap = CreateMenuBitmapFromIcon(color, colorInfo.bmWidth,
+                                                  colorInfo.bmHeight);
+    if (itemBitmap != nullptr)
+    {
+        MENUITEMINFO mii = {};
+        mii.cbSize   = sizeof(MENUITEMINFO);
+        mii.fMask    = MIIM_BITMAP;
+        mii.hbmpItem = itemBitmap;
+        if (::SetMenuItemInfoW(menu, position, FALSE, &mii))
+        {
+            m_menuBitmaps.push_back(itemBitmap);
+        }
+        else
+        {
+            ::DeleteObject(itemBitmap);
+        }
+    }
+
+    ::DeleteObject(color);
+    if (mask != nullptr) ::DeleteObject(mask);
+}
+
+void MainWindow::AppendThirdPartyGroup(HMENU parent, const shell::AppSourceRow& row,
+                                       unsigned int oldScene,
+                                       const std::vector<std::wstring>& targetPaths,
+                                       const std::wstring& parentFolder)
+{
+    if (parent == nullptr || row.owners.empty()) return;
+
+    HMENU sub = ::CreatePopupMenu();
+    if (sub == nullptr) return;
+
+    ::AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, L"正在读取…");
+
+    LiveSubMenu live;
+    live.menu        = sub;
+    live.row         = row;
+    live.scene       = oldScene;
+    live.parentFolder = parentFolder;
+    live.targetPaths = targetPaths;
+    m_liveSubMenus.push_back(std::move(live));
+
+    // 右键菜单里只显示应用名，不显示（经典）/（现代）
+    ::AppendMenuW(parent, MF_POPUP | MF_STRING,
+                  reinterpret_cast<UINT_PTR>(sub), row.appName.c_str());
+
+    if (core::Settings::Instance().MenuIcons())
+    {
+        HICON icon = m_menuIcons.GetOwnerIcon(row.owners.front().server, row.appName);
+        if (icon != nullptr)
+        {
+            AttachMenuIcon(parent, static_cast<UINT>(::GetMenuItemCount(parent) - 1), icon);
+        }
+    }
+}
+
+bool MainWindow::HandleInitMenuPopup(HMENU menu)
+{
+    for (LiveSubMenu& live : m_liveSubMenus)
+    {
+        if (live.menu != menu) continue;
+        if (live.filled) return true;
+        live.filled = true;
+
+        while (::GetMenuItemCount(menu) > 0)
+        {
+            ::RemoveMenu(menu, 0, MF_BYPOSITION);
+        }
+
+        const bool showIcons = core::Settings::Instance().MenuIcons();
+        int renderedOwners = 0;
+
+        std::function<void(HMENU, const std::vector<shell::MenuInventoryItem>&)> appendItems;
+        appendItems = [&](HMENU target, const std::vector<shell::MenuInventoryItem>& rows)
+        {
+            for (const shell::MenuInventoryItem& item : rows)
+            {
+                if (item.separator)
+                {
+                    ::AppendMenuW(target, MF_SEPARATOR, 0, nullptr);
+                    continue;
+                }
+
+                const std::wstring text = item.text.empty() ? L"（无文字）" : item.text;
+
+                if (!item.children.empty())
+                {
+                    HMENU sub = ::CreatePopupMenu();
+                    if (sub == nullptr) continue;
+                    appendItems(sub, item.children);
+
+                    UINT flags = MF_POPUP | MF_STRING;
+                    if (item.disabled) flags |= MF_GRAYED;
+                    ::AppendMenuW(target, flags, reinterpret_cast<UINT_PTR>(sub), text.c_str());
+
+                    if (showIcons)
+                    {
+                        HICON icon = m_menuIcons.GetFile(item.iconFile);
+                        if (icon != nullptr)
+                        {
+                            AttachMenuIcon(target,
+                                           static_cast<UINT>(::GetMenuItemCount(target) - 1),
+                                           icon);
+                        }
+                    }
+                    continue;
+                }
+
+                if (static_cast<int>(m_runtimeMenuEntries.size()) >= kRuntimeMenuMax)
+                {
+                    continue;
+                }
+
+                const int commandId = kRuntimeMenuBase +
+                                      static_cast<int>(m_runtimeMenuEntries.size());
+
+                RuntimeMenuEntry runtime;
+                runtime.commandId  = commandId;
+                runtime.item       = item;
+                runtime.targetPaths = live.targetPaths;
+                runtime.parentFolder = live.parentFolder;
+                m_runtimeMenuEntries.push_back(std::move(runtime));
+
+                UINT flags = MF_STRING;
+                if (item.disabled) flags |= MF_GRAYED;
+
+                HICON icon = showIcons ? m_menuIcons.GetFile(item.iconFile) : nullptr;
+                if (icon != nullptr)
+                {
+                    auto drawItem = std::make_unique<MenuDrawItem>();
+                    drawItem->text = text;
+                    drawItem->icon = icon;
+
+                    MenuDrawItem* raw = drawItem.get();
+                    m_menuDrawItems.push_back(std::move(drawItem));
+                    ::AppendMenuW(target, flags | MF_OWNERDRAW, commandId,
+                                  reinterpret_cast<LPCTSTR>(raw));
+                }
+                else
+                {
+                    ::AppendMenuW(target, flags, static_cast<UINT>(commandId), text.c_str());
+                }
+            }
+        };
+
+        for (const shell::DynamicOwner& owner : live.row.owners)
+        {
+            std::vector<shell::MenuInventoryItem> items;
+            std::wstring error;
+            const bool ok = shell::CaptureOwnerMenu(
+                owner.kind, owner.clsid, live.targetPaths, live.parentFolder,
+                live.scene, items, &error);
+
+            if (!ok || items.empty())
+            {
+                Logger::Warn(L"第三方菜单现场采集失败/为空：" + live.row.appName +
+                             L"；" + owner.displayName + L"；" + error);
+                continue;
+            }
+
+
+            if (renderedOwners > 0)
+            {
+                ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            }
+            appendItems(menu, items);
+            ++renderedOwners;
+        }
+
+        if (renderedOwners == 0)
+        {
+            ::AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"此扩展名无可用功能");
+        }
+        return true;
+    }
+    return false;
+}
+
+bool MainWindow::InvokeRuntimeMenuCommand(int commandId)
+{
+    for (const RuntimeMenuEntry& runtime : m_runtimeMenuEntries)
+    {
+        if (runtime.commandId != commandId) continue;
+
+        std::wstring workingDir = runtime.parentFolder;
+        if (workingDir.empty() && !runtime.targetPaths.empty())
+        {
+            workingDir = runtime.targetPaths.front();
+            wchar_t drive[MAX_PATH] = {};
+            wchar_t dir[MAX_PATH] = {};
+            wchar_t name[MAX_PATH] = {};
+            wchar_t ext[MAX_PATH] = {};
+            if (::_wsplitpath_s(workingDir.c_str(), drive, MAX_PATH, dir, MAX_PATH,
+                                name, MAX_PATH, ext, MAX_PATH) == 0)
+            {
+                workingDir = std::wstring(drive) + dir;
+                if (!workingDir.empty() && workingDir.back() == L'\\') workingDir.pop_back();
+            }
+        }
+
+        std::wstring error;
+        const bool ok = shell::InvokeInventoryItem(runtime.item, runtime.targetPaths,
+                                                   workingDir, m_hWnd, &error);
+        if (!ok)
+        {
+            Logger::Warn(L"第三方右键执行失败：" + runtime.item.text + L"；" + error);
+        }
+        return true;
+    }
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // 文件夹空白处
@@ -584,7 +896,34 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
         }
     }
 
-    const bool actionsAvailable = !matchingActions.empty();
+    // 第三方「应用 + 来源」：勾了哪些，就按配置顺序挂哪些动态子菜单
+    const std::wstring thirdSceneKey = ui::MenuSceneKey(layoutScene);
+    const unsigned thirdSceneBit = 1u << static_cast<unsigned>(layoutScene);
+    std::vector<const shell::AppSourceRow*> thirdRows;
+
+    auto thirdIt = layout.thirdParty.find(thirdSceneKey);
+    if (thirdIt != layout.thirdParty.end())
+    {
+        for (const ui::ThirdPartySelection& selection : thirdIt->second)
+        {
+            const shell::AppSourceRow* app = shell::FindAppSourceRow(selection.key);
+            if (app == nullptr) continue;
+            if ((app->scenes & thirdSceneBit) == 0) continue;
+            thirdRows.push_back(app);
+        }
+    }
+
+    // 老 MenuScene 位给 CaptureOwnerMenu 用
+    unsigned int oldScene = 1;
+    switch (layoutScene)
+    {
+    case ui::MenuScene::Background: oldScene = 8; break;
+    case ui::MenuScene::File:       oldScene = 1; break;
+    case ui::MenuScene::Folder:     oldScene = 2; break;
+    case ui::MenuScene::Multiple:   oldScene = 4; break;
+    }
+
+    const bool actionsAvailable = !thirdRows.empty() || !matchingActions.empty();
     const std::vector<std::wstring> order =
         ui::ResolveMenuOrder(layout, layoutScene, available, actionsAvailable);
 
@@ -600,6 +939,12 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
 
         if (token == L"actions")
         {
+            for (const shell::AppSourceRow* row : thirdRows)
+            {
+                AppendThirdPartyGroup(menu, *row, oldScene,
+                                      actionContext.paths, actionContext.currentDir);
+            }
+
             if (showIcons)
             {
                 std::vector<std::wstring> iconPaths;

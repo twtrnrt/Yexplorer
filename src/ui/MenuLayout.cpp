@@ -293,6 +293,7 @@ void ApplyDefaultMenuLayout(MenuLayout& layout)
 {
     layout.version = kLayoutVersion;
     layout.scenes.clear();
+    layout.thirdParty.clear();
     for (MenuScene scene : { MenuScene::Background, MenuScene::File,
                              MenuScene::Folder, MenuScene::Multiple })
     {
@@ -424,6 +425,49 @@ bool ParseActions(const json& root, std::vector<CustomAction>& out)
     return true;
 }
 
+// 解析 thirdParty：{ "file": [ {"key":"...","app":"WPS Office","source":"classic"} ] }
+void ParseThirdParty(const json& root, MenuLayout& layout)
+{
+    if (!root.contains("thirdParty") || !root["thirdParty"].is_object())
+    {
+        return;
+    }
+
+    for (MenuScene scene : { MenuScene::Background, MenuScene::File,
+                             MenuScene::Folder, MenuScene::Multiple })
+    {
+        const std::string sceneKey = ToUtf8(MenuSceneKey(scene));
+        if (!root["thirdParty"].contains(sceneKey) ||
+            !root["thirdParty"][sceneKey].is_array())
+        {
+            continue;
+        }
+
+        std::vector<ThirdPartySelection> selections;
+        for (const json& item : root["thirdParty"][sceneKey])
+        {
+            if (!item.is_object()) continue;
+
+            ThirdPartySelection selection;
+            selection.appName = FromUtf8(item.value("app", std::string()));
+            selection.key     = FromUtf8(item.value("key", std::string()));
+
+            const std::string source = item.value("source", std::string("classic"));
+            selection.source = (source == "modern") ? 1 : 0;
+            if (selection.appName.empty()) continue;
+
+            if (selection.key.empty())
+            {
+                selection.key = selection.appName + L"|" +
+                                (selection.source == 1 ? L"1" : L"0");
+            }
+            selections.push_back(std::move(selection));
+        }
+
+        layout.thirdParty[MenuSceneKey(scene)] = std::move(selections);
+    }
+}
+
 } // namespace
 
 bool LoadMenuLayoutFrom(const std::wstring& path, MenuLayout& layout)
@@ -512,6 +556,7 @@ bool LoadMenuLayoutFrom(const std::wstring& path, MenuLayout& layout)
         }
     }
 
+    ParseThirdParty(root, layout);
     ParseActions(root, layout.actions);
     return true;
 }
@@ -540,6 +585,30 @@ static bool SaveMenuLayoutInternal(const std::wstring& path, const MenuLayout& l
         scenes[ToUtf8(key)] = array;
     }
     root["scenes"] = scenes;
+
+    json thirdParty = json::object();
+    for (MenuScene scene : { MenuScene::Background, MenuScene::File,
+                             MenuScene::Folder, MenuScene::Multiple })
+    {
+        const std::wstring sceneKey = MenuSceneKey(scene);
+        auto it = layout.thirdParty.find(sceneKey);
+        if (it == layout.thirdParty.end() || it->second.empty())
+        {
+            continue;
+        }
+
+        json array = json::array();
+        for (const ThirdPartySelection& selection : it->second)
+        {
+            json item;
+            item["key"]    = ToUtf8(selection.key);
+            item["app"]    = ToUtf8(selection.appName);
+            item["source"] = (selection.source == 1) ? "modern" : "classic";
+            array.push_back(std::move(item));
+        }
+        thirdParty[ToUtf8(sceneKey)] = array;
+    }
+    root["thirdParty"] = thirdParty;
 
     json actions = json::array();
     for (const CustomAction& action : layout.actions)

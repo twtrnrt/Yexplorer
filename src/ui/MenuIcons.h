@@ -52,8 +52,7 @@ public:
     void PrefetchPrograms(const std::vector<core::OpenWithItem>& programs);
     void PrefetchNewItems(const std::vector<shell::ShellNewItem>& items);
 
-    // 任意程序/文件路径的图标（自定义快捷动作用）。路径按小写做键。
-    // 同样只在后台取，菜单弹出只查表。
+    // 任意程序/文件路径的图标（手动添加的程序用）
     void PrefetchPaths(const std::vector<std::wstring>& paths);
 
     // 等后台线程收尾（程序退出前调，避免它还在跑就析构了）
@@ -62,9 +61,17 @@ public:
     // 查一个图标。没有返回 nullptr（菜单画空位，不阻塞）
     HICON Get(const std::wstring& key);
 
+    // 查动态组二级项采集下来的 BMP 图标（相对 menu-icons 目录或绝对路径）
+    HICON GetFile(const std::wstring& iconFile);
+
+    // 查某个应用/来源自己的图标（动态组二级项没采到真实图标时兜底）
+    HICON GetOwnerIcon(const std::wstring& server, const std::wstring& appName);
+
     // ---- 缓存键（键必须稳定，换一次就等于缓存失效）----
     static std::wstring KeyForProgram(const core::OpenWithItem& item);
     static std::wstring KeyForNewItem(const shell::ShellNewItem& item);
+    static std::wstring KeyForFile(const std::wstring& iconFile);
+    static std::wstring KeyForOwner(const std::wstring& server, const std::wstring& appName);
     static std::wstring KeyForPath(const std::wstring& path);
 
 private:
@@ -76,7 +83,13 @@ private:
     // 取一个「新建」项的 16px 图标
     static HICON LoadNewItemIcon(const shell::ShellNewItem& item);
 
-    // 取一个任意路径的 16px 图标
+    // 取动态组二级项落盘的 BMP 图标
+    static HICON LoadFileIcon(const std::wstring& iconFile);
+
+    // 取应用/来源自己的图标
+    static HICON LoadOwnerIcon(const std::wstring& server, const std::wstring& appName);
+
+    // 取任意路径的图标（手动添加的程序）
     static HICON LoadPathIcon(const std::wstring& path);
 
     void Store(const std::wstring& key, HICON icon);

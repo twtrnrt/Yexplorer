@@ -1440,6 +1440,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     // --------------------------------------------------------------
+    // 第三方动态组：展开二级菜单时才去问原 handler
+    // --------------------------------------------------------------
+    case WM_INITMENUPOPUP:
+        if (HandleInitMenuPopup(reinterpret_cast<HMENU>(wParam)))
+        {
+            return 0;
+        }
+        break;
+
+    // --------------------------------------------------------------
     // 自绘菜单项：量尺寸 + 绘制
     //
     // 只有「打开方式」「新建」两个子菜单在开关打开时才用 MF_OWNERDRAW，
@@ -1893,6 +1903,14 @@ void MainWindow::OnOperationDone(HRESULT hr)
 bool MainWindow::HandleCommandMessage(WPARAM wParam)
 {
     int controlId = LOWORD(wParam);
+
+    // ---- 第三方动态组现场采集出来的项：命令 ID = 3800 + 运行时下标 ----
+    if (controlId >= kRuntimeMenuBase &&
+        controlId < kRuntimeMenuBase + kRuntimeMenuMax)
+    {
+        InvokeRuntimeMenuCommand(controlId);
+        return true;
+    }
 
     // ---- 自定义快捷动作：命令 ID = 3700 + 本次菜单里的动作下标 ----
     if (controlId >= kCommandCustomActionBase &&

@@ -8,14 +8,23 @@
 #include "ui/MenuIcons.h"
 
 #include "core/Logger.h"
+#include "shell/IconPaths.h"
 
+#include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
+#include <vector>
 
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "windowscodecs.lib")
+
+using Microsoft::WRL::ComPtr;
 
 namespace
 {
@@ -34,6 +43,132 @@ HICON NormalizeIcon(HICON source, int size)
     ::DestroyIcon(source);
 
     return resized;
+}
+
+// ---------------------------------------------------------------------------
+// 用 Windows 自带的 WIC 解码 PNG。WPS 的传统菜单只给 PNG 图标资产，
+// 个别项（文档比对）没有对应的 ICO，只能走这里读 PNG；不引入第三方库。
+// ---------------------------------------------------------------------------
+HICON LoadPngIcon(const std::wstring& path, int size)
+{
+    ComPtr<IWICImagingFactory> factory;
+    if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory))) || !factory)
+    {
+        return nullptr;
+    }
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                   WICDecodeMetadataCacheOnLoad, &decoder)) || !decoder)
+    {
+        return nullptr;
+    }
+
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, &frame)) || !frame)
+    {
+        return nullptr;
+    }
+
+    ComPtr<IWICFormatConverter> converter;
+    if (FAILED(factory->CreateFormatConverter(&converter)))
+    {
+        return nullptr;
+    }
+    if (FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA,
+                                     WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeCustom)))
+    {
+        return nullptr;
+    }
+
+    ComPtr<IWICBitmapScaler> scaler;
+    if (FAILED(factory->CreateBitmapScaler(&scaler)))
+    {
+        return nullptr;
+    }
+    if (FAILED(scaler->Initialize(converter.Get(), static_cast<UINT>(size),
+                                  static_cast<UINT>(size),
+                                  WICBitmapInterpolationModeHighQualityCubic)))
+    {
+        return nullptr;
+    }
+
+    const UINT stride = static_cast<UINT>(size) * 4;
+    std::vector<BYTE> pixels(static_cast<size_t>(stride) * static_cast<size_t>(size));
+    if (FAILED(scaler->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()),
+                                  pixels.data())))
+    {
+        return nullptr;
+    }
+
+    // 32 位 BGRA DIB：CreateIconIndirect 会保留 alpha，菜单上不会再出现黑底。
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = size;   // 正高度是自下而上，CreateIconIndirect 更稳妥
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP color = ::CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (color == nullptr || bits == nullptr)
+    {
+        if (color != nullptr) ::DeleteObject(color);
+        return nullptr;
+    }
+
+    // WIC 的 CopyPixels 是自上而下；DIB 用正高度时内存是自下而上，需要逐行翻转。
+    BYTE* destination = static_cast<BYTE*>(bits);
+    for (int y = 0; y < size; ++y)
+    {
+        std::memcpy(destination + static_cast<size_t>(size - 1 - y) * stride,
+                    pixels.data() + static_cast<size_t>(y) * stride,
+                    stride);
+    }
+
+    HBITMAP mask = ::CreateBitmap(size, size, 1, 1, nullptr);
+    if (mask == nullptr)
+    {
+        ::DeleteObject(color);
+        return nullptr;
+    }
+
+    // SetMenuItemBitmaps（带子菜单的项走这条路径）只有 AND mask，不认 32 位 alpha。
+    // 必须按 alpha 生成 mask：透明像素置 1（不画），不透明像素置 0（画彩色位图）。
+    // 否则 WPS AI 这种“父项”会整块黑底。
+    HDC maskDc = ::CreateCompatibleDC(nullptr);
+    if (maskDc != nullptr)
+    {
+        HGDIOBJ oldMask = ::SelectObject(maskDc, mask);
+        ::PatBlt(maskDc, 0, 0, size, size, BLACKNESS);
+        for (int y = 0; y < size; ++y)
+        {
+            for (int x = 0; x < size; ++x)
+            {
+                const BYTE alpha = pixels[static_cast<size_t>(y) * stride +
+                                          static_cast<size_t>(x) * 4 + 3];
+                if (alpha < 128)
+                {
+                    ::SetPixelV(maskDc, x, y, RGB(255, 255, 255));
+                }
+            }
+        }
+        ::SelectObject(maskDc, oldMask);
+        ::DeleteDC(maskDc);
+    }
+
+    ICONINFO info = {};
+    info.fIcon = TRUE;
+    info.hbmColor = color;
+    info.hbmMask = mask;
+    HICON icon = ::CreateIconIndirect(&info);
+
+    ::DeleteObject(mask);
+    ::DeleteObject(color);
+    return icon;
 }
 
 // 菜单里图标统一尺寸（96 DPI 下 16px，高 DPI 由系统缩放菜单时一起放大）
@@ -69,11 +204,24 @@ std::wstring MenuIconCache::KeyForNewItem(const shell::ShellNewItem& item)
     return L"new:" + item.menuKey;
 }
 
+std::wstring MenuIconCache::KeyForFile(const std::wstring& iconFile)
+{
+    std::wstring key = iconFile;
+    std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+    return L"file:" + key;
+}
+
+std::wstring MenuIconCache::KeyForOwner(const std::wstring& server, const std::wstring& appName)
+{
+    std::wstring key = server + L"|" + appName;
+    std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+    return L"owner:" + key;
+}
+
 std::wstring MenuIconCache::KeyForPath(const std::wstring& path)
 {
     std::wstring key = path;
-    std::transform(key.begin(), key.end(), key.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+    std::transform(key.begin(), key.end(), key.begin(), ::towlower);
     return L"path:" + key;
 }
 
@@ -256,21 +404,169 @@ HICON MenuIconCache::LoadNewItemIcon(const shell::ShellNewItem& item)
     return nullptr;
 }
 
-HICON MenuIconCache::LoadPathIcon(const std::wstring& path)
+namespace
 {
-    if (path.empty())
+
+std::wstring MenuIconFullPath(const std::wstring& iconFile)
+{
+    if (iconFile.empty()) return std::wstring();
+    if (iconFile.find(L'\\') != std::wstring::npos ||
+        iconFile.find(L'/') != std::wstring::npos ||
+        iconFile.find(L':') != std::wstring::npos)
     {
+        return iconFile;
+    }
+
+    const std::wstring dir = shell::IconDir();
+    if (dir.empty()) return std::wstring();
+    return dir + L"\\" + iconFile;
+}
+
+std::wstring NormalizeOwnerAppName(const std::wstring& text)
+{
+    std::wstring out;
+    for (wchar_t ch : text)
+    {
+        if (::iswalnum(ch)) out.push_back(static_cast<wchar_t>(::towlower(ch)));
+    }
+    return out;
+}
+
+// 菜单图标落盘时背景可能是白色，也可能是黑色（owner-draw 扩展把透明像素
+// 画成了黑色）。加载时先看四个角，按占多数的角颜色做透明键，避免整个黑块
+// 被当成图标背景画到菜单上。
+COLORREF MenuIconMaskColor(HBITMAP bitmap)
+{
+    if (bitmap == nullptr) return RGB(255, 255, 255);
+
+    HDC dc = ::CreateCompatibleDC(nullptr);
+    if (dc == nullptr) return RGB(255, 255, 255);
+
+    HGDIOBJ old = ::SelectObject(dc, bitmap);
+    const COLORREF corners[4] = {
+        ::GetPixel(dc, 0, 0),
+        ::GetPixel(dc, 15, 0),
+        ::GetPixel(dc, 0, 15),
+        ::GetPixel(dc, 15, 15)
+    };
+    ::SelectObject(dc, old);
+    ::DeleteDC(dc);
+
+    // 统计出现最多的角颜色；CLR_INVALID 忽略。
+    COLORREF best = RGB(255, 255, 255);
+    int bestCount = 0;
+    for (COLORREF color : corners)
+    {
+        if (color == CLR_INVALID) continue;
+        int count = 0;
+        for (COLORREF other : corners)
+        {
+            if (other == color) ++count;
+        }
+        if (count > bestCount)
+        {
+            best = color;
+            bestCount = count;
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+HICON MenuIconCache::LoadFileIcon(const std::wstring& iconFile)
+{
+    const std::wstring path = MenuIconFullPath(iconFile);
+    if (path.empty()) return nullptr;
+
+    // 新采集的动态菜单图标是 32 位 alpha ICO，直接按图标加载，保留透明通道。
+    // 旧缓存里的 .bmp 仍按下面的兼容路径处理。
+    const size_t dot = path.find_last_of(L'.');
+    if (dot != std::wstring::npos && _wcsicmp(path.c_str() + dot, L".ico") == 0)
+    {
+        HICON icon = static_cast<HICON>(::LoadImageW(
+            nullptr, path.c_str(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE));
+        if (icon != nullptr) return NormalizeIcon(icon, kMenuIconSize);
+    }
+
+    // WPS 传统菜单资产是 PNG；用 WIC 解成带 alpha 的 HICON。
+    if (dot != std::wstring::npos && _wcsicmp(path.c_str() + dot, L".png") == 0)
+    {
+        HICON icon = LoadPngIcon(path, kMenuIconSize);
+        if (icon != nullptr) return NormalizeIcon(icon, kMenuIconSize);
+    }
+
+    HBITMAP bitmap = static_cast<HBITMAP>(::LoadImageW(
+        nullptr, path.c_str(), IMAGE_BITMAP, 16, 16,
+        LR_LOADFROMFILE | LR_CREATEDIBSECTION));
+    if (bitmap == nullptr) return nullptr;
+
+    HIMAGELIST list = ::ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 1, 1);
+    if (list == nullptr)
+    {
+        ::DeleteObject(bitmap);
         return nullptr;
     }
 
-    SHFILEINFOW info = {};
-    if (::SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
-                         SHGFI_ICON | SHGFI_SMALLICON))
+    const int index = ::ImageList_AddMasked(list, bitmap, MenuIconMaskColor(bitmap));
+    ::DeleteObject(bitmap);
+    if (index < 0)
     {
-        return NormalizeIcon(info.hIcon, kMenuIconSize);
+        ::ImageList_Destroy(list);
+        return nullptr;
     }
 
-    return nullptr;
+    HICON icon = ::ImageList_GetIcon(list, index, ILD_TRANSPARENT);
+    ::ImageList_Destroy(list);
+    return icon != nullptr ? NormalizeIcon(icon, kMenuIconSize) : nullptr;
+}
+
+HICON MenuIconCache::LoadOwnerIcon(const std::wstring& server, const std::wstring& appName)
+{
+    if (server.empty()) return nullptr;
+
+    HICON largeIcon = nullptr;
+    HICON smallIcon = nullptr;
+    const UINT count = ::ExtractIconExW(server.c_str(), 0, &largeIcon, &smallIcon, 1);
+    if (largeIcon != nullptr) ::DestroyIcon(largeIcon);
+    if (smallIcon != nullptr) return NormalizeIcon(smallIcon, kMenuIconSize);
+    if (count > 0) return nullptr;
+
+    // DLL 本身没有图标时，到同目录找和应用名同名的 EXE（WPS → wpsoffice.exe）。
+    const size_t slash = server.find_last_of(L"\\/");
+    if (slash == std::wstring::npos || slash + 1 >= server.size()) return nullptr;
+
+    const std::wstring dir = server.substr(0, slash);
+    const std::wstring wanted = NormalizeOwnerAppName(appName);
+    if (wanted.empty()) return nullptr;
+
+    WIN32_FIND_DATAW data = {};
+    const std::wstring pattern = dir + L"\\*.exe";
+    HANDLE find = ::FindFirstFileW(pattern.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return nullptr;
+
+    HICON result = nullptr;
+    do
+    {
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        std::wstring name = data.cFileName;
+        const size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos) name.erase(dot);
+        if (NormalizeOwnerAppName(name) != wanted) continue;
+
+        const std::wstring exe = dir + L"\\" + data.cFileName;
+        HICON exeLarge = nullptr;
+        HICON exeSmall = nullptr;
+        const UINT exeCount = ::ExtractIconExW(exe.c_str(), 0, &exeLarge, &exeSmall, 1);
+        if (exeLarge != nullptr) ::DestroyIcon(exeLarge);
+        if (exeCount > 0 && exeSmall != nullptr)
+        {
+            result = NormalizeIcon(exeSmall, kMenuIconSize);
+            break;
+        }
+    } while (::FindNextFileW(find, &data));
+    ::FindClose(find);
+    return result;
 }
 
 void MenuIconCache::Store(const std::wstring& key, HICON icon)
@@ -296,6 +592,64 @@ HICON MenuIconCache::Get(const std::wstring& key)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    auto it = m_icons.find(key);
+    return (it != m_icons.end()) ? it->second : nullptr;
+}
+
+HICON MenuIconCache::LoadPathIcon(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return nullptr;
+    }
+
+    SHFILEINFOW info = {};
+    if (::SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
+                         SHGFI_ICON | SHGFI_SMALLICON))
+    {
+        return NormalizeIcon(info.hIcon, kMenuIconSize);
+    }
+    return nullptr;
+}
+
+HICON MenuIconCache::GetFile(const std::wstring& iconFile)
+{
+    if (iconFile.empty()) return nullptr;
+
+    const std::wstring key = KeyForFile(iconFile);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_icons.find(key);
+        if (it != m_icons.end()) return it->second;
+    }
+
+    HICON icon = LoadFileIcon(iconFile);
+    if (icon == nullptr) return nullptr;
+
+    Store(key, icon);
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_icons.find(key);
+    return (it != m_icons.end()) ? it->second : nullptr;
+}
+
+HICON MenuIconCache::GetOwnerIcon(const std::wstring& server, const std::wstring& appName)
+{
+    if (server.empty()) return nullptr;
+
+    const std::wstring key = KeyForOwner(server, appName);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_icons.find(key);
+        if (it != m_icons.end()) return it->second;
+    }
+
+    HICON icon = LoadOwnerIcon(server, appName);
+    if (icon == nullptr) return nullptr;
+
+    Store(key, icon);
+
+    std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_icons.find(key);
     return (it != m_icons.end()) ? it->second : nullptr;
 }
@@ -382,7 +736,6 @@ void MenuIconCache::PrefetchPaths(const std::vector<std::wstring>& paths)
         std::lock_guard<std::mutex> lock(m_mutex);
         for (const std::wstring& path : paths)
         {
-            // 带环境变量的路径这里不解析（取不到图标就留空，别每次弹出都重试）
             if (path.empty() || path.find(L'%') != std::wstring::npos) continue;
 
             const DWORD attr = ::GetFileAttributesW(path.c_str());

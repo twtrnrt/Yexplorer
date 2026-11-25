@@ -92,6 +92,15 @@ struct CustomAction
     int          order = 0;
 };
 
+// 第三方应用的一个「应用 + 来源类型」选择。
+// 设置里显示成「WPS Office（经典）」；右键菜单里只显示应用名。
+struct ThirdPartySelection
+{
+    std::wstring key;       // AppSourceKey：应用名 + "|" + 0/1
+    std::wstring appName;
+    int          source = 0;   // 0=经典，1=现代
+};
+
 struct MenuLayout
 {
     int version = 1;
@@ -100,6 +109,10 @@ struct MenuLayout
     // value = 有序 token 清单（内置项 ID / "sep" / "actions"）
     std::map<std::wstring, std::vector<std::wstring>> scenes;
 
+    // 每个场景勾选了哪些第三方「应用 + 来源」；默认空 = 全部不勾。
+    std::map<std::wstring, std::vector<ThirdPartySelection>> thirdParty;
+
+    // 手动添加的程序（平铺项）
     std::vector<CustomAction> actions;
 };
 

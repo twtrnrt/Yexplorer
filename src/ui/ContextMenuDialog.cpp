@@ -2,27 +2,20 @@
 // 文件管理器（自研 Explorer 替代品）
 // 文件：src/ui/ContextMenuDialog.cpp
 //
-// 「自定义右键菜单」配置窗口的实现。界面说明见 ContextMenuDialog.h。
-//
-// 这一版只做两件事：
-//   1. 当前场景显示哪些内置项、按什么顺序（勾选 + 上下移 + 分隔线）；
-//   2. 用户自己的快捷动作（选程序 / 预设，自动填参数，不需要写命令行）。
-//
-// 明确不做：不采集系统右键菜单、不调第三方 Shell 扩展、不做「系统菜单」入口。
+// 单列表版「自定义右键菜单」配置窗口。说明见 ContextMenuDialog.h。
 // ============================================================================
 
 #include "ui/ContextMenuDialog.h"
 
 #include "core/Logger.h"
+#include "shell/MenuApps.h"
 
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
-#include <shlobj.h>
 #include <shlwapi.h>
 
 #include <algorithm>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -37,20 +30,15 @@ namespace
 
 const wchar_t* const kClassName = L"FileExplorerContextMenuDialog";
 
-const int kIdSceneCombo   = 3001;
-const int kIdList         = 3002;
-const int kIdUp           = 3003;
-const int kIdDown         = 3004;
-const int kIdAddSep       = 3005;
-const int kIdRestore      = 3006;
-const int kIdAddProgram   = 3007;
-const int kIdAddPreset    = 3008;
-const int kIdRemoveAction = 3009;
-const int kIdActionUp     = 3010;
-const int kIdActionDown   = 3011;
-const int kIdSave         = 3012;
-const int kIdCancel       = 3013;
-const int kIdActionList   = 3014;
+const int kIdSceneCombo = 3001;
+const int kIdList       = 3002;
+const int kIdAddProgram = 3003;
+const int kIdUp         = 3004;
+const int kIdDown       = 3005;
+const int kIdDelete     = 3006;
+const int kIdRestore    = 3007;
+const int kIdSave       = 3008;
+const int kIdCancel     = 3009;
 
 const int kDialogWidth  = 820;
 const int kDialogHeight = 660;
@@ -62,10 +50,7 @@ std::wstring FileStem(const std::wstring& path)
     const wchar_t* name = ::PathFindFileNameW(path.c_str());
     std::wstring stem = (name != nullptr) ? name : path;
     const size_t dot = stem.find_last_of(L'.');
-    if (dot != std::wstring::npos && dot > 0)
-    {
-        stem = stem.substr(0, dot);
-    }
+    if (dot != std::wstring::npos && dot > 0) stem.resize(dot);
     return stem;
 }
 
@@ -76,105 +61,25 @@ bool FileExists(const std::wstring& path)
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-std::wstring EnvValue(const wchar_t* name)
+int NextActionOrder(const std::vector<CustomAction>& actions)
 {
-    wchar_t buffer[32768] = {};
-    const DWORD length = ::GetEnvironmentVariableW(name, buffer, 32768);
-    return length > 0 ? std::wstring(buffer, length) : std::wstring();
+    int maxOrder = 0;
+    for (const CustomAction& action : actions)
+    {
+        maxOrder = std::max(maxOrder, action.order);
+    }
+    return maxOrder + 10;
 }
 
-std::wstring JoinPath(const std::wstring& a, const std::wstring& b)
+std::wstring SourceLabel(int source)
 {
-    if (a.empty()) return b;
-    if (b.empty()) return a;
-    if (a.back() == L'\\' || a.back() == L'/') return a + b;
-    return a + L"\\" + b;
-}
-
-// 预设：只放本机常见、能用一条命令表达的动作。
-// 取不到的预设不在菜单里出现，不猜、不硬编码用户目录。
-struct PresetInfo
-{
-    const wchar_t* title;
-    const wchar_t* arguments;
-    unsigned       scenes;
-    const wchar_t* extensions;   // 分号分隔；空 = 全部
-};
-
-const PresetInfo kPresets[] =
-{
-    { L"用 VS Code 打开",            L"%1",                                            0x0E, L"" },
-    { L"7-Zip 解压到当前文件夹",     L"x %1 -o%dir%",                                  0x02, L".zip;.7z;.rar;.tar;.gz;.bz2;.xz;.iso" },
-    { L"WinRAR 解压到当前文件夹",    L"x -y %1 %dir%",                                0x02, L".zip;.7z;.rar;.tar;.gz;.bz2;.xz;.iso" },
-    { L"在此打开 PowerShell",        L"-NoExit -Command Set-Location -LiteralPath %dir%", 0x05, L"" },
-    { L"用记事本打开",               L"%1",                                            0x0A, L"" },
-};
-
-std::wstring PresetProgram(int index)
-{
-    const std::wstring programFiles = EnvValue(L"ProgramFiles");
-    const std::wstring programFiles64 = EnvValue(L"ProgramW6432");
-    const std::wstring localAppData = EnvValue(L"LOCALAPPDATA");
-    const std::wstring systemRoot = EnvValue(L"SystemRoot");
-
-    switch (index)
-    {
-    case 0:   // VS Code
-    {
-        const wchar_t* candidates[] =
-        {
-            L"Programs\\Microsoft VS Code\\Code.exe",
-        };
-        for (const wchar_t* relative : candidates)
-        {
-            const std::wstring path = JoinPath(localAppData, relative);
-            if (FileExists(path)) return path;
-        }
-        const std::wstring path = JoinPath(programFiles, L"Microsoft VS Code\\Code.exe");
-        return FileExists(path) ? path : std::wstring();
-    }
-
-    case 1:   // 7-Zip
-    {
-        for (const std::wstring& root : { programFiles, programFiles64 })
-        {
-            const std::wstring path = JoinPath(root, L"7-Zip\\7zG.exe");
-            if (FileExists(path)) return path;
-        }
-        return std::wstring();
-    }
-
-    case 2:   // WinRAR
-    {
-        for (const std::wstring& root : { programFiles, programFiles64 })
-        {
-            const std::wstring path = JoinPath(root, L"WinRAR\\WinRAR.exe");
-            if (FileExists(path)) return path;
-        }
-        return std::wstring();
-    }
-
-    case 3:   // PowerShell
-    {
-        const std::wstring path = JoinPath(systemRoot, L"System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-        return FileExists(path) ? path : std::wstring();
-    }
-
-    case 4:   // 记事本
-    {
-        const std::wstring path = JoinPath(systemRoot, L"System32\\notepad.exe");
-        return FileExists(path) ? path : std::wstring();
-    }
-
-    default:
-        return std::wstring();
-    }
+    return source == 1 ? L"现代" : L"经典";
 }
 
 } // namespace
 
 // ============================================================================
-// 构造 / 析构
+// 构造 / 显示
 // ============================================================================
 
 ContextMenuDialog::ContextMenuDialog(HWND owner)
@@ -191,10 +96,6 @@ ContextMenuDialog::~ContextMenuDialog()
         m_font = nullptr;
     }
 }
-
-// ============================================================================
-// 窗口类 / 显示
-// ============================================================================
 
 bool ContextMenuDialog::EnsureClassRegistered()
 {
@@ -221,11 +122,7 @@ bool ContextMenuDialog::CreateDialogWindow()
         CW_USEDEFAULT, CW_USEDEFAULT,
         rect.right - rect.left, rect.bottom - rect.top,
         m_hOwner, nullptr, ::GetModuleHandleW(nullptr), this);
-
-    if (hWnd == nullptr)
-    {
-        return false;
-    }
+    if (hWnd == nullptr) return false;
 
     CreateControls();
     Layout();
@@ -234,20 +131,13 @@ bool ContextMenuDialog::CreateDialogWindow()
 
 bool ContextMenuDialog::ShowModal()
 {
-    if (!EnsureClassRegistered())
-    {
-        return false;
-    }
+    if (!EnsureClassRegistered()) return false;
 
     LoadMenuLayout(m_layout);
-
     m_scene = MenuScene::File;
     m_saved = false;
 
-    if (!CreateDialogWindow())
-    {
-        return false;
-    }
+    if (!CreateDialogWindow()) return false;
 
     ReloadScene();
     ::SetFocus(m_hList);
@@ -257,7 +147,7 @@ bool ContextMenuDialog::ShowModal()
 }
 
 // ============================================================================
-// 创建控件
+// 控件
 // ============================================================================
 
 void ContextMenuDialog::CreateControls()
@@ -276,8 +166,8 @@ void ContextMenuDialog::CreateControls()
         HWND control = ::CreateWindowExW(
             0, L"BUTTON", text,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 10, 10, m_hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-            instance, nullptr);
+            0, 0, 10, 10, m_hWnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
         if (control != nullptr && m_font != nullptr)
         {
             ::SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
@@ -286,8 +176,7 @@ void ContextMenuDialog::CreateControls()
     };
 
     m_hSceneLabel = ::CreateWindowExW(
-        0, L"STATIC", L"场景：",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        0, L"STATIC", L"场景：", WS_CHILD | WS_VISIBLE | SS_LEFT,
         0, 0, 10, 10, m_hWnd, nullptr, instance, nullptr);
 
     m_hSceneCombo = ::CreateWindowExW(
@@ -302,48 +191,29 @@ void ContextMenuDialog::CreateControls()
         0, 0, 10, 10, m_hWnd,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdList)), instance, nullptr);
 
-    m_hActionLabel = ::CreateWindowExW(
-        0, L"STATIC", L"快捷动作（可选）：",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        0, 0, 10, 10, m_hWnd, nullptr, instance, nullptr);
+    m_hAddProgram = createButton(L"添加程序…", kIdAddProgram);
+    m_hUp         = createButton(L"上移", kIdUp);
+    m_hDown       = createButton(L"下移", kIdDown);
+    m_hDelete     = createButton(L"删除", kIdDelete);
+    m_hRestore    = createButton(L"恢复默认", kIdRestore);
+    m_hSave       = createButton(L"保存", kIdSave);
+    m_hCancel     = createButton(L"取消", kIdCancel);
 
-    m_hActionList = ::CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-        0, 0, 10, 10, m_hWnd,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdActionList)), instance, nullptr);
-
-    m_hUp          = createButton(L"上移", kIdUp);
-    m_hDown        = createButton(L"下移", kIdDown);
-    m_hAddSep      = createButton(L"加分隔线", kIdAddSep);
-    m_hRestore     = createButton(L"恢复默认", kIdRestore);
-
-    m_hAddProgram  = createButton(L"添加程序…", kIdAddProgram);
-    m_hAddPreset   = createButton(L"预设 ▾", kIdAddPreset);
-    m_hRemoveAction = createButton(L"删除", kIdRemoveAction);
-    m_hActionUp    = createButton(L"上移", kIdActionUp);
-    m_hActionDown  = createButton(L"下移", kIdActionDown);
-
-    m_hSave        = createButton(L"保存", kIdSave);
-    m_hCancel      = createButton(L"取消", kIdCancel);
-
-    // 列表列
     LVCOLUMNW column = {};
     column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
     column.pszText = const_cast<wchar_t*>(L"菜单项");
-    column.cx = Scale(300);
+    column.cx = Scale(460);
     column.iSubItem = 0;
     ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
 
-    column.pszText = const_cast<wchar_t*>(L"说明");
-    column.cx = Scale(160);
+    column.pszText = const_cast<wchar_t*>(L"类型");
+    column.cx = Scale(220);
     column.iSubItem = 1;
     ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
 
     ::SendMessageW(m_hList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                    LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
 
-    // 场景下拉
     for (MenuScene scene : { MenuScene::Background, MenuScene::File,
                              MenuScene::Folder, MenuScene::Multiple })
     {
@@ -352,8 +222,9 @@ void ContextMenuDialog::CreateControls()
     }
     ::SendMessageW(m_hSceneCombo, CB_SETCURSEL, 1, 0);
 
-    for (HWND control : { m_hSceneLabel, m_hSceneCombo, m_hList, m_hActionLabel,
-                          m_hActionList, m_hSave, m_hCancel })
+    for (HWND control : { m_hSceneLabel, m_hSceneCombo, m_hList,
+                          m_hAddProgram, m_hUp, m_hDown, m_hDelete, m_hRestore,
+                          m_hSave, m_hCancel })
     {
         if (control != nullptr && m_font != nullptr)
         {
@@ -368,52 +239,42 @@ void ContextMenuDialog::Layout()
     ::GetClientRect(m_hWnd, &client);
 
     const int padding = Scale(16);
-    const int comboHeight = Scale(26);
+    const int controlHeight = Scale(26);
     const int buttonHeight = Scale(30);
-    const int lineGap = Scale(8);
     const int listTop = Scale(96);
-    const int listHeight = std::max(Scale(160),
-                                    static_cast<int>(client.bottom) - listTop - Scale(150));
+    const int bottomY = static_cast<int>(client.bottom) - padding - buttonHeight;
+    const int listHeight = std::max(Scale(180),
+                                    bottomY - listTop - buttonHeight - Scale(16));
 
-    const int contentWidth = static_cast<int>(client.right) - padding * 2;
-    const int leftWidth = contentWidth * 62 / 100;
-    const int rightX = padding + leftWidth + padding;
-    const int rightWidth = contentWidth - leftWidth - padding;
+    const int width = static_cast<int>(client.right) - padding * 2;
 
-    ::MoveWindow(m_hSceneLabel, padding, Scale(54), Scale(56), comboHeight, TRUE);
+    ::MoveWindow(m_hSceneLabel, padding, Scale(54), Scale(56), controlHeight, TRUE);
     ::MoveWindow(m_hSceneCombo, padding + Scale(58), Scale(50),
                  Scale(240), Scale(200), TRUE);
+    ::MoveWindow(m_hList, padding, listTop, width, listHeight, TRUE);
 
-    ::MoveWindow(m_hList, padding, listTop, leftWidth, listHeight, TRUE);
-    ::MoveWindow(m_hActionLabel, rightX, Scale(54), rightWidth, comboHeight, TRUE);
-    ::MoveWindow(m_hActionList, rightX, listTop, rightWidth, listHeight, TRUE);
-
-    const int leftButtonY = listTop + listHeight + lineGap;
     int x = padding;
-    ::MoveWindow(m_hUp, x, leftButtonY, Scale(64), buttonHeight, TRUE); x += Scale(72);
-    ::MoveWindow(m_hDown, x, leftButtonY, Scale(64), buttonHeight, TRUE); x += Scale(72);
-    ::MoveWindow(m_hAddSep, x, leftButtonY, Scale(96), buttonHeight, TRUE); x += Scale(104);
-    ::MoveWindow(m_hRestore, x, leftButtonY, Scale(96), buttonHeight, TRUE);
+    ::MoveWindow(m_hAddProgram, x, listTop + listHeight + Scale(10),
+                 Scale(116), buttonHeight, TRUE);
+    x += Scale(124);
+    ::MoveWindow(m_hUp, x, listTop + listHeight + Scale(10),
+                 Scale(64), buttonHeight, TRUE);
+    x += Scale(72);
+    ::MoveWindow(m_hDown, x, listTop + listHeight + Scale(10),
+                 Scale(64), buttonHeight, TRUE);
+    x += Scale(72);
+    ::MoveWindow(m_hDelete, x, listTop + listHeight + Scale(10),
+                 Scale(64), buttonHeight, TRUE);
+    x += Scale(80);
+    ::MoveWindow(m_hRestore, x, listTop + listHeight + Scale(10),
+                 Scale(96), buttonHeight, TRUE);
 
-    int rightButtonY = leftButtonY;
-    ::MoveWindow(m_hAddProgram, rightX, rightButtonY, Scale(112), buttonHeight, TRUE);
-    ::MoveWindow(m_hAddPreset, rightX + Scale(120), rightButtonY, Scale(92), buttonHeight, TRUE);
-    ::MoveWindow(m_hRemoveAction, rightX + Scale(220), rightButtonY, Scale(64), buttonHeight, TRUE);
-
-    rightButtonY += buttonHeight + Scale(6);
-    ::MoveWindow(m_hActionUp, rightX, rightButtonY, Scale(64), buttonHeight, TRUE);
-    ::MoveWindow(m_hActionDown, rightX + Scale(72), rightButtonY, Scale(64), buttonHeight, TRUE);
-
-    const int bottomY = static_cast<int>(client.bottom) - padding - buttonHeight;
-    ::MoveWindow(m_hSave, client.right - padding - Scale(88), bottomY,
+    ::MoveWindow(m_hSave, static_cast<int>(client.right) - padding - Scale(88), bottomY,
                  Scale(88), buttonHeight, TRUE);
-    ::MoveWindow(m_hCancel, client.right - padding - Scale(88) - Scale(96), bottomY,
+    ::MoveWindow(m_hCancel,
+                 static_cast<int>(client.right) - padding - Scale(88) - Scale(96), bottomY,
                  Scale(88), buttonHeight, TRUE);
 }
-
-// ============================================================================
-// 绘制提示
-// ============================================================================
 
 void ContextMenuDialog::DrawHint(HDC dc)
 {
@@ -426,13 +287,13 @@ void ContextMenuDialog::DrawHint(HDC dc)
     HGDIOBJ oldFont = ::SelectObject(dc, m_font);
     ::DrawTextW(dc,
                 L"勾选要显示的项；列表顺序就是右键菜单里的顺序。"
-                L"「快捷动作」是用户自己的程序/预设，不采集第三方右键菜单。",
+                L"第三方按应用+经典/现代平铺，默认不勾；括号只在设置里显示。",
                 -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     ::SelectObject(dc, oldFont);
 }
 
 // ============================================================================
-// 场景 ↔ 列表
+// 场景 → 行
 // ============================================================================
 
 std::wstring ContextMenuDialog::SceneKeyOf(MenuScene scene) const
@@ -464,70 +325,141 @@ MenuScene ContextMenuDialog::SelectedScene() const
     }
 }
 
+int ContextMenuDialog::SectionOf(const Row& row) const
+{
+    switch (row.kind)
+    {
+    case Row::Kind::Builtin:
+    case Row::Kind::Separator:  return 0;
+    case Row::Kind::ThirdParty: return 1;
+    case Row::Kind::Manual:     return 2;
+    }
+    return 0;
+}
+
 void ContextMenuDialog::ReloadScene()
 {
     m_rows.clear();
 
-    const std::wstring key = SceneKeyOf(m_scene);
-    auto it = m_layout.scenes.find(key);
-    const std::vector<std::wstring> order =
-        (it != m_layout.scenes.end()) ? it->second : DefaultMenuOrder(m_scene);
+    const std::wstring sceneKey = SceneKeyOf(m_scene);
+    const unsigned sceneBit = 1u << static_cast<unsigned>(m_scene);
 
-    std::vector<std::wstring> seen;
+    auto orderIt = m_layout.scenes.find(sceneKey);
+    const std::vector<std::wstring> order =
+        (orderIt != m_layout.scenes.end()) ? orderIt->second : DefaultMenuOrder(m_scene);
+
+    // ---- 第三方行：已勾的按配置顺序在前，其余按应用名在后 ----
+    std::vector<Row> thirdRows;
+    std::vector<ThirdPartySelection> selections;
+    auto selectionIt = m_layout.thirdParty.find(sceneKey);
+    if (selectionIt != m_layout.thirdParty.end())
+    {
+        selections = selectionIt->second;
+    }
+
+    std::vector<std::wstring> usedKeys;
+    for (const ThirdPartySelection& selection : selections)
+    {
+        const shell::AppSourceRow* app = shell::FindAppSourceRow(selection.key);
+        if (app == nullptr) continue;
+        if ((app->scenes & sceneBit) == 0) continue;
+
+        Row row;
+        row.kind = Row::Kind::ThirdParty;
+        row.key = selection.key;
+        row.appName = selection.appName.empty() ? app->appName : selection.appName;
+        row.source = selection.source;
+        row.label = row.appName + (row.source == 1 ? L"（现代）" : L"（经典）");
+        row.note = L"第三方 · " + SourceLabel(row.source);
+        row.checked = true;
+        thirdRows.push_back(std::move(row));
+        usedKeys.push_back(selection.key);
+    }
+
+    for (const shell::AppSourceRow& app : shell::CachedAppSourceRows())
+    {
+        if ((app.scenes & sceneBit) == 0) continue;
+        if (std::find(usedKeys.begin(), usedKeys.end(), app.key) != usedKeys.end()) continue;
+
+        Row row;
+        row.kind = Row::Kind::ThirdParty;
+        row.key = app.key;
+        row.appName = app.appName;
+        row.source = static_cast<int>(app.source);
+        row.label = app.appName + (row.source == 1 ? L"（现代）" : L"（经典）");
+        row.note = L"第三方 · " + SourceLabel(row.source);
+        row.checked = false;
+        thirdRows.push_back(std::move(row));
+    }
+
+    // ---- 手动程序行 ----
+    std::vector<Row> manualRows;
+    for (const CustomAction& action : m_layout.actions)
+    {
+        Row row;
+        row.kind = Row::Kind::Manual;
+        row.id = action.id;
+        row.label = action.title.empty() ? L"（未命名程序）" : action.title;
+        row.note = L"手动程序";
+        row.checked = action.enabled;
+        manualRows.push_back(std::move(row));
+    }
+
+    // ---- 内置行 + 在 properties 前插入第三/手动块 ----
+    bool blockInserted = false;
+    auto insertBlock = [&]()
+    {
+        if (blockInserted) return;
+        blockInserted = true;
+        for (Row& row : thirdRows) m_rows.push_back(std::move(row));
+        for (Row& row : manualRows) m_rows.push_back(std::move(row));
+    };
 
     for (const std::wstring& token : order)
     {
+        if (token == L"actions")
+        {
+            insertBlock();
+            continue;
+        }
+
         if (token == L"sep")
         {
             Row row;
             row.kind = Row::Kind::Separator;
             row.label = L"──────── 分隔线 ────────";
+            row.note = L"分隔线";
             row.checked = true;
             m_rows.push_back(std::move(row));
             continue;
         }
 
-        if (token == L"actions")
+        if (token == L"properties")
         {
-            Row row;
-            row.kind = Row::Kind::Actions;
-            row.label = L"快捷动作（整组）";
-            row.checked = true;
-            m_rows.push_back(std::move(row));
-            seen.push_back(token);
-            continue;
+            insertBlock();
         }
 
-        for (const MenuItemInfo& info : MenuItemCatalog())
+        const MenuItemInfo* info = nullptr;
+        for (const MenuItemInfo& candidate : MenuItemCatalog())
         {
-            if (info.id != token) continue;
-
-            Row row;
-            row.kind = Row::Kind::Item;
-            row.id = info.id;
-            row.label = info.label;
-            row.checked = true;
-            m_rows.push_back(std::move(row));
-            seen.push_back(token);
-            break;
+            if (candidate.id == token)
+            {
+                info = &candidate;
+                break;
+            }
         }
-    }
-
-    // 清单里没有的项也列出来（不勾选），用户才能重新打开
-    const unsigned sceneBit = 1u << static_cast<unsigned>(m_scene);
-    for (const MenuItemInfo& info : MenuItemCatalog())
-    {
-        if ((info.scenes & sceneBit) == 0) continue;
-        if (std::find(seen.begin(), seen.end(), info.id) != seen.end()) continue;
+        if (info == nullptr) continue;
 
         Row row;
-        row.kind = (info.id == L"actions") ? Row::Kind::Actions : Row::Kind::Item;
-        row.id = info.id;
-        row.label = info.label;
-        row.checked = false;
+        row.kind = Row::Kind::Builtin;
+        row.id = info->id;
+        row.label = info->label;
+        row.note = L"内置项";
+        row.checked = true;
         m_rows.push_back(std::move(row));
     }
 
+    insertBlock();
     ReloadList();
 }
 
@@ -539,26 +471,17 @@ void ContextMenuDialog::ReloadList()
     {
         const Row& row = m_rows[i];
 
-        std::wstring second;
-        switch (row.kind)
-        {
-        case Row::Kind::Separator: second = L"分隔线"; break;
-        case Row::Kind::Actions:   second = L"动作组"; break;
-        case Row::Kind::Item:      second = row.id;   break;
-        }
-
         LVITEMW item = {};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(i);
         item.pszText = const_cast<wchar_t*>(row.label.c_str());
         const int index = static_cast<int>(::SendMessageW(
             m_hList, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
-
         if (index < 0) continue;
 
         LVITEMW sub = {};
         sub.iSubItem = 1;
-        sub.pszText = const_cast<wchar_t*>(second.c_str());
+        sub.pszText = const_cast<wchar_t*>(row.note.c_str());
         ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index, reinterpret_cast<LPARAM>(&sub));
 
         ListView_SetCheckState(m_hList, index, row.checked ? TRUE : FALSE);
@@ -570,57 +493,99 @@ void ContextMenuDialog::ReloadList()
                               LVIS_SELECTED | LVIS_FOCUSED);
         ListView_EnsureVisible(m_hList, 0, FALSE);
     }
-
-    ReloadActionList();
 }
 
-void ContextMenuDialog::CommitList()
+void ContextMenuDialog::Commit()
 {
-    std::vector<std::wstring> order;
+    const std::wstring sceneKey = SceneKeyOf(m_scene);
+
+    std::vector<std::wstring> builtins;
+    std::vector<ThirdPartySelection> third;
+    std::vector<CustomAction> actions;
+    bool needActionsToken = false;
 
     for (size_t i = 0; i < m_rows.size(); ++i)
     {
-        if (!ListView_GetCheckState(m_hList, static_cast<int>(i)))
-        {
-            continue;
-        }
-
         const Row& row = m_rows[i];
-        if (row.kind == Row::Kind::Separator)
-        {
-            if (!order.empty() && order.back() != L"sep")
-            {
-                order.push_back(L"sep");
-            }
-            continue;
-        }
+        const bool checked = ListView_GetCheckState(m_hList, static_cast<int>(i)) != FALSE;
 
-        if (row.kind == Row::Kind::Actions)
+        switch (row.kind)
         {
-            if (std::find(order.begin(), order.end(), L"actions") == order.end())
+        case Row::Kind::Separator:
+            if (checked && !builtins.empty() && builtins.back() != L"sep")
             {
-                order.push_back(L"actions");
+                builtins.push_back(L"sep");
             }
-            continue;
-        }
+            break;
 
-        order.push_back(row.id);
+        case Row::Kind::Builtin:
+            if (checked) builtins.push_back(row.id);
+            break;
+
+        case Row::Kind::ThirdParty:
+            if (checked)
+            {
+                ThirdPartySelection selection;
+                selection.key = row.key;
+                selection.appName = row.appName;
+                selection.source = row.source;
+                third.push_back(std::move(selection));
+                needActionsToken = true;
+            }
+            break;
+
+        case Row::Kind::Manual:
+        {
+            // 手动程序即使取消勾选也保留在配置里，只置 enabled=false
+            for (const CustomAction& action : m_layout.actions)
+            {
+                if (action.id == row.id)
+                {
+                    CustomAction copy = action;
+                    copy.enabled = checked;
+                    copy.order = static_cast<int>(actions.size()) * 10;
+                    actions.push_back(std::move(copy));
+                    if (checked) needActionsToken = true;
+                    break;
+                }
+            }
+            break;
+        }
+        }
     }
 
-    while (!order.empty() && order.back() == L"sep")
+    while (!builtins.empty() && builtins.back() == L"sep")
     {
-        order.pop_back();
+        builtins.pop_back();
     }
 
-    m_layout.scenes[SceneKeyOf(m_scene)] = std::move(order);
+    // 第三/手动的插入点：在内置属性之前；没有属性就放末尾
+    const size_t actionsPos = std::find(builtins.begin(), builtins.end(), L"actions") - builtins.begin();
+    if (actionsPos < builtins.size())
+    {
+        builtins.erase(builtins.begin() + actionsPos);
+    }
+    if (needActionsToken)
+    {
+        auto properties = std::find(builtins.begin(), builtins.end(), L"properties");
+        builtins.insert(properties, L"actions");
+    }
+
+    m_layout.scenes[sceneKey] = std::move(builtins);
+    m_layout.thirdParty[sceneKey] = std::move(third);
+    m_layout.actions = std::move(actions);
 }
 
 void ContextMenuDialog::OnSceneChanged()
 {
-    CommitList();
+    Commit();
     m_scene = SelectedScene();
     ReloadScene();
 }
+
+// ============================================================================
+// 按钮
+// ============================================================================
 
 void ContextMenuDialog::MoveRow(int delta)
 {
@@ -632,6 +597,11 @@ void ContextMenuDialog::MoveRow(int delta)
     const int target = selected + delta;
     if (target < 0 || target >= static_cast<int>(m_rows.size())) return;
 
+    if (SectionOf(m_rows[selected]) != SectionOf(m_rows[target]))
+    {
+        return;   // 内置 / 第三方 / 手动三块之间不混排
+    }
+
     std::swap(m_rows[selected], m_rows[target]);
     ReloadList();
     ListView_SetItemState(m_hList, target, LVIS_SELECTED | LVIS_FOCUSED,
@@ -639,87 +609,7 @@ void ContextMenuDialog::MoveRow(int delta)
     ListView_EnsureVisible(m_hList, target, FALSE);
 }
 
-void ContextMenuDialog::AddSeparator()
-{
-    int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
-    if (selected < 0) selected = static_cast<int>(m_rows.size()) - 1;
-    const int insertAt = std::max(0, selected);
-
-    Row row;
-    row.kind = Row::Kind::Separator;
-    row.label = L"──────── 分隔线 ────────";
-    row.checked = true;
-    m_rows.insert(m_rows.begin() + insertAt, std::move(row));
-
-    ReloadList();
-    ListView_SetItemState(m_hList, insertAt, LVIS_SELECTED | LVIS_FOCUSED,
-                          LVIS_SELECTED | LVIS_FOCUSED);
-    ListView_EnsureVisible(m_hList, insertAt, FALSE);
-}
-
-void ContextMenuDialog::RestoreDefaults()
-{
-    m_layout.scenes[SceneKeyOf(m_scene)] = DefaultMenuOrder(m_scene);
-    ReloadScene();
-}
-
-// ============================================================================
-// 快捷动作
-// ============================================================================
-
-namespace
-{
-
-int NextActionOrder(const std::vector<CustomAction>& actions)
-{
-    int maxOrder = 0;
-    for (const CustomAction& action : actions)
-    {
-        maxOrder = std::max(maxOrder, action.order);
-    }
-    return maxOrder + 10;
-}
-
-std::vector<std::wstring> SplitExtensions(const wchar_t* text)
-{
-    std::vector<std::wstring> result;
-    if (text == nullptr || *text == L'\0') return result;
-
-    std::wstring current;
-    for (const wchar_t* p = text; ; ++p)
-    {
-        if (*p == L';' || *p == L'\0')
-        {
-            if (!current.empty()) result.push_back(current);
-            current.clear();
-            if (*p == L'\0') break;
-            continue;
-        }
-        current.push_back(*p);
-    }
-    return result;
-}
-
-} // namespace
-
-void ContextMenuDialog::ReloadActionList()
-{
-    ::SendMessageW(m_hActionList, LB_RESETCONTENT, 0, 0);
-
-    for (const CustomAction& action : m_layout.actions)
-    {
-        const std::wstring text = action.title + L"    —    " + action.program;
-        ::SendMessageW(m_hActionList, LB_ADDSTRING, 0,
-                       reinterpret_cast<LPARAM>(text.c_str()));
-    }
-
-    if (!m_layout.actions.empty())
-    {
-        ::SendMessageW(m_hActionList, LB_SETCURSEL, 0, 0);
-    }
-}
-
-void ContextMenuDialog::AddActionFromProgram()
+void ContextMenuDialog::AddProgram()
 {
     wchar_t file[MAX_PATH] = {};
 
@@ -731,16 +621,10 @@ void ContextMenuDialog::AddActionFromProgram()
     dialog.nMaxFile = MAX_PATH;
     dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
-    if (!::GetOpenFileNameW(&dialog))
-    {
-        return;
-    }
+    if (!::GetOpenFileNameW(&dialog)) return;
 
     const std::wstring program = file;
-    if (!FileExists(program))
-    {
-        return;
-    }
+    if (!FileExists(program)) return;
 
     CustomAction action;
     action.id        = NewActionId(m_layout);
@@ -749,103 +633,44 @@ void ContextMenuDialog::AddActionFromProgram()
     action.arguments = L"%1";
     action.startIn   = L"%dir%";
     action.scenes    = SceneBitFile | SceneBitFolder | SceneBitMultiple;
+    action.enabled   = true;
     action.order     = NextActionOrder(m_layout.actions);
 
     m_layout.actions.push_back(std::move(action));
-    ReloadActionList();
-    ::SendMessageW(m_hActionList, LB_SETCURSEL,
-                   static_cast<WPARAM>(m_layout.actions.size() - 1), 0);
+    ReloadScene();
 }
 
-void ContextMenuDialog::AddActionFromPreset(int presetIndex)
+void ContextMenuDialog::DeleteRow()
 {
-    if (presetIndex < 0 || presetIndex >= static_cast<int>(std::size(kPresets)))
+    const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
+    if (selected < 0 || selected >= static_cast<int>(m_rows.size())) return;
+
+    const Row& row = m_rows[selected];
+    if (row.kind != Row::Kind::Manual)
     {
+        // 第三方靠取消勾选；内置项不能删
+        MessageBeep(MB_ICONINFORMATION);
         return;
     }
 
-    const std::wstring program = PresetProgram(presetIndex);
-    if (program.empty())
-    {
-        return;
-    }
-
-    const PresetInfo& preset = kPresets[presetIndex];
-
-    CustomAction action;
-    action.id          = NewActionId(m_layout);
-    action.title       = preset.title;
-    action.program     = program;
-    action.arguments   = preset.arguments;
-    action.startIn     = L"%dir%";
-    action.scenes      = preset.scenes;
-    action.extensions  = SplitExtensions(preset.extensions);
-    action.order       = NextActionOrder(m_layout.actions);
-
-    m_layout.actions.push_back(std::move(action));
-    ReloadActionList();
-    ::SendMessageW(m_hActionList, LB_SETCURSEL,
-                   static_cast<WPARAM>(m_layout.actions.size() - 1), 0);
+    const std::wstring id = row.id;
+    m_layout.actions.erase(
+        std::remove_if(m_layout.actions.begin(), m_layout.actions.end(),
+                       [&id](const CustomAction& action) { return action.id == id; }),
+        m_layout.actions.end());
+    ReloadScene();
 }
 
-void ContextMenuDialog::RemoveAction()
+void ContextMenuDialog::RestoreDefaults()
 {
-    const int selected = static_cast<int>(::SendMessageW(m_hActionList, LB_GETCURSEL, 0, 0));
-    if (selected < 0 || selected >= static_cast<int>(m_layout.actions.size()))
-    {
-        return;
-    }
-
-    m_layout.actions.erase(m_layout.actions.begin() + selected);
-    ReloadActionList();
-}
-
-void ContextMenuDialog::MoveAction(int delta)
-{
-    const int selected = static_cast<int>(::SendMessageW(m_hActionList, LB_GETCURSEL, 0, 0));
-    const int target = selected + delta;
-    if (selected < 0 || target < 0 || target >= static_cast<int>(m_layout.actions.size()))
-    {
-        return;
-    }
-
-    std::swap(m_layout.actions[selected], m_layout.actions[target]);
-    for (size_t i = 0; i < m_layout.actions.size(); ++i)
-    {
-        m_layout.actions[i].order = static_cast<int>(i) * 10;
-    }
-
-    ReloadActionList();
-    ::SendMessageW(m_hActionList, LB_SETCURSEL, static_cast<WPARAM>(target), 0);
+    m_layout.scenes[SceneKeyOf(m_scene)] = DefaultMenuOrder(m_scene);
+    m_layout.thirdParty[SceneKeyOf(m_scene)].clear();
+    ReloadScene();
 }
 
 void ContextMenuDialog::Save()
 {
-    CommitList();
-
-    // 四个场景全空 = 右键菜单彻底消失。这几乎一定是误操作，拦住。
-    bool anyScene = false;
-    for (const auto& entry : m_layout.scenes)
-    {
-        if (!entry.second.empty())
-        {
-            anyScene = true;
-            break;
-        }
-    }
-    if (!anyScene)
-    {
-        ::MessageBoxW(m_hWnd, L"四个场景的菜单项都被隐藏了，右键菜单会变成空白。\n"
-                              L"请至少在一个场景里保留一项。",
-                      L"自定义右键菜单", MB_OK | MB_ICONWARNING);
-        return;
-    }
-
-    // 动作顺序按列表重排，保证 JSON 里的 order 和界面一致
-    for (size_t i = 0; i < m_layout.actions.size(); ++i)
-    {
-        m_layout.actions[i].order = static_cast<int>(i) * 10;
-    }
+    Commit();
 
     if (!SaveMenuLayout(m_layout))
     {
@@ -856,7 +681,9 @@ void ContextMenuDialog::Save()
     }
 
     InvalidateMenuLayoutCache();
-    Logger::Info(L"自定义右键菜单：已保存，动作 " +
+    Logger::Info(L"自定义右键菜单：已保存，第三方 " +
+                 std::to_wstring(m_layout.thirdParty[SceneKeyOf(m_scene)].size()) +
+                 L" 条（当前场景），手动程序 " +
                  std::to_wstring(m_layout.actions.size()) + L" 个");
 
     m_saved = true;
@@ -920,68 +747,25 @@ LRESULT ContextMenuDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
 
         switch (id)
         {
-        case kIdUp:            MoveRow(-1); break;
-        case kIdDown:          MoveRow(1); break;
-        case kIdAddSep:        AddSeparator(); break;
-        case kIdRestore:       RestoreDefaults(); break;
-        case kIdAddProgram:    AddActionFromProgram(); break;
-
-        case kIdAddPreset:
-        {
-            HMENU menu = ::CreatePopupMenu();
-            if (menu == nullptr) break;
-
-            int count = 0;
-            for (int i = 0; i < static_cast<int>(std::size(kPresets)); ++i)
-            {
-                if (PresetProgram(i).empty()) continue;
-                ::AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(i + 1), kPresets[i].title);
-                ++count;
-            }
-
-            if (count == 0)
-            {
-                ::DestroyMenu(menu);
-                ::MessageBoxW(hWnd, L"没有检测到可用的预设程序。\n"
-                                    L"可以点「添加程序…」自己选一个 exe。",
-                              L"自定义右键菜单", MB_OK | MB_ICONINFORMATION);
-                break;
-            }
-
-            POINT point = {};
-            ::GetCursorPos(&point);
-            const int command = static_cast<int>(::TrackPopupMenu(
-                menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hWnd, nullptr));
-            ::DestroyMenu(menu);
-
-            if (command > 0)
-            {
-                AddActionFromPreset(command - 1);
-            }
-            break;
-        }
-
-        case kIdRemoveAction:  RemoveAction(); break;
-        case kIdActionUp:      MoveAction(-1); break;
-        case kIdActionDown:    MoveAction(1); break;
-        case kIdSave:          Save(); break;
-        case kIdCancel:        Cancel(); break;
-
-        default:
-            break;
+        case kIdAddProgram: AddProgram(); break;
+        case kIdUp:         MoveRow(-1); break;
+        case kIdDown:       MoveRow(1); break;
+        case kIdDelete:     DeleteRow(); break;
+        case kIdRestore:    RestoreDefaults(); break;
+        case kIdSave:       Save(); break;
+        case kIdCancel:     Cancel(); break;
+        default: break;
         }
         return 0;
     }
 
     case WM_KEYDOWN:
-    {
         if (wParam == VK_ESCAPE)
         {
             Cancel();
             return 0;
         }
         break;
-    }
 
     case WM_CLOSE:
         Cancel();

@@ -245,6 +245,8 @@ void TestJson()
 
     MenuLayout saved = Defaults();
     saved.scenes[L"file"] = Order({ L"open", L"sep", L"properties" });
+    saved.thirdParty[L"file"] = { { L"WPS Office|0", L"WPS Office", 0 },
+                                  { L"WPS Office|1", L"WPS Office", 1 } };
 
     CustomAction action;
     action.id      = L"a1";
@@ -261,6 +263,16 @@ void TestJson()
     Check(LoadMenuLayoutFrom(path, loaded), "load layout from temp file");
 
     Expect(loaded.scenes[L"file"], saved.scenes[L"file"], "file order round-trip");
+    Check(loaded.thirdParty[L"file"].size() == 2, "third-party selections round-trip");
+    if (loaded.thirdParty[L"file"].size() == 2)
+    {
+        Check(loaded.thirdParty[L"file"][0].key == L"WPS Office|0" &&
+              loaded.thirdParty[L"file"][0].source == 0,
+              "third-party classic key round-trip");
+        Check(loaded.thirdParty[L"file"][1].key == L"WPS Office|1" &&
+              loaded.thirdParty[L"file"][1].source == 1,
+              "third-party modern key round-trip");
+    }
     Check(loaded.actions.size() == 1, "one action round-trip");
     if (loaded.actions.size() == 1)
     {
