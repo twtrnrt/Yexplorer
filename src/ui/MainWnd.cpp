@@ -1904,13 +1904,6 @@ bool MainWindow::HandleCommandMessage(WPARAM wParam)
 {
     int controlId = LOWORD(wParam);
 
-    // [perf] 临时性能探针，定位完删除
-    if (controlId == kPerfProbe)
-    {
-        RunPerfProbe();
-        return true;
-    }
-
     // ---- 第三方动态组现场采集出来的项：命令 ID = 3800 + 运行时下标 ----
     if (controlId >= kRuntimeMenuBase &&
         controlId < kRuntimeMenuBase + kRuntimeMenuMax)

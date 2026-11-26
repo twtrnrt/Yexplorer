@@ -1,7 +1,7 @@
 # 多选文件右键菜单 WPS 展开慢 —— 排查记录（2026-11-26）
 
 > 分支：`feature/context-menu`。本文记录从现象到定位的全过程、实测数据、已排除方向和当前结论；
-> 临时探针埋点定位完要整体撤掉（清单见文末）。
+> 排查期的临时性能探针/诊断埋点已全部撤销，代码中不再保留。
 
 ## 1. 现象
 
@@ -11,9 +11,7 @@
 
 ## 2. 复现与测量方式
 
-- 带临时探针的 Release 构建，产物 `bin\context-menu\Release\FileExplorer.exe`，日志同目录 `FileExplorer.log`（进程独占写，读取要用 `FileShare.ReadWrite` 流 + UTF-8）。
-- 探针命令号 `kPerfProbe = 39001`（`WM_COMMAND` 0x0111）；全选命令号 3107；环境变量 `PERF_LIMIT` 截断只取前 N 个路径跑曲线。
-- 流程：启动 exe 带目录参数 → 等「枚举完成」→ `PostMessage(3107)` 全选 → `PostMessage(39001)` 触发探针 → 等「探针结束」。
+- Release 构建产物 `bin\context-menu\Release\FileExplorer.exe`，日志同目录 `FileExplorer.log`（进程独占写，读取要用 `FileShare.ReadWrite` 流 + UTF-8）。
 - 构建命令（功能分支显式隔离 OutDir/IntDir，禁用默认 `bin\x64`）：
 
 ```powershell
@@ -170,13 +168,35 @@
 
 1. **运行时展开按场景过滤**（独立有效，解决"3 套"）：`MainWndMenus.cpp` 遍历 `row.owners` 处，跳过 `owner.scenes != 0 && (owner.scenes & live.scene) == 0` 的 owner；`scenes==0` 放行兼容旧缓存。多选文件场景只留 `*` 场景的 `EAE7D0A0` 一套。
 2. **数组改为 dataObject 来源**（方向更标准，但**已证实不是 8 秒主因**，去留待定）：`MakeShellItemArray` 增加 `parentFolder`，先 `BuildShellExtContext` 出 dataObject 再 `SHCreateShellItemArrayFromDataObject`；采集/执行/普查三处透传 `parentFolder`。
-3. **查询阶段挑选代表项（2026-11-26 落地，Release 编译 0 错误，待复测）**：
-   - 新增常量 `kQuerySelectionLimit = 16`（兜底上限，写死，未做配置项）。
-   - 新增工具 `SelectQueryRepresentatives`：先按扩展名去重，每种扩展名保留原顺序第一个出现的文件；去重后仍超过 16 再截断到前 16 个代表。扩展名大小写不敏感，无扩展名归为同一类。
+3. **查询阶段挑选代表项（2026-11-26 落地，Release 编译 0 错误）**：
+   - 常量 `kQuerySelectionLimit = 16`（兜底上限，写死，未做配置项）；保底数量 `kMinRepresentatives = 3`。
+   - 工具 `SelectQueryRepresentatives` 规则：① 统计各扩展名数量取最多的为主类型；② 先按扩展名去重、每种留原顺序第一个；③ 不足 3 个用主类型后续文件补齐到 3；④ 3～16 保留全部，超 16 截前 16。扩展名大小写不敏感，无扩展名归为同一类。
    - 统一采集入口 `CaptureOwnerMenuInternal` 用 `queryPaths` 挑代表项，经典 `CaptureHandlerWithMenu` 与现代 `CapturePackagedCommand` 都用它；执行阶段 `InvokeShellHandler` / `InvokePackagedCommand` 仍按完整 `targetPaths` 重建，不受影响。
    - `ExplorerCommandState` 调 `GetState` 的 `fOkToBeSlow` 由 `TRUE` 改 `FALSE`；返回失败（含 `E_PENDING`）时按默认启用处理。
-   - 预期：WPS 这类悲观型扩展查询阶段只拿到「各扩展名代表 + 16 兜底」，绑定/检查量从 282 降到种类数；混合类型覆盖面比单纯前 16 更全。
-   - **实测反馈（前 16 版本，2026-11-26）**：多选 282 文件右键 WPS 菜单展开速度明显变快，基本解决；去重版本待复测。
+   - **实测反馈（前 16 版本，2026-11-26）**：多选 282 文件右键 WPS 菜单展开速度明显变快，基本解决。
+
+### 经典命令错位定位：代表项塌成单选菜单（2026-11-26 晚，已定位）
+
+**现象**：点经典 WPS「批量打印」，打开的却是别的命令（批量增删水印）；菜单位置也被归到别的组。基线提交 `2f896ae`（无提速、完整选择）位置和打开都正常。
+
+**对照过程**：开独立 worktree 逐变量隔离——先关场景过滤/拍平/归组合并，再调整代表项挑选。排除拍平、归组代码本身（`MenuFlatten.cpp`/`MenuApps.cpp` 两版未改）；根因落在查询阶段代表项数量。
+
+**根因**：经典扩展区分**单选菜单**和**多选菜单**，命令集合与排列不同。旧版按扩展名去重后，纯类型多选（如全选 PDF）被压成 **1 个代表**，扩展按单选布局出菜单；执行阶段是多选完整选择、重建出另一套多选菜单。两次命令集合/顺序对不上，采集记下的旧命令偏移在新菜单上指到别的命令 → 错位。
+
+**实测对照**：
+
+| 代表项数量 | 实测结果 |
+|---|---|
+| 1 个（纯类型去重后只剩 1） | 错位 |
+| 2 个 | 不稳：PDF+Word 正常，PDF+TXT 仍不正常 |
+| 3 个 | 纯 PDF、混合类型均正常 |
+
+**两个数字的来历**：
+
+- **16（上限，性能兜底）**：对齐官方多选谓词惯例——查询阶段只传少量代表项让扩展判断显隐，完整选择留到 `InvokeCommand` 重建。避免悲观型扩展拿到全部项逐项绑定、随文件数线性变慢（282 项约 70 秒）。
+- **3（保底下限，避免塌单选）**：保证代表项呈现多选形态；去重不足 3 时用占比最多的扩展名补齐。
+
+**注意**：现代菜单缺「批量打印」是另一条独立线（现代命令枚举漏项），与本次代表项数量调整无关，尚未解决。
 
 ### 经典（未决）
 
@@ -201,18 +221,7 @@
 - **坑（导致多选时冒出 3 套）**：归组 `BuildAppSourceRows` 把同应用名、不同场景的 owner 都并到一行（`row.scenes` 取并集）；但运行时展开 `MainWndMenus.cpp` 遍历 `row.owners` 时**没有按 `owner.scenes` 过滤当前 `live.scene`**，于是多选文件场景把 Folder、Background 场景的 owner 也实例化了，各白跑一遍 `GetTitle`。设置窗口 / 菜单布局链路都有 `(scenes & sceneBit)==0` 过滤，唯独运行时展开这处漏了。
 - 修复：遍历 owners 时跳过 `(owner.scenes & live.scene)==0` 的项。多选文件场景只该留 `*`（`EAE7D0A0`）那一套。场景位：File=1、Folder=2、Multiple=4、Background=8，`live.scene` 与 `owner.scenes` 同一套位。
 
-## 8. 临时探针 / 埋点清单（定位完整体撤销，勿提交）
-
-- `src/shell/MenuInventory.cpp`
-  - 经典/现代各段 `[perf]` 分段计时日志；`DumpDataObjectDiagnostic`、`DumpItemArrayDiagnostic` 只读诊断；
-  - 对照函数 `ProbeClassicNativePidl`、`ProbeModernNativeArray`（外部链接，供探针调）。
-- `src/shell/MenuInventory.h`：两个对照函数声明。
-- `src/ui/MainWndMenus.cpp`：`RunPerfProbe()` 探针实现 + `PERF_LIMIT` 截断 + WPS 对照调用。
-- `src/ui/MainWnd.cpp`：命令分发挂 39001 探针分支。
-- `src/ui/MainWnd.h`：`kPerfProbe=39001` 常量 + `RunPerfProbe()` 声明。
-- 注意：`MainWndMenus.cpp` 里有一处他人并行改动（`SetMenuItemInfoW(menu, position, FALSE, &mii)` → `TRUE`），撤埋点时不可覆盖。
-
-## 9. 环境与备份
+## 8. 环境与备份
 
 - 配置：`%APPDATA%\FileExplorer\settings.json`、`context-menu.json`、`menu-owners.json`；测试前备份在 `%TEMP%\explorer-perf-bak\`（settings.json、context-menu.json），测完还原 settings.json。
 - WPS 经典 CLSID/server：`C:\Users\kf168\AppData\Local\Kingsoft\WPS Office\12.1.0.29690\office6\kwpsshellext64.dll`，InprocServer32 / Apartment。

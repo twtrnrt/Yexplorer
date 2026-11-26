@@ -25,14 +25,12 @@
 #include <shobjidl.h>
 #include <shlguid.h>
 #include <shellapi.h>
-#include <propkey.h>
 #include <strsafe.h>
 #include <winver.h>
 
 #include <wrl/client.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cwctype>
 #include <fstream>
@@ -91,8 +89,8 @@ const int kInventoryVersion = 2;
 // 查询菜单时只传少量代表项让扩展判断是否出菜单项，完整选择留到点击执行
 // （InvokeCommand / Invoke）时再按完整选择重建上下文。避免悲观型扩展
 // （如 WPS）拿到全部选中项后逐项绑定、随文件数线性变慢。
-// 挑选规则见 SelectQueryRepresentatives：先按扩展名去重，每种留一个代表，
-// 代表数仍超过此上限再截断。
+// 挑选规则见 SelectQueryRepresentatives：先按扩展名去重每种留一个；不足 3 个时
+// 用占比最多的扩展名补齐到 3（避免塌成单选菜单导致命令偏移错位）；超过 16 再截断。
 constexpr size_t kQuerySelectionLimit = 16;
 
 // ---------------------------------------------------------------------------
@@ -130,25 +128,69 @@ std::wstring ToLower(std::wstring text)
     return text;
 }
 
-// 查询阶段挑选传给 shell 扩展的代表项：先按扩展名去重，每种扩展名保留
-// 原顺序中第一个出现的文件；去重后仍超过 limit 再截断到前 limit 个。
-// 执行阶段不受此限制，仍传完整选择。无扩展名的文件归为同一类（空扩展名）。
+// 查询阶段挑选传给 shell 扩展的代表项：
+//   1) 先按扩展名去重，每种扩展名保留原顺序第一个出现的文件；
+//   2) 不足 kMinRepresentatives 个时，用占比最多的扩展名（主类型）后续文件补齐；
+//      纯类型多选若只留 1 个，扩展会按“单选”布局菜单，和执行阶段的多选菜单
+//      命令排列不一致，导致命令偏移错位，所以保底凑够多选数量；
+//   3) 超过 limit 再截断到前 limit 个。执行阶段不受此限制，仍传完整选择。
 std::vector<std::wstring> SelectQueryRepresentatives(
     const std::vector<std::wstring>& paths, size_t limit)
 {
+    constexpr size_t kMinRepresentatives = 3;
+
+    // 第一遍：统计各扩展名数量，找出占比最多的主类型（并列时取先出现的）。
+    std::map<std::wstring, size_t> extCount;
+    std::wstring mainExt;
+    size_t mainCount = 0;
+    for (const std::wstring& path : paths)
+    {
+        const wchar_t* ext = ::PathFindExtensionW(path.c_str());
+        const std::wstring key = ToLower(ext == nullptr ? L"" : ext);
+        ++extCount[key];
+        if (extCount[key] > mainCount)
+        {
+            mainCount = extCount[key];
+            mainExt = key;
+        }
+    }
+
+    // 第二遍：按扩展名去重，每种取第一个。
     std::vector<std::wstring> reps;
     std::set<std::wstring> seenExt;
+    std::set<std::wstring> addedPaths;
 
     for (const std::wstring& path : paths)
     {
-        // PathFindExtensionW 返回扩展名（含前导点，如 ".pdf"）；无扩展名返回空串。
         const wchar_t* ext = ::PathFindExtensionW(path.c_str());
         const std::wstring key = ToLower(ext == nullptr ? L"" : ext);
 
         if (!seenExt.insert(key).second) continue;  // 该扩展名已留过代表，跳过
         reps.push_back(path);
-        if (reps.size() >= limit) break;             // 兜底上限：种类再多也只传前 limit 个代表
+        addedPaths.insert(path);
+        if (reps.size() >= limit) break;
     }
+
+    // 第三遍：不足保底数量时，用主类型的后续文件补齐。
+    // 若总文件数 < 3 本就全取；总文件数 >= 3 时主类型至少有 2 个，不会缺额。
+    if (reps.size() < kMinRepresentatives)
+    {
+        for (const std::wstring& path : paths)
+        {
+            if (reps.size() >= kMinRepresentatives) break;
+            if (addedPaths.count(path) != 0) continue;
+
+            const wchar_t* ext = ::PathFindExtensionW(path.c_str());
+            const std::wstring key = ToLower(ext == nullptr ? L"" : ext);
+            if (key != mainExt) continue;
+
+            reps.push_back(path);
+            addedPaths.insert(path);
+        }
+    }
+
+    // 兜底上限：种类再多也只传前 limit 个代表。
+    if (reps.size() > limit) reps.resize(limit);
     return reps;
 }
 
@@ -897,210 +939,6 @@ std::wstring CaptureExplorerCommandIcon(IExplorerCommand* command,
     return name;
 }
 
-// ============================================================================
-// [perf] 临时诊断（定位完删除）：
-// 1) 枚举经典 dataObject 实际支持的剪贴板格式；
-// 2) 读 Shell IDList Array 项数；
-// 3) 绑定父 IShellFolder，逐项读显示名/属性，计时——判断"我们这批数据
-//    自己读一遍"贵不贵，区分是 PIDL/绑定成本还是 WPS 内部更深的操作。
-// ============================================================================
-void DumpDataObjectDiagnostic(IDataObject* dataObject, PIDLIST_ABSOLUTE folder,
-                               const std::vector<PCUITEMID_CHILD>& children)
-{
-    if (dataObject == nullptr) return;
-
-    // 1. 枚举 dataObject 提供的全部格式
-    IEnumFORMATETC* enumFmt = nullptr;
-    std::wstring fmtList;
-    if (SUCCEEDED(dataObject->EnumFormatEtc(DATADIR_GET, &enumFmt)) && enumFmt != nullptr)
-    {
-        FORMATETC fe;
-        ULONG fetched = 0;
-        while (enumFmt->Next(1, &fe, &fetched) == S_OK && fetched == 1)
-        {
-            wchar_t name[128] = {};
-            const int n = ::GetClipboardFormatNameW(fe.cfFormat, name, 128);
-            fmtList += (n > 0 ? std::wstring(name) : std::wstring(L"#") + std::to_wstring(fe.cfFormat));
-            fmtList += L" ";
-        }
-        enumFmt->Release();
-    }
-    Logger::Info(L"[perf] 诊断：数据对象格式=[" + fmtList + L"]");
-
-    // 2. 读 Shell IDList Array，确认扩展能拿到几项 PIDL
-    static const UINT cfShellIdList = ::RegisterClipboardFormatW(L"Shell IDList Array");
-    FORMATETC feIdList = { static_cast<CLIPFORMAT>(cfShellIdList), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
-    STGMEDIUM med = {};
-    if (SUCCEEDED(dataObject->GetData(&feIdList, &med)) && med.hGlobal != nullptr)
-    {
-        void* p = ::GlobalLock(med.hGlobal);
-        if (p != nullptr)
-        {
-            const UINT cidl = *static_cast<const UINT*>(p);
-            Logger::Info(L"[perf] 诊断：ShellIDList 项数=" + std::to_wstring(cidl));
-            ::GlobalUnlock(med.hGlobal);
-        }
-        ::ReleaseStgMedium(&med);
-    }
-    else
-    {
-        Logger::Warn(L"[perf] 诊断：取不到 Shell IDList Array（只有 CF_HDROP）");
-    }
-
-    // 3. 绑定父 IShellFolder，逐项读显示名 + 属性，累计耗时
-    ComPtr<IShellFolder> folderFolder;
-    ComPtr<IShellFolder> desktop;
-    if (FAILED(::SHGetDesktopFolder(desktop.GetAddressOf())) || desktop == nullptr)
-    {
-        Logger::Warn(L"[perf] 诊断：取桌面 IShellFolder 失败");
-        return;
-    }
-    if (FAILED(desktop->BindToObject(folder, nullptr,
-                                     IID_PPV_ARGS(folderFolder.GetAddressOf()))) ||
-        folderFolder == nullptr)
-    {
-        Logger::Warn(L"[perf] 诊断：绑定父 IShellFolder 失败");
-        return;
-    }
-
-    const auto t0 = std::chrono::steady_clock::now();
-    int okCount = 0;
-    for (PCUITEMID_CHILD child : children)
-    {
-        wchar_t display[MAX_PATH] = {};
-        STRRET str = {};
-        if (SUCCEEDED(folderFolder->GetDisplayNameOf(child, SHGDN_INFOLDER, &str)))
-        {
-            ::StrRetToBufW(&str, child, display, MAX_PATH);
-            ++okCount;
-        }
-        SFGAOF attrs = SFGAO_FOLDER | SFGAO_FILESYSTEM;
-        folderFolder->GetAttributesOf(1, const_cast<PCUITEMID_CHILD*>(&child), &attrs);
-    }
-    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    Logger::Info(L"[perf] 诊断：父文件夹逐项读属性，项=" + std::to_wstring(children.size()) +
-                 L"，成功取名=" + std::to_wstring(okCount) +
-                 L"，耗时=" + std::to_wstring(ms) + L"ms");
-}
-
-// [perf] 临时诊断：现代 IShellItemArray 逐项读显示名/属性计时（定位完删除）
-void DumpItemArrayDiagnostic(IShellItemArray* items)
-{
-    if (items == nullptr) return;
-
-    DWORD count = 0;
-    items->GetCount(&count);
-
-    const auto t0 = std::chrono::steady_clock::now();
-    int okCount = 0;
-    for (DWORD i = 0; i < count; ++i)
-    {
-        ComPtr<IShellItem> item;
-        if (FAILED(items->GetItemAt(i, item.GetAddressOf())) || item == nullptr)
-            continue;
-
-        PWSTR disp = nullptr;
-        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &disp)) && disp != nullptr)
-        {
-            ++okCount;
-            ::CoTaskMemFree(disp);
-        }
-        SFGAOF attrs = 0;
-        item->GetAttributes(SFGAO_FOLDER, &attrs);
-    }
-    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    Logger::Info(L"[perf] 诊断：现代数组逐项读属性，项=" + std::to_wstring(count) +
-                 L"，成功取名=" + std::to_wstring(okCount) +
-                 L"，耗时=" + std::to_wstring(ms) + L"ms");
-}
-
-// [perf] 临时：逐项读扩展名/类型属性并分别累计计时，定位 WPS 逐文件判类型卡在哪个属性，定位完删除。
-void DumpItemTypeDiagnostic(IShellItemArray* items)
-{
-    if (items == nullptr) return;
-
-    DWORD count = 0;
-    items->GetCount(&count);
-
-    long long storeMs = 0, extMs = 0, typeTextMs = 0, typeMs = 0;
-    int extOk = 0, typeTextOk = 0, typeOk = 0;
-    std::wstring extSample, typeTextSample, typeSample;
-
-    for (DWORD i = 0; i < count; ++i)
-    {
-        ComPtr<IShellItem> item;
-        if (FAILED(items->GetItemAt(i, item.GetAddressOf())) || item == nullptr) continue;
-
-        ComPtr<IShellItem2> item2;
-        if (FAILED(item->QueryInterface(IID_PPV_ARGS(item2.GetAddressOf()))) || item2 == nullptr) continue;
-
-        ComPtr<IPropertyStore> store;
-        {
-            IPropertyStore* rawStore = nullptr;
-            const auto t0 = std::chrono::steady_clock::now();
-            const HRESULT hrStore = item2->GetPropertyStore(GPS_DEFAULT, IID_IPropertyStore,
-                                                            reinterpret_cast<void**>(&rawStore));
-            storeMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
-            if (FAILED(hrStore) || rawStore == nullptr) continue;
-            store.Attach(rawStore);
-        }
-
-        PROPVARIANT v;
-        ::PropVariantInit(&v);
-
-        // 1) 扩展名 System.FileExtension
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            const HRESULT hr = store->GetValue(PKEY_FileExtension, &v);
-            extMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
-            if (SUCCEEDED(hr) && v.vt == VT_LPWSTR && v.pwszVal != nullptr)
-            {
-                ++extOk;
-                if (extSample.empty()) extSample = v.pwszVal;
-            }
-            ::PropVariantClear(&v);
-        }
-
-        // 2) 类型名 System.ItemTypeText（如“PDF 文档”）
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            const HRESULT hr = store->GetValue(PKEY_ItemTypeText, &v);
-            typeTextMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
-            if (SUCCEEDED(hr) && v.vt == VT_LPWSTR && v.pwszVal != nullptr)
-            {
-                ++typeTextOk;
-                if (typeTextSample.empty()) typeTextSample = v.pwszVal;
-            }
-            ::PropVariantClear(&v);
-        }
-
-        // 3) 关联类型 System.ItemType（ProgID，如 .pdf 对应的程序标识）
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            const HRESULT hr = store->GetValue(PKEY_ItemType, &v);
-            typeMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
-            if (SUCCEEDED(hr) && v.vt == VT_LPWSTR && v.pwszVal != nullptr)
-            {
-                ++typeOk;
-                if (typeSample.empty()) typeSample = v.pwszVal;
-            }
-            ::PropVariantClear(&v);
-        }
-    }
-
-    Logger::Info(L"[perf] 类型属性计时：项=" + std::to_wstring(count) +
-                 L"，取属性存储=" + std::to_wstring(storeMs) + L"ms" +
-                 L"，扩展名(" + std::to_wstring(extOk) + L")=" + std::to_wstring(extMs) + L"ms 样例[" + extSample + L"]" +
-                 L"，类型名(" + std::to_wstring(typeTextOk) + L")=" + std::to_wstring(typeTextMs) + L"ms 样例[" + typeTextSample + L"]" +
-                 L"，关联类型(" + std::to_wstring(typeOk) + L")=" + std::to_wstring(typeMs) + L"ms 样例[" + typeSample + L"]");
-}
-
 } // namespace
 
 std::wstring NowText()
@@ -1503,13 +1341,6 @@ bool BuildShellExtContext(const std::vector<std::wstring>& paths,
                           ShellExtContext& context,
                           std::wstring* error)
 {
-    // ---- [perf] 临时分段计时，定位多选经典菜单展开慢的问题，定位完删除 ----
-    const auto perfAll = std::chrono::steady_clock::now();
-    long long perfFolderMs = 0;
-    long long perfParseMs = 0;
-    long long perfBindMs  = 0;
-    // ---------------------------------------------------------------------
-
     const std::wstring folderPath = !parentFolder.empty()
         ? parentFolder
         : (paths.empty() ? std::wstring() : ParentFolderOf(paths.front()));
@@ -1521,15 +1352,12 @@ bool BuildShellExtContext(const std::vector<std::wstring>& paths,
     }
 
     {
-        const auto t0 = std::chrono::steady_clock::now();
         if (FAILED(::SHParseDisplayName(folderPath.c_str(), nullptr, &context.folder, 0, nullptr)) ||
             context.folder == nullptr)
         {
             if (error != nullptr) *error = L"父文件夹 PIDL 解析失败";
             return false;
         }
-        perfFolderMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     // 空白区没有选中项，只需要父文件夹 PIDL。
@@ -1539,21 +1367,17 @@ bool BuildShellExtContext(const std::vector<std::wstring>& paths,
     {
         PIDLIST_ABSOLUTE absolute = nullptr;
         {
-            const auto t0 = std::chrono::steady_clock::now();
             if (FAILED(::SHParseDisplayName(path.c_str(), nullptr, &absolute, 0, nullptr)) ||
                 absolute == nullptr)
             {
                 if (error != nullptr) *error = L"路径 PIDL 解析失败：" + path;
                 return false;
             }
-            perfParseMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
         }
 
         ComPtr<IShellFolder> parent;
         PCUITEMID_CHILD child = nullptr;
         {
-            const auto t0 = std::chrono::steady_clock::now();
             if (FAILED(::SHBindToParent(absolute, IID_PPV_ARGS(parent.GetAddressOf()), &child)) ||
                 child == nullptr)
             {
@@ -1561,8 +1385,6 @@ bool BuildShellExtContext(const std::vector<std::wstring>& paths,
                 if (error != nullptr) *error = L"取父文件夹失败：" + path;
                 return false;
             }
-            perfBindMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - t0).count();
         }
 
         context.childPidls.push_back(absolute);
@@ -1579,26 +1401,11 @@ bool BuildShellExtContext(const std::vector<std::wstring>& paths,
     if (SUCCEEDED(hr) && raw != nullptr)
     {
         context.dataObject.Attach(raw);
-        DumpDataObjectDiagnostic(context.dataObject.Get(), context.folder, context.children);
-        // ---- [perf] 经典上下文构造分段耗时 ----
-        const long long perfTotal = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - perfAll).count();
-        Logger::Info(L"[perf] 经典上下文：文件数=" + std::to_wstring(paths.size()) +
-                     L"，父PIDL=" + std::to_wstring(perfFolderMs) +
-                     L"ms，逐文件解析=" + std::to_wstring(perfParseMs) +
-                     L"ms，绑定父目录=" + std::to_wstring(perfBindMs) +
-                     L"ms，数据对象=SHCreateDataObject(0x" +
-                     std::to_wstring(static_cast<unsigned long>(hr)) +
-                     L")，合计=" + std::to_wstring(perfTotal) + L"ms");
         return true;
     }
 
     // 兜底：至少给 CF_HDROP，避免扩展连文件列表都拿不到。
     context.dataObject.Attach(new FileDataObject(paths));
-    // ---- [perf] 兜底分支：SHCreateDataObject 失败，只给 CF_HDROP ----
-    Logger::Warn(L"[perf] 经典上下文：SHCreateDataObject 失败 hr=0x" +
-                 std::to_wstring(static_cast<unsigned long>(hr)) +
-                 L"，退回 CF_HDROP 兜底；文件数=" + std::to_wstring(paths.size()));
     return true;
 }
 
@@ -2064,10 +1871,6 @@ void CaptureMenuTree(HMENU menu, IContextMenu* cmBase,
                     static_cast<UINT_PTR>(item.invoke.commandOffset), GCS_VERBW, nullptr,
                     reinterpret_cast<char*>(verb),
                     static_cast<UINT>(std::size(verb)));
-            // [perf] 临时：诊断规范动词名取不到的原因，定位完删除。
-            Logger::Info(L"[perf] GetCommandString：标题=[" + item.text + L"]，offset=" +
-                         std::to_wstring(item.invoke.commandOffset) +
-                         L"，hr=0x" + Logger::FormatHresult(hrVerb) + L"，串=[" + verb + L"]");
             if (SUCCEEDED(hrVerb) && verb[0] != L'\0')
             {
                 item.verb = verb;
@@ -2149,16 +1952,6 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
                             unsigned int scene,
                             HandlerCapture& out)
 {
-    // ---- [perf] 临时分段计时，定位多选经典菜单展开慢的问题，定位完删除 ----
-    const auto perfAll = std::chrono::steady_clock::now();
-    long long perfCreateMs = 0;
-    long long perfInitMs   = 0;
-    long long perfQueryMs  = 0;
-    long long perfPopupMs  = 0;
-    long long perfTreeMs   = 0;
-    long long perfIconMs   = 0;
-    // ---------------------------------------------------------------------
-
     out.clsid = ref.clsid;
     out.server = ClsidServerPath(ref.clsid);
     out.appName = BestAppName(out.server, L"未知应用");
@@ -2172,10 +1965,7 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
 
     ComPtr<IUnknown> unknown;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         HRESULT hr = ::CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_PPV_ARGS(unknown.GetAddressOf()));
-        perfCreateMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
         if (FAILED(hr) || unknown == nullptr)
         {
             out.failReason = L"CoCreateInstance 失败";
@@ -2196,10 +1986,7 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
     ShellExtContext context;
     std::wstring initError;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         hr = InitializeShellExt(unknown.Get(), paths, parentFolder, context, &initError);
-        perfInitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     if (FAILED(hr))
     {
@@ -2217,10 +2004,7 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
     const int idFirst = 1;
     const int idLast = 0x7FFF;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         hr = contextMenu->QueryContextMenu(menu, 0, idFirst, idLast, CMF_NORMAL);
-        perfQueryMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     if (FAILED(hr))
     {
@@ -2238,10 +2022,7 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
     if (FAILED(unknown.As(&contextMenu3))) contextMenu3 = nullptr;
 
     {
-        const auto t0 = std::chrono::steady_clock::now();
         InitMenuRecursive(menu, contextMenu2.Get(), contextMenu3.Get());
-        perfPopupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     MenuOwner owner;
@@ -2258,10 +2039,7 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
     invoke.commandOffset = idFirst;
 
     {
-        const auto t0 = std::chrono::steady_clock::now();
         CaptureMenuTree(menu, contextMenu.Get(), contextMenu3.Get(), contextMenu2.Get(), owner, invoke, 0, L"", out.items);
-        perfTreeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     ::DestroyMenu(menu);
@@ -2269,11 +2047,8 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
     // WPS 的 IContextMenu 不给 hbmpItem，但它在自己的 menu_2.xml 里配置了
     // 每一项的 icon；用 WPS 自己的图标补上，避免所有项都回退成同一个 logo。
     {
-        const auto t0 = std::chrono::steady_clock::now();
         EnrichWpsMenuIcons(out.items, out.server,
                            paths.empty() ? std::wstring() : paths.front());
-        perfIconMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     for (MenuInventoryItem& item : out.items)
@@ -2286,20 +2061,6 @@ bool CaptureHandlerWithMenu(const std::vector<std::wstring>& paths,
         out.failReason = L"没有产出菜单项";
         return false;
     }
-
-    // ---- [perf] 经典采集分段汇总 ----
-    const long long perfTotal = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - perfAll).count();
-    Logger::Info(L"[perf] 经典采集：" + out.appName + L"，文件数=" +
-                 std::to_wstring(paths.size()) +
-                 L"，CoCreate=" + std::to_wstring(perfCreateMs) +
-                 L"ms，Initialize=" + std::to_wstring(perfInitMs) +
-                 L"ms，QueryContextMenu=" + std::to_wstring(perfQueryMs) +
-                 L"ms，InitPopup=" + std::to_wstring(perfPopupMs) +
-                 L"ms，菜单树=" + std::to_wstring(perfTreeMs) +
-                 L"ms，图标适配=" + std::to_wstring(perfIconMs) +
-                 L"ms，菜单项=" + std::to_wstring(out.items.size()) +
-                 L"，总计=" + std::to_wstring(perfTotal) + L"ms");
 
     out.ok = true;
     return true;
@@ -2599,9 +2360,6 @@ bool MakeShellItemArray(const std::vector<std::wstring>& paths,
     const HRESULT hr = ::SHCreateShellItemArrayFromDataObject(
         context.dataObject.Get(), IID_PPV_ARGS(items.GetAddressOf()));
 
-    if (SUCCEEDED(hr) && items != nullptr)
-        DumpItemArrayDiagnostic(items.Get());
-
     return SUCCEEDED(hr) && items != nullptr;
 }
 
@@ -2700,66 +2458,33 @@ bool CapturePackagedCommand(const std::vector<std::wstring>& paths,
                             unsigned int scene,
                             std::vector<MenuInventoryItem>& out)
 {
-    // ---- [perf] 临时分段计时，定位多选现代菜单展开慢的问题，定位完删除 ----
-    const auto perfAll = std::chrono::steady_clock::now();
-    long long perfCreateMs = 0;
-    long long perfArrayMs  = 0;
-    long long perfTitleMs  = 0;
-    long long perfStateMs  = 0;
-    long long perfChildMs  = 0;
-    long long perfIconMs   = 0;
-    // ---------------------------------------------------------------------
-
     CLSID clsid = {};
     if (FAILED(::CLSIDFromString(reg.clsid.c_str(), &clsid))) return false;
 
     ComPtr<IExplorerCommand> command;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         if (FAILED(::CoCreateInstance(clsid, nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(command.GetAddressOf()))) || command == nullptr)
         {
             return false;
         }
-        perfCreateMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     ComPtr<IShellItemArray> items;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         if (!MakeShellItemArray(paths, parentFolder, items)) return false;
-        DumpItemTypeDiagnostic(items.Get());
-        perfArrayMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     std::wstring title;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         title = ExplorerCommandTitle(command.Get(), items.Get());
-        perfTitleMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
-
-        // [perf] 临时：同一数组第二次 GetTitle，判断慢是否为进程级首次初始化/缓存混淆，定位完删除
-        wchar_t* secondTitle = nullptr;
-        const auto t1 = std::chrono::steady_clock::now();
-        const HRESULT hrSecond = command->GetTitle(items.Get(), &secondTitle);
-        const long long secondMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t1).count();
-        if (secondTitle != nullptr) ::CoTaskMemFree(secondTitle);
-        Logger::Info(L"[perf] 标题二次调用：第二次=" + std::to_wstring(secondMs) +
-                     L"ms，hr=0x" + std::to_wstring(static_cast<unsigned long>(hrSecond)));
     }
     if (title.empty()) return false;
 
     bool hidden = false;
     bool disabled = false;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         ExplorerCommandState(command.Get(), items.Get(), &hidden, &disabled);
-        perfStateMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     if (hidden) return false;
 
@@ -2785,33 +2510,15 @@ bool CapturePackagedCommand(const std::vector<std::wstring>& paths,
     item.invoke = invoke;
     item.iconSource = L"none";
     {
-        const auto t0 = std::chrono::steady_clock::now();
         item.iconFile = CaptureExplorerCommandIcon(command.Get(), items.Get(), item.id);
-        perfIconMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     item.scenes = scene;
 
     {
-        const auto t0 = std::chrono::steady_clock::now();
         CaptureExplorerChildren(command.Get(), items.Get(), owner, invoke, 1, L"", item.children);
-        perfChildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     out.push_back(std::move(item));
 
-    // ---- [perf] 现代命令采集分段汇总 ----
-    const long long perfTotal = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - perfAll).count();
-    Logger::Info(L"[perf] 现代采集：" + owner.appName + L"，文件数=" +
-                 std::to_wstring(paths.size()) +
-                 L"，CoCreate=" + std::to_wstring(perfCreateMs) +
-                 L"ms，建数组=" + std::to_wstring(perfArrayMs) +
-                 L"ms，标题=" + std::to_wstring(perfTitleMs) +
-                 L"ms，状态=" + std::to_wstring(perfStateMs) +
-                 L"ms，子命令=" + std::to_wstring(perfChildMs) +
-                 L"ms，图标=" + std::to_wstring(perfIconMs) +
-                 L"ms，总计=" + std::to_wstring(perfTotal) + L"ms");
     return true;
 }
 
@@ -3137,148 +2844,6 @@ MenuInventoryItem ItemFromJson(const json& j)
 }
 
 } // namespace
-
-// ============================================================================
-// [perf] 临时对照实验（定位完删除）—— 外部链接，供性能探针调用
-// 经典：绑定父 IShellFolder 后 EnumObjects 枚举原生 child PIDL 喂扩展；
-// 现代：从标准 IDataObject 用 SHCreateShellItemArrayFromDataObject 造数组。
-// ============================================================================
-void ProbeClassicNativePidl(const std::wstring& clsidStr,
-                            const std::vector<std::wstring>& paths,
-                            const std::wstring& parentFolder)
-{
-    using Microsoft::WRL::ComPtr;
-
-    CLSID clsid = {};
-    if (FAILED(::CLSIDFromString(clsidStr.c_str(), &clsid))) return;
-
-    ComPtr<IUnknown> unknown;
-    if (FAILED(::CoCreateInstance(clsid, nullptr, CLSCTX_ALL,
-                                  IID_PPV_ARGS(unknown.GetAddressOf())))) return;
-    ComPtr<IContextMenu> contextMenu;
-    if (FAILED(unknown.As(&contextMenu))) return;
-    ComPtr<IShellExtInit> init;
-    if (FAILED(unknown.As(&init))) return;
-
-    PIDLIST_ABSOLUTE folder = nullptr;
-    if (FAILED(::SHParseDisplayName(parentFolder.c_str(), nullptr, &folder, 0, nullptr))) return;
-
-    ComPtr<IShellFolder> desktop;
-    if (FAILED(::SHGetDesktopFolder(desktop.GetAddressOf()))) { ::CoTaskMemFree(folder); return; }
-    ComPtr<IShellFolder> parent;
-    if (FAILED(desktop->BindToObject(folder, nullptr, IID_PPV_ARGS(parent.GetAddressOf()))))
-    { ::CoTaskMemFree(folder); return; }
-
-    std::set<std::wstring> wanted;
-    for (const std::wstring& p : paths)
-        wanted.insert(::PathFindFileNameW(p.c_str()));
-
-    std::vector<PIDLIST_RELATIVE> matchedOwned;
-    std::vector<PCUITEMID_CHILD> matched;
-
-    ComPtr<IEnumIDList> enumerator;
-    if (FAILED(parent->EnumObjects(nullptr,
-            SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_INCLUDEHIDDEN,
-            enumerator.GetAddressOf())))
-    { ::CoTaskMemFree(folder); return; }
-
-    LPITEMIDLIST child = nullptr;
-    while (enumerator->Next(1, &child, nullptr) == S_OK && child != nullptr)
-    {
-        STRRET str = {};
-        if (SUCCEEDED(parent->GetDisplayNameOf(child, SHGDN_INFOLDER, &str)))
-        {
-            wchar_t name[MAX_PATH] = {};
-            ::StrRetToBufW(&str, child, name, MAX_PATH);
-            if (wanted.count(name))
-            {
-                const UINT len = ::ILGetSize(child);
-                PIDLIST_RELATIVE copy = static_cast<PIDLIST_RELATIVE>(::CoTaskMemAlloc(len));
-                if (copy != nullptr)
-                {
-                    ::CopyMemory(copy, child, len);
-                    matchedOwned.push_back(copy);
-                    matched.push_back(copy);
-                }
-            }
-        }
-        ::CoTaskMemFree(child);
-        child = nullptr;
-    }
-
-    Logger::Info(L"[perf] 对照(经典原生PIDL)：选中=" + std::to_wstring(paths.size()) +
-                 L"，枚举匹配=" + std::to_wstring(matched.size()));
-
-    IDataObject* raw = nullptr;
-    HRESULT hr = ::SHCreateDataObject(folder, static_cast<UINT>(matched.size()),
-                                      matched.data(), nullptr, IID_IDataObject,
-                                      reinterpret_cast<void**>(&raw));
-    ComPtr<IDataObject> dataObject;
-    if (SUCCEEDED(hr) && raw != nullptr) dataObject.Attach(raw);
-
-    const auto tInit = std::chrono::steady_clock::now();
-    const HRESULT hrInit = init->Initialize(folder, dataObject.Get(), nullptr);
-    const long long initMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tInit).count();
-
-    HMENU menu = ::CreatePopupMenu();
-    const auto tQuery = std::chrono::steady_clock::now();
-    const HRESULT hrQuery = contextMenu->QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL);
-    const long long queryMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tQuery).count();
-    ::DestroyMenu(menu);
-
-    Logger::Info(L"[perf] 对照(经典原生PIDL)：Initialize=" + std::to_wstring(initMs) +
-                 L"ms，Query=" + std::to_wstring(queryMs) + L"ms，initHr=0x" +
-                 std::to_wstring(static_cast<unsigned long>(hrInit)) + L"，queryHr=0x" +
-                 std::to_wstring(static_cast<unsigned long>(hrQuery)));
-
-    for (PIDLIST_RELATIVE p : matchedOwned) ::CoTaskMemFree(p);
-    ::CoTaskMemFree(folder);
-}
-
-void ProbeModernNativeArray(const std::wstring& clsidStr,
-                           const std::vector<std::wstring>& paths,
-                           const std::wstring& parentFolder)
-{
-    using Microsoft::WRL::ComPtr;
-
-    CLSID clsid = {};
-    if (FAILED(::CLSIDFromString(clsidStr.c_str(), &clsid))) return;
-
-    ComPtr<IExplorerCommand> command;
-    if (FAILED(::CoCreateInstance(clsid, nullptr, CLSCTX_ALL,
-                                  IID_PPV_ARGS(command.GetAddressOf())))) return;
-
-    ShellExtContext context;
-    std::wstring err;
-    if (!BuildShellExtContext(paths, parentFolder, context, &err)) return;
-
-    ComPtr<IShellItemArray> items;
-    const auto tArr = std::chrono::steady_clock::now();
-    const HRESULT hrArr = ::SHCreateShellItemArrayFromDataObject(
-        context.dataObject.Get(), IID_PPV_ARGS(items.GetAddressOf()));
-    const long long arrMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tArr).count();
-
-    wchar_t* title = nullptr;
-    const auto tTitle = std::chrono::steady_clock::now();
-    const HRESULT hrTitle = command->GetTitle(items.Get(), &title);
-    const long long titleMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tTitle).count();
-    std::wstring titleText = (title != nullptr) ? title : L"";
-    if (title != nullptr) ::CoTaskMemFree(title);
-
-    DWORD itemCount = 0;
-    if (items != nullptr) items->GetCount(&itemCount);
-
-    Logger::Info(L"[perf] 对照(现代数据对象数组)：项数=" + std::to_wstring(itemCount) +
-                 L"，造数组=" + std::to_wstring(arrMs) +
-                 L"ms，标题=" + std::to_wstring(titleMs) + L"ms，标题文本=[" + titleText +
-                 L"]，arrHr=0x" +
-                 std::to_wstring(static_cast<unsigned long>(hrArr)) + L"，titleHr=0x" +
-                 std::to_wstring(static_cast<unsigned long>(hrTitle)));
-}
 
 // ---------------------------------------------------------------------------
 // 动态组 owner 缓存
@@ -4364,14 +3929,6 @@ bool InvokeShellHandler(const MenuInventoryItem& item,
         return false;
     }
 
-    // ---- [perf] 临时：经典执行链路分段计时，定位开窗慢落在哪一段，定位完删除 ----
-    const auto perfAll = std::chrono::steady_clock::now();
-    long long perfCreateMs = 0;
-    long long perfInitMs   = 0;
-    long long perfQueryMs  = 0;
-    long long perfInvokeMs = 0;
-    // ---------------------------------------------------------------------
-
     HRESULT hr = S_OK;
 
     CLSID clsid = {};
@@ -4383,10 +3940,7 @@ bool InvokeShellHandler(const MenuInventoryItem& item,
 
     ComPtr<IUnknown> unknown;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         hr = ::CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_PPV_ARGS(unknown.GetAddressOf()));
-        perfCreateMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
         if (FAILED(hr) || unknown == nullptr)
         {
             if (error != nullptr) *error = L"CoCreateInstance 失败";
@@ -4404,10 +3958,7 @@ bool InvokeShellHandler(const MenuInventoryItem& item,
     ShellExtContext context;
     std::wstring initError;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         hr = InitializeShellExt(unknown.Get(), targetPaths, parentFolder, context, &initError);
-        perfInitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     if (FAILED(hr))
     {
@@ -4425,10 +3976,7 @@ bool InvokeShellHandler(const MenuInventoryItem& item,
     const int idFirst = 1;
     const int idLast = 0x7FFF;
     {
-        const auto t0 = std::chrono::steady_clock::now();
         hr = contextMenu->QueryContextMenu(menu, 0, idFirst, idLast, CMF_NORMAL);
-        perfQueryMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
 
     // 即使 QueryContextMenu 返回失败，个别扩展仍能响应 InvokeCommand；
@@ -4461,24 +4009,9 @@ bool InvokeShellHandler(const MenuInventoryItem& item,
     }
 
     {
-        const auto t0 = std::chrono::steady_clock::now();
         hr = contextMenu->InvokeCommand(reinterpret_cast<LPCMINVOKECOMMANDINFO>(&invoke));
-        perfInvokeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
     }
     ::DestroyMenu(menu);
-
-    // ---- [perf] 经典执行分段汇总，定位完删除 ----
-    const long long perfTotal = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - perfAll).count();
-    Logger::Info(L"[perf] 经典执行：文件数=" + std::to_wstring(targetPaths.size()) +
-                 L"，方式=" + (useVerb ? L"verb" : L"offset") +
-                 L"，动词=[" + item.invoke.verb + L"]" +
-                 L"，CoCreate=" + std::to_wstring(perfCreateMs) +
-                 L"ms，Initialize=" + std::to_wstring(perfInitMs) +
-                 L"ms，Query=" + std::to_wstring(perfQueryMs) +
-                 L"ms，Invoke=" + std::to_wstring(perfInvokeMs) +
-                 L"ms，合计=" + std::to_wstring(perfTotal) + L"ms");
 
     if (FAILED(hr))
     {
