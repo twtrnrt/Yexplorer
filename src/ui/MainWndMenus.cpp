@@ -18,6 +18,8 @@
 #include "shell/ActionRunner.h"
 #include "shell/ShellClipboard.h"
 #include "shell/MenuFlatten.h"
+#include "shell/MenuApps.h"
+#include "shell/MenuInventory.h"
 #include "ui/MenuLayout.h"
 
 #include <shellapi.h>
@@ -26,6 +28,8 @@
 #include <shobjidl.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
@@ -459,7 +463,7 @@ void MainWindow::AttachMenuIcon(HMENU menu, UINT position, HICON icon)
         mii.cbSize   = sizeof(MENUITEMINFO);
         mii.fMask    = MIIM_BITMAP;
         mii.hbmpItem = itemBitmap;
-        if (::SetMenuItemInfoW(menu, position, FALSE, &mii))
+        if (::SetMenuItemInfoW(menu, position, TRUE, &mii))
         {
             m_menuBitmaps.push_back(itemBitmap);
         }
@@ -604,6 +608,11 @@ bool MainWindow::HandleInitMenuPopup(HMENU menu)
         std::vector<shell::MenuInventoryItem> allItems;
         for (const shell::DynamicOwner& owner : live.row.owners)
         {
+            // 归组把同应用、不同场景的 owner 并到了同一行；展开当前场景时，
+            // 跳过不适用本场景的 owner（否则多选文件会把文件夹/空白区场景的命令也实例化）。
+            // scenes==0 视为未标注场景（旧缓存/未探测），放行不排除。
+            if (owner.scenes != 0 && (owner.scenes & live.scene) == 0) continue;
+
             std::vector<shell::MenuInventoryItem> items;
             std::wstring error;
             const bool ok = shell::CaptureOwnerMenu(
@@ -1559,4 +1568,70 @@ void MainWindow::DrawMenuItem(const DRAWITEMSTRUCT* drawItem)
     ::DrawTextW(drawItem->hDC, data->text.c_str(), -1, &textRect,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     ::SelectObject(drawItem->hDC, oldFont);
+}
+
+// ============================================================================
+// [perf] 临时性能探针：绕过二级菜单交互，直接按当前选中项遍历采集第三方菜单。
+// 分段耗时由 MenuInventory.cpp 内部的 [perf] 日志输出；这里只汇总每个 owner 的
+// 总耗时。定位完问题后整段删除。
+// ============================================================================
+void MainWindow::RunPerfProbe()
+{
+    std::vector<std::wstring> paths = m_fileListView.GetSelectedPaths();
+    const std::wstring currentDir = m_history.Current();
+
+    // [perf] 可选：环境变量 PERF_LIMIT 限制只取前 N 个路径，用来跑文件数-耗时曲线
+    wchar_t limitBuf[16] = {};
+    if (::GetEnvironmentVariableW(L"PERF_LIMIT", limitBuf, 16) > 0)
+    {
+        int limit = 0;
+        if (::swscanf_s(limitBuf, L"%d", &limit) == 1 && limit > 0 &&
+            static_cast<size_t>(limit) < paths.size())
+        {
+            paths.resize(static_cast<size_t>(limit));
+        }
+    }
+
+    Logger::Info(L"[perf] 探针开始：文件数=" + std::to_wstring(paths.size()) +
+                 L"，目录=" + currentDir);
+
+    const auto perfAll = std::chrono::steady_clock::now();
+    const auto& rows = shell::CachedAppSourceRows();
+
+    for (const shell::AppSourceRow& row : rows)
+    {
+        const std::wstring sourceName =
+            row.source == shell::AppSourceKind::Modern ? L"现代" : L"经典";
+
+        for (const shell::DynamicOwner& owner : row.owners)
+        {
+            std::vector<shell::MenuInventoryItem> items;
+            std::wstring error;
+
+            const auto t0 = std::chrono::steady_clock::now();
+            shell::CaptureOwnerMenu(owner.kind, owner.clsid, paths, currentDir,
+                                    4 /* SceneMultiple 老位 */, items, &error);
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+
+            Logger::Info(L"[perf] 探针 owner：" + row.appName + L"（" + sourceName + L"）" +
+                         L"，总耗时=" + std::to_wstring(ms) + L"ms，菜单项=" +
+                         std::to_wstring(items.size()) +
+                         (error.empty() ? L"" : (L"，错误=" + error)));
+
+            // [perf] 临时对照实验：只对 WPS 再跑一条原生 PIDL / 数据对象数组路径（定位完删除）
+            if (row.appName.find(L"WPS") != std::wstring::npos)
+            {
+                if (row.source == shell::AppSourceKind::Modern)
+                    shell::ProbeModernNativeArray(owner.clsid, paths, currentDir);
+                else
+                    shell::ProbeClassicNativePidl(owner.clsid, paths, currentDir);
+            }
+        }
+    }
+
+    const long long perfTotal = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - perfAll).count();
+    Logger::Info(L"[perf] 探针结束：应用行=" + std::to_wstring(rows.size()) +
+                 L"，全部 owner 总耗时=" + std::to_wstring(perfTotal) + L"ms");
 }

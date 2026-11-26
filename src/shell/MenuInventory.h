@@ -175,6 +175,17 @@ bool CaptureOwnerMenu(MenuInvokeKind kind,
                       std::vector<MenuInventoryItem>& out,
                       std::wstring* error);
 
+// [perf] 临时对照实验（定位完删除）：
+//   ProbeClassicNativePidl：父文件夹 EnumObjects 枚举原生 child PIDL 喂经典扩展；
+//   ProbeModernNativeArray：从标准 IDataObject 用 SHCreateShellItemArrayFromDataObject 造数组。
+// 仅在性能探针里调用，结果写日志，不产出菜单项。
+void ProbeClassicNativePidl(const std::wstring& clsid,
+                            const std::vector<std::wstring>& paths,
+                            const std::wstring& parentFolder);
+void ProbeModernNativeArray(const std::wstring& clsid,
+                            const std::vector<std::wstring>& paths,
+                            const std::wstring& parentFolder);
+
 // 缓存：%APPDATA%\FileExplorer\menu-inventory.json
 std::wstring MenuInventoryPath();
 bool LoadMenuInventory(MenuInventoryReport& report);

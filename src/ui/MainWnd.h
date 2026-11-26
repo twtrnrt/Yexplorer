@@ -144,6 +144,9 @@ static const int kCommandCustomActionMax  = 100;
 static const int kRuntimeMenuBase = 3800;
 static const int kRuntimeMenuMax  = 200;
 
+// [perf] 临时性能探针命令号：直接按当前选中项遍历采集第三方菜单，定位完删除
+static const int kPerfProbe = 39001;
+
 class MainWindow
 {
 public:
@@ -785,6 +788,9 @@ private:
     bool HandleInitMenuPopup(HMENU menu);
     bool InvokeRuntimeMenuCommand(int commandId);
     void AttachMenuIcon(HMENU menu, UINT position, HICON icon);
+
+    // [perf] 临时性能探针：按当前选中项直接采集第三方菜单并打分段耗时，定位完删除
+    void RunPerfProbe();
 
     // 画一个自绘菜单项（WM_DRAWITEM 里调）
     void DrawMenuItem(const DRAWITEMSTRUCT* drawItem);
