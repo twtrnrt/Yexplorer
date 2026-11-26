@@ -3,11 +3,11 @@
 // 文件：tests/MenuFlattenTest.cpp
 //
 // 第三方菜单树拍平/合并的纯函数回归：
-//   · 同名包装目录去掉；
 //   · 同名目录先合并子项；
-//   · 数目录不数叶子（TortoiseSVN：3 个快捷项 + 1 个同名目录仍要拍平）；
-//   · 只剩一个不同名目录 → 「1级 · 2级」；
-//   · 多个不同目录保留。
+//   · 只有2级唯一一个目录、没有其他项目时才拍平；
+//   · 有叶子/多个项目不拍平（TortoiseSVN：3 个快捷项 + 1 个目录保留）；
+//   · 拍平后父项始终用别名/应用名，不拼「1级 · 2级」；
+//   · 拍平后子项若又唯一目录，继续拍。
 //
 // 编译方式见 tools/run-flatten-tests.ps1。
 // ============================================================================
@@ -51,6 +51,15 @@ MenuInventoryItem Directory(const wchar_t* text,
     return item;
 }
 
+MenuInventoryItem Directory(const wchar_t* text,
+                            std::initializer_list<MenuInventoryItem> children)
+{
+    MenuInventoryItem item;
+    item.text = text;
+    for (const MenuInventoryItem& child : children) item.children.push_back(child);
+    return item;
+}
+
 bool IsText(const std::vector<MenuInventoryItem>& items, size_t index,
             const wchar_t* text)
 {
@@ -71,10 +80,10 @@ void TestSameNameWrapperOnly()
           "same-name wrapper children moved up");
 }
 
-void TestSameNameWrapperWithLeaves()
+void TestMultipleItemsNotFlattened()
 {
-    // TortoiseSVN：3 个叶子快捷项 + 一个同名目录。
-    // 目录数=1，即使还有叶子，也要按“只剩一个目录”拍平。
+    // TortoiseSVN：3 个叶子快捷项 + 一个同名目录 = 4 个项目。
+    // 有叶子就不再是“唯一一个目录”，不拍平。
     std::vector<MenuInventoryItem> items = {
         Leaf(L"SVN 更新"),
         Leaf(L"SVN 提交"),
@@ -84,12 +93,12 @@ void TestSameNameWrapperWithLeaves()
 
     FlattenResult result = shell::NormalizeAppMenu(
         std::move(items), L"TortoiseSVN", L"TortoiseSVN");
-    Check(result.title == L"TortoiseSVN", "leaves + same-name wrapper keeps title");
-    Check(result.items.size() == 5, "leaves kept while wrapper flattened");
+    Check(result.title == L"TortoiseSVN", "multiple items keep title");
+    Check(result.items.size() == 4, "multiple items not flattened");
     Check(IsText(result.items, 0, L"SVN 更新") &&
-          IsText(result.items, 3, L"A") &&
-          IsText(result.items, 4, L"B"),
-          "leaves and wrapper children order");
+          IsText(result.items, 3, L"TortoiseSVN") &&
+          result.items[3].children.size() == 2,
+          "leaves and wrapper kept when more than one item");
 }
 
 void TestMergeSameNameDirectories()
@@ -103,13 +112,31 @@ void TestMergeSameNameDirectories()
     FlattenResult result = shell::NormalizeAppMenu(
         std::move(items), L"WinRAR", L"WinRAR");
     Check(result.title == L"WinRAR", "merged same-name dirs keep title");
-    Check(result.items.size() == 3, "merged same-name dirs then flattened");
-    Check(IsText(result.items, 0, L"A") && IsText(result.items, 1, L"B") &&
-          IsText(result.items, 2, L"C"),
-          "merged children order");
+    Check(result.items.size() == 2, "merged same-name dirs not flattened with leaf");
+    Check(result.items[0].text == L"WinRAR" &&
+          result.items[0].children.size() == 2 &&
+          IsText(result.items[0].children, 0, L"A") &&
+          IsText(result.items[0].children, 1, L"B") &&
+          IsText(result.items, 1, L"C"),
+          "merged children order, leaf kept");
 }
 
-void TestDifferentNameOnlyDirectory()
+void TestMergedSameNameOnlyFlattened()
+{
+    std::vector<MenuInventoryItem> items = {
+        Directory(L"WinRAR", { L"A" }),
+        Directory(L"WinRAR", { L"B" })
+    };
+
+    FlattenResult result = shell::NormalizeAppMenu(
+        std::move(items), L"WinRAR", L"WinRAR");
+    Check(result.title == L"WinRAR", "merged single dir keeps title");
+    Check(result.items.size() == 2, "merged single dir flattened");
+    Check(IsText(result.items, 0, L"A") && IsText(result.items, 1, L"B"),
+          "merged single dir children moved up");
+}
+
+void TestDifferentNameWithLeafNotFlattened()
 {
     std::vector<MenuInventoryItem> items = {
         Leaf(L"快捷"),
@@ -118,14 +145,57 @@ void TestDifferentNameOnlyDirectory()
 
     FlattenResult result = shell::NormalizeAppMenu(
         std::move(items), L"WPS Office", L"WPS Office");
-    Check(result.title == L"WPS Office · 转为PDF", "different-name dir merges titles");
-    Check(result.items.size() == 3, "different-name dir flattened with leaves");
+    Check(result.title == L"WPS Office", "leaf + different-name dir keeps title");
+    Check(result.items.size() == 2, "leaf + different-name dir not flattened");
     Check(IsText(result.items, 0, L"快捷") &&
-          IsText(result.items, 1, L"转为PDF") &&
-          IsText(result.items, 2, L"转为图片"),
-          "different-name dir children moved up");
+          result.items[1].text == L"转为PDF" &&
+          result.items[1].children.size() == 2,
+          "leaf and different-name dir kept");
 }
 
+void TestDifferentNameSoleFolderFlattened()
+{
+    std::vector<MenuInventoryItem> items = {
+        Directory(L"转为PDF", { L"转为PDF", L"转为图片" })
+    };
+
+    FlattenResult result = shell::NormalizeAppMenu(
+        std::move(items), L"WPS 经典", L"WPS Office");
+    Check(result.title == L"WPS 经典", "sole different-name folder keeps alias title");
+    Check(result.items.size() == 2, "sole different-name folder flattened");
+    Check(IsText(result.items, 0, L"转为PDF") &&
+          IsText(result.items, 1, L"转为图片"),
+          "sole different-name folder children moved up");
+}
+
+void TestRecursiveSoleFolders()
+{
+    std::vector<MenuInventoryItem> items = {
+        Directory(L"外层", { Directory(L"内层", { L"L" }) })
+    };
+
+    FlattenResult result = shell::NormalizeAppMenu(
+        std::move(items), L"应用", L"应用");
+    Check(result.title == L"应用", "recursive sole folders keep alias title");
+    Check(result.items.size() == 1 && IsText(result.items, 0, L"L"),
+          "recursive sole folders flattened");
+}
+
+void TestSoleFolderWithMultipleChildrenStops()
+{
+    std::vector<MenuInventoryItem> items = {
+        Directory(L"外层", { Leaf(L"叶子"), Directory(L"内层", { L"L" }) })
+    };
+
+    FlattenResult result = shell::NormalizeAppMenu(
+        std::move(items), L"应用", L"应用");
+    Check(result.title == L"应用", "sole folder with multiple children keeps title");
+    Check(result.items.size() == 2, "sole folder with multiple children flattened once");
+    Check(IsText(result.items, 0, L"叶子") &&
+          result.items[1].text == L"内层" &&
+          result.items[1].children.size() == 1,
+          "inner folder kept when sibling items exist");
+}
 void TestMultipleDirectoriesKept()
 {
     std::vector<MenuInventoryItem> items = {
@@ -160,9 +230,13 @@ void TestAliasMatchesOriginalAppName()
 int main()
 {
     TestSameNameWrapperOnly();
-    TestSameNameWrapperWithLeaves();
+    TestMultipleItemsNotFlattened();
     TestMergeSameNameDirectories();
-    TestDifferentNameOnlyDirectory();
+    TestMergedSameNameOnlyFlattened();
+    TestDifferentNameWithLeafNotFlattened();
+    TestDifferentNameSoleFolderFlattened();
+    TestRecursiveSoleFolders();
+    TestSoleFolderWithMultipleChildrenStops();
     TestMultipleDirectoriesKept();
     TestAliasMatchesOriginalAppName();
 

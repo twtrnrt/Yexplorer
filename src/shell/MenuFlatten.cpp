@@ -45,13 +45,6 @@ std::wstring TitleKey(const std::wstring& text)
     return result;
 }
 
-bool SameTitle(const std::wstring& a, const std::wstring& b)
-{
-    const std::wstring left = TitleKey(a);
-    const std::wstring right = TitleKey(b);
-    return !left.empty() && left == right;
-}
-
 void CollapseSeparators(std::vector<MenuInventoryItem>& items)
 {
     std::vector<MenuInventoryItem> result;
@@ -128,40 +121,38 @@ FlattenResult NormalizeAppMenu(std::vector<MenuInventoryItem> items,
 
     MergeSameNameDirectories(items);
 
-    int directoryCount = 0;
-    size_t directoryIndex = 0;
+    int itemCount = 0;
+    size_t onlyFolderIndex = 0;
+    bool onlyFolder = false;
+
     for (size_t i = 0; i < items.size(); ++i)
     {
-        if (!items[i].separator && !items[i].children.empty())
+        if (items[i].separator) continue;
+        ++itemCount;
+        if (!items[i].children.empty())
         {
-            ++directoryCount;
-            directoryIndex = i;
+            onlyFolderIndex = i;
+            onlyFolder = true;
+        }
+        else
+        {
+            onlyFolder = false;
         }
     }
 
-    if (directoryCount == 1 && depth < 3)
+    // 只有“唯一一个项目，且这个项目是目录”才拍平。
+    // 只要还有叶子或第二个目录，就原样保留。
+    if (itemCount == 1 && onlyFolder && depth < 3)
     {
-        MenuInventoryItem directory = std::move(items[directoryIndex]);
-        items.erase(items.begin() + static_cast<std::ptrdiff_t>(directoryIndex));
-
-        const bool sameName = SameTitle(directory.text, result.title) ||
-                              SameTitle(directory.text, appName);
-
-        if (!sameName)
-        {
-            const std::wstring childTitle = CleanTitle(directory.text);
-            if (!childTitle.empty())
-            {
-                result.title += L" · " + childTitle;
-            }
-        }
+        MenuInventoryItem directory = std::move(items[onlyFolderIndex]);
+        items.erase(items.begin() + static_cast<std::ptrdiff_t>(onlyFolderIndex));
 
         std::vector<MenuInventoryItem> children = std::move(directory.children);
-        items.insert(items.begin() + static_cast<std::ptrdiff_t>(directoryIndex),
+        items.insert(items.begin() + static_cast<std::ptrdiff_t>(onlyFolderIndex),
                      std::make_move_iterator(children.begin()),
                      std::make_move_iterator(children.end()));
 
-        // 拍平后可能又只剩一个不同名目录，继续收一层；最多 3 层。
+        // 父项名字保持别名/应用名，不再拼「1级 · 2级」。
         FlattenResult nested = NormalizeAppMenu(std::move(items), result.title,
                                                 appName, depth + 1);
         return nested;

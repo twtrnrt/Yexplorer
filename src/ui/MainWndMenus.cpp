@@ -637,20 +637,7 @@ bool MainWindow::HandleInitMenuPopup(HMENU menu)
             return true;
         }
 
-        // 拍平后如果合并出了「1级 · 2级」，顺手把父菜单项的文字也改掉。
-        if (!flattened.title.empty() && flattened.title != live.displayTitle)
-        {
-            live.displayTitle = flattened.title;
-            if (live.parentMenu != nullptr)
-            {
-                MENUITEMINFOW info = {};
-                info.cbSize     = sizeof(info);
-                info.fMask      = MIIM_STRING;
-                info.dwTypeData = const_cast<wchar_t*>(live.displayTitle.c_str());
-                ::SetMenuItemInfoW(live.parentMenu, live.parentPosition, TRUE, &info);
-            }
-        }
-
+        // 父项名字始终是别名/应用名；拍平不会改成「1级 · 2级」。
         appendItems(menu, flattened.items);
         return true;
     }
