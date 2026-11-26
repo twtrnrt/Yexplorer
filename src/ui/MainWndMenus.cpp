@@ -17,6 +17,7 @@
 #include "core/Settings.h"
 #include "shell/ActionRunner.h"
 #include "shell/ShellClipboard.h"
+#include "shell/MenuFlatten.h"
 #include "ui/MenuLayout.h"
 
 #include <shellapi.h>
@@ -473,6 +474,7 @@ void MainWindow::AttachMenuIcon(HMENU menu, UINT position, HICON icon)
 }
 
 void MainWindow::AppendThirdPartyGroup(HMENU parent, const shell::AppSourceRow& row,
+                                       const std::wstring& displayName,
                                        unsigned int oldScene,
                                        const std::vector<std::wstring>& targetPaths,
                                        const std::wstring& parentFolder)
@@ -484,17 +486,21 @@ void MainWindow::AppendThirdPartyGroup(HMENU parent, const shell::AppSourceRow& 
 
     ::AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, L"正在读取…");
 
-    LiveSubMenu live;
-    live.menu        = sub;
-    live.row         = row;
-    live.scene       = oldScene;
-    live.parentFolder = parentFolder;
-    live.targetPaths = targetPaths;
-    m_liveSubMenus.push_back(std::move(live));
-
-    // 右键菜单里只显示应用名，不显示（经典）/（现代）
+    // 右键菜单只显示别名/应用名，不显示（经典）/（现代）
+    const std::wstring title = displayName.empty() ? row.appName : displayName;
     ::AppendMenuW(parent, MF_POPUP | MF_STRING,
-                  reinterpret_cast<UINT_PTR>(sub), row.appName.c_str());
+                  reinterpret_cast<UINT_PTR>(sub), title.c_str());
+
+    LiveSubMenu live;
+    live.menu           = sub;
+    live.parentMenu     = parent;
+    live.parentPosition = static_cast<UINT>(::GetMenuItemCount(parent) - 1);
+    live.row            = row;
+    live.displayTitle   = title;
+    live.scene          = oldScene;
+    live.parentFolder   = parentFolder;
+    live.targetPaths    = targetPaths;
+    m_liveSubMenus.push_back(std::move(live));
 
     if (core::Settings::Instance().MenuIcons())
     {
@@ -521,7 +527,6 @@ bool MainWindow::HandleInitMenuPopup(HMENU menu)
         }
 
         const bool showIcons = core::Settings::Instance().MenuIcons();
-        int renderedOwners = 0;
 
         std::function<void(HMENU, const std::vector<shell::MenuInventoryItem>&)> appendItems;
         appendItems = [&](HMENU target, const std::vector<shell::MenuInventoryItem>& rows)
@@ -596,6 +601,7 @@ bool MainWindow::HandleInitMenuPopup(HMENU menu)
             }
         };
 
+        std::vector<shell::MenuInventoryItem> allItems;
         for (const shell::DynamicOwner& owner : live.row.owners)
         {
             std::vector<shell::MenuInventoryItem> items;
@@ -611,19 +617,41 @@ bool MainWindow::HandleInitMenuPopup(HMENU menu)
                 continue;
             }
 
-
-            if (renderedOwners > 0)
+            if (!allItems.empty())
             {
-                ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                shell::MenuInventoryItem separator;
+                separator.separator = true;
+                allItems.push_back(std::move(separator));
             }
-            appendItems(menu, items);
-            ++renderedOwners;
+            allItems.insert(allItems.end(),
+                            std::make_move_iterator(items.begin()),
+                            std::make_move_iterator(items.end()));
         }
 
-        if (renderedOwners == 0)
+        shell::FlattenResult flattened = shell::NormalizeAppMenu(
+            std::move(allItems), live.displayTitle, live.row.appName);
+
+        if (flattened.items.empty())
         {
             ::AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"此扩展名无可用功能");
+            return true;
         }
+
+        // 拍平后如果合并出了「1级 · 2级」，顺手把父菜单项的文字也改掉。
+        if (!flattened.title.empty() && flattened.title != live.displayTitle)
+        {
+            live.displayTitle = flattened.title;
+            if (live.parentMenu != nullptr)
+            {
+                MENUITEMINFOW info = {};
+                info.cbSize     = sizeof(info);
+                info.fMask      = MIIM_STRING;
+                info.dwTypeData = const_cast<wchar_t*>(live.displayTitle.c_str());
+                ::SetMenuItemInfoW(live.parentMenu, live.parentPosition, TRUE, &info);
+            }
+        }
+
+        appendItems(menu, flattened.items);
         return true;
     }
     return false;
@@ -942,7 +970,9 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
         {
             for (const shell::AppSourceRow* row : thirdRows)
             {
-                AppendThirdPartyGroup(menu, *row, oldScene,
+                const std::wstring displayName = ui::MenuAlias(
+                    layout, ui::ThirdPartyAliasKey(row->key), row->appName);
+                AppendThirdPartyGroup(menu, *row, displayName, oldScene,
                                       actionContext.paths, actionContext.currentDir);
             }
 
@@ -973,8 +1003,10 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
                 runtime.currentDir = actionContext.currentDir;
                 m_customActionEntries.push_back(std::move(runtime));
 
-                const std::wstring text =
+                const std::wstring fallback =
                     action->title.empty() ? L"（未命名动作）" : action->title;
+                const std::wstring text = ui::MenuAlias(
+                    layout, ui::ManualAliasKey(action->id), fallback);
 
                 HICON icon = showIcons
                     ? m_menuIcons.Get(MenuIconCache::KeyForPath(action->program))
@@ -1011,6 +1043,9 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
         }
         if (spec == nullptr || !spec->available) continue;
 
+        const std::wstring specText = ui::MenuAlias(
+            layout, ui::BuiltinAliasKey(spec->id), spec->text);
+
         if (spec->IsSubmenu())
         {
             HMENU subMenu = ::CreatePopupMenu();
@@ -1022,7 +1057,7 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
                 const UINT flags = MF_POPUP | MF_STRING | (spec->flags & MF_GRAYED);
                 ::AppendMenuW(menu, flags,
                               reinterpret_cast<UINT_PTR>(subMenu),
-                              spec->text.c_str());
+                              specText.c_str());
             }
             else
             {
@@ -1034,7 +1069,7 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
         if (spec->icon != nullptr && showIcons)
         {
             auto drawItem = std::make_unique<MenuDrawItem>();
-            drawItem->text = spec->text;
+            drawItem->text = specText;
             drawItem->icon = spec->icon;
 
             MenuDrawItem* raw = drawItem.get();
@@ -1045,7 +1080,7 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
             continue;
         }
 
-        ::AppendMenuW(menu, spec->flags, spec->command, spec->text.c_str());
+        ::AppendMenuW(menu, spec->flags, spec->command, specText.c_str());
     }
 
     CleanupMenuSeparators(menu);

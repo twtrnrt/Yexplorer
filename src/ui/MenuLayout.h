@@ -114,7 +114,19 @@ struct MenuLayout
 
     // 手动添加的程序（平铺项）
     std::vector<CustomAction> actions;
+
+    // 右键显示名别名。key 用 BuiltinAliasKey / ThirdPartyAliasKey / ManualAliasKey；
+    // 空 = 用默认名（内置项文字 / 应用名 / 手动程序标题）。
+    std::map<std::wstring, std::wstring> aliases;
 };
+
+std::wstring BuiltinAliasKey(const std::wstring& id);
+std::wstring ThirdPartyAliasKey(const std::wstring& appKey);
+std::wstring ManualAliasKey(const std::wstring& id);
+
+// 有别名用别名，否则用 fallback；别名去掉首尾空白后为空也按 fallback。
+std::wstring MenuAlias(const MenuLayout& layout, const std::wstring& key,
+                       const std::wstring& fallback);
 
 // 默认文件位置：%APPDATA%\FileExplorer\context-menu.json
 std::wstring MenuLayoutPath();

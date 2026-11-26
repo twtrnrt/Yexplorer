@@ -247,6 +247,8 @@ void TestJson()
     saved.scenes[L"file"] = Order({ L"open", L"sep", L"properties" });
     saved.thirdParty[L"file"] = { { L"WPS Office|0", L"WPS Office", 0 },
                                   { L"WPS Office|1", L"WPS Office", 1 } };
+    saved.aliases[BuiltinAliasKey(L"open")] = L"打开文件";
+    saved.aliases[ThirdPartyAliasKey(L"WPS Office|0")] = L"WPS 经典";
 
     CustomAction action;
     action.id      = L"a1";
@@ -274,6 +276,10 @@ void TestJson()
               "third-party modern key round-trip");
     }
     Check(loaded.actions.size() == 1, "one action round-trip");
+    Check(MenuAlias(loaded, BuiltinAliasKey(L"open"), L"打开") == L"打开文件",
+          "builtin alias round-trip");
+    Check(MenuAlias(loaded, ThirdPartyAliasKey(L"WPS Office|0"), L"WPS Office") == L"WPS 经典",
+          "third-party alias round-trip");
     if (loaded.actions.size() == 1)
     {
         const CustomAction& a = loaded.actions.front();
@@ -336,6 +342,23 @@ void TestJson()
     ::DeleteFileW(unknownPath.c_str());
 }
 
+void TestSeparators()
+{
+    const std::wstring path = TempPath(L"yexp-menu-layout-sep.json");
+    ::DeleteFileW(path.c_str());
+
+    MenuLayout layout = Defaults();
+    layout.scenes[L"file"] = Order({ L"open", L"sep", L"copy", L"sep", L"properties" });
+
+    Check(SaveMenuLayoutTo(path, layout), "save multiple separators");
+    MenuLayout loaded = Defaults();
+    Check(LoadMenuLayoutFrom(path, loaded), "load multiple separators");
+    Expect(loaded.scenes[L"file"], layout.scenes[L"file"],
+           "multiple separators round-trip (not deduped on load)");
+
+    ::DeleteFileW(path.c_str());
+}
+
 } // namespace
 
 int main()
@@ -343,6 +366,7 @@ int main()
     TestDefaults();
     TestResolve();
     TestJson();
+    TestSeparators();
 
     if (g_failures != 0)
     {

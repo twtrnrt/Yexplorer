@@ -162,6 +162,7 @@
     <ClCompile Include="src\shell\ActionRunner.cpp" />
     <ClCompile Include="src\shell\MenuInventory.cpp" />
     <ClCompile Include="src\shell\MenuApps.cpp" />
+    <ClCompile Include="src\shell\MenuFlatten.cpp" />
     <ClCompile Include="src\shell\IconPaths.cpp" />
     <ClCompile Include="src\shell\DefaultManager.cpp" />
     <ClCompile Include="src\shell\ExplorerProxy.cpp" />
@@ -217,6 +218,7 @@
     <ClInclude Include="src\shell\ActionRunner.h" />
     <ClInclude Include="src\shell\MenuInventory.h" />
     <ClInclude Include="src\shell\MenuApps.h" />
+    <ClInclude Include="src\shell\MenuFlatten.h" />
     <ClInclude Include="src\shell\ContextMenuData.h" />
     <ClInclude Include="src\shell\IconPaths.h" />
     <ClInclude Include="src\shell\DefaultManager.h" />

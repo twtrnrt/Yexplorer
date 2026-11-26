@@ -62,6 +62,7 @@ private:
         int          source = 0;   // ThirdParty：0 经典 / 1 现代
         std::wstring label;
         std::wstring note;
+        std::wstring alias;    // 右键显示名别名；空 = 用默认
         bool         checked = true;
     };
 
@@ -80,10 +81,23 @@ private:
 
     void MoveRow(int delta);
     void AddProgram();
+    void AddSeparator();
     void DeleteRow();
     void RestoreDefaults();
     void Save();
     void Cancel();
+
+    void SyncRowChecks();
+
+    std::wstring RowAliasKey(const Row& row) const;
+    std::wstring RowDefaultName(const Row& row) const;
+    std::wstring RowEffectiveName(const Row& row) const;
+    void BeginAliasEdit();
+    void CommitAliasEdit();
+    void CancelAliasEdit();
+    static LRESULT CALLBACK AliasEditSubclass(HWND hWnd, UINT msg, WPARAM wParam,
+                                              LPARAM lParam, UINT_PTR id,
+                                              DWORD_PTR refData);
 
     std::wstring SceneKeyOf(MenuScene scene) const;
     std::wstring SceneTitle(MenuScene scene) const;
@@ -95,12 +109,16 @@ private:
     HWND m_hSceneCombo = nullptr;
     HWND m_hList = nullptr;
     HWND m_hAddProgram = nullptr;
+    HWND m_hAddSeparator = nullptr;
+    HWND m_hRename = nullptr;
     HWND m_hUp = nullptr;
     HWND m_hDown = nullptr;
     HWND m_hDelete = nullptr;
     HWND m_hRestore = nullptr;
     HWND m_hSave = nullptr;
     HWND m_hCancel = nullptr;
+    HWND m_hAliasEdit = nullptr;
+    int  m_aliasRow = -1;
     HFONT m_font = nullptr;
 
     MenuLayout m_layout;

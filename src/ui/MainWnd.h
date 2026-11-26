@@ -755,7 +755,10 @@ private:
     struct LiveSubMenu
     {
         HMENU                    menu = nullptr;
+        HMENU                    parentMenu = nullptr;
+        UINT                     parentPosition = 0;
         shell::AppSourceRow      row;
+        std::wstring             displayTitle;
         unsigned int             scene = 0;      // 老 MenuScene 位
         std::wstring             parentFolder;
         std::vector<std::wstring> targetPaths;
@@ -775,6 +778,7 @@ private:
     std::vector<RuntimeMenuEntry> m_runtimeMenuEntries;
 
     void AppendThirdPartyGroup(HMENU parent, const shell::AppSourceRow& row,
+                               const std::wstring& displayName,
                                unsigned int oldScene,
                                const std::vector<std::wstring>& targetPaths,
                                const std::wstring& parentFolder);

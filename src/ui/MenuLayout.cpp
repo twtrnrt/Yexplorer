@@ -172,7 +172,15 @@ std::vector<std::wstring> NormalizeMenuOrder(const std::vector<std::wstring>& or
 
     for (const std::wstring& token : order)
     {
-        if (token == L"sep" || token == L"actions")
+        // 分隔线是位置标记，允许出现多次；以前把 sep 也塞进 seen，
+        // 结果配置文件里第二条以后的分隔线在加载时就被吃掉了。
+        if (token == L"sep")
+        {
+            result.push_back(token);
+            continue;
+        }
+
+        if (token == L"actions")
         {
             if (seen.insert(token).second) result.push_back(token);
             continue;
@@ -294,6 +302,7 @@ void ApplyDefaultMenuLayout(MenuLayout& layout)
     layout.version = kLayoutVersion;
     layout.scenes.clear();
     layout.thirdParty.clear();
+    layout.aliases.clear();
     for (MenuScene scene : { MenuScene::Background, MenuScene::File,
                              MenuScene::Folder, MenuScene::Multiple })
     {
@@ -468,6 +477,21 @@ void ParseThirdParty(const json& root, MenuLayout& layout)
     }
 }
 
+void ParseAliases(const json& root, MenuLayout& layout)
+{
+    layout.aliases.clear();
+    if (!root.contains("aliases") || !root["aliases"].is_object()) return;
+
+    for (auto it = root["aliases"].begin(); it != root["aliases"].end(); ++it)
+    {
+        if (!it.value().is_string()) continue;
+        const std::wstring key = FromUtf8(it.key());
+        const std::wstring value = FromUtf8(it.value().get<std::string>());
+        if (key.empty() || value.empty()) continue;
+        layout.aliases[key] = value;
+    }
+}
+
 } // namespace
 
 bool LoadMenuLayoutFrom(const std::wstring& path, MenuLayout& layout)
@@ -558,6 +582,7 @@ bool LoadMenuLayoutFrom(const std::wstring& path, MenuLayout& layout)
 
     ParseThirdParty(root, layout);
     ParseActions(root, layout.actions);
+    ParseAliases(root, layout);
     return true;
 }
 
@@ -609,6 +634,14 @@ static bool SaveMenuLayoutInternal(const std::wstring& path, const MenuLayout& l
         thirdParty[ToUtf8(sceneKey)] = array;
     }
     root["thirdParty"] = thirdParty;
+
+    json aliases = json::object();
+    for (const auto& pair : layout.aliases)
+    {
+        if (pair.first.empty() || pair.second.empty()) continue;
+        aliases[ToUtf8(pair.first)] = ToUtf8(pair.second);
+    }
+    root["aliases"] = aliases;
 
     json actions = json::array();
     for (const CustomAction& action : layout.actions)
@@ -782,6 +815,33 @@ std::wstring NewActionId(const MenuLayout& layout)
         }
     }
     return L"a" + std::to_wstring(maxId + 1);
+}
+
+std::wstring BuiltinAliasKey(const std::wstring& id)
+{
+    return L"builtin:" + id;
+}
+
+std::wstring ThirdPartyAliasKey(const std::wstring& appKey)
+{
+    return L"third:" + appKey;
+}
+
+std::wstring ManualAliasKey(const std::wstring& id)
+{
+    return L"manual:" + id;
+}
+
+std::wstring MenuAlias(const MenuLayout& layout, const std::wstring& key,
+                       const std::wstring& fallback)
+{
+    auto it = layout.aliases.find(key);
+    if (it != layout.aliases.end())
+    {
+        const std::wstring alias = Trim(it->second);
+        if (!alias.empty()) return alias;
+    }
+    return fallback;
 }
 
 } // namespace ui

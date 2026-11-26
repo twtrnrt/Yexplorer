@@ -39,6 +39,10 @@ const int kIdDelete     = 3006;
 const int kIdRestore    = 3007;
 const int kIdSave       = 3008;
 const int kIdCancel     = 3009;
+const int kIdAddSeparator = 3010;
+const int kIdAliasEdit  = 3011;
+const int kIdRename     = 3012;
+const UINT kMsgCommitAlias = WM_APP + 31;
 
 const int kDialogWidth  = 820;
 const int kDialogHeight = 660;
@@ -74,6 +78,15 @@ int NextActionOrder(const std::vector<CustomAction>& actions)
 std::wstring SourceLabel(int source)
 {
     return source == 1 ? L"现代" : L"经典";
+}
+
+std::wstring TrimText(const std::wstring& text)
+{
+    size_t begin = 0;
+    size_t end = text.size();
+    while (begin < end && iswspace(text[begin])) ++begin;
+    while (end > begin && iswspace(text[end - 1])) --end;
+    return text.substr(begin, end - begin);
 }
 
 } // namespace
@@ -139,6 +152,15 @@ bool ContextMenuDialog::ShowModal()
 
     if (!CreateDialogWindow()) return false;
 
+    // WinRAR 这类“只注册现代、但 CLSID 仍支持经典 IContextMenu”的应用，
+    // 第一次打开设置时补一条经典 owner；结果写回 owner 缓存，后续不再探测。
+    HCURSOR oldCursor = ::SetCursor(::LoadCursorW(nullptr, IDC_WAIT));
+    if (shell::EnsureClassicFallbacks())
+    {
+        shell::InvalidateAppSourceRows();
+    }
+    ::SetCursor(oldCursor);
+
     ReloadScene();
     ::SetFocus(m_hList);
 
@@ -192,6 +214,8 @@ void ContextMenuDialog::CreateControls()
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdList)), instance, nullptr);
 
     m_hAddProgram = createButton(L"添加程序…", kIdAddProgram);
+    m_hAddSeparator = createButton(L"加分隔线", kIdAddSeparator);
+    m_hRename     = createButton(L"改名…", kIdRename);
     m_hUp         = createButton(L"上移", kIdUp);
     m_hDown       = createButton(L"下移", kIdDown);
     m_hDelete     = createButton(L"删除", kIdDelete);
@@ -202,14 +226,19 @@ void ContextMenuDialog::CreateControls()
     LVCOLUMNW column = {};
     column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
     column.pszText = const_cast<wchar_t*>(L"菜单项");
-    column.cx = Scale(460);
+    column.cx = Scale(370);
     column.iSubItem = 0;
     ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
 
     column.pszText = const_cast<wchar_t*>(L"类型");
-    column.cx = Scale(220);
+    column.cx = Scale(160);
     column.iSubItem = 1;
     ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
+
+    column.pszText = const_cast<wchar_t*>(L"右键显示名");
+    column.cx = Scale(250);
+    column.iSubItem = 2;
+    ::SendMessageW(m_hList, LVM_INSERTCOLUMNW, 2, reinterpret_cast<LPARAM>(&column));
 
     ::SendMessageW(m_hList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                    LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
@@ -223,8 +252,8 @@ void ContextMenuDialog::CreateControls()
     ::SendMessageW(m_hSceneCombo, CB_SETCURSEL, 1, 0);
 
     for (HWND control : { m_hSceneLabel, m_hSceneCombo, m_hList,
-                          m_hAddProgram, m_hUp, m_hDown, m_hDelete, m_hRestore,
-                          m_hSave, m_hCancel })
+                          m_hAddProgram, m_hAddSeparator, m_hRename, m_hUp, m_hDown,
+                          m_hDelete, m_hRestore, m_hSave, m_hCancel })
     {
         if (control != nullptr && m_font != nullptr)
         {
@@ -265,7 +294,13 @@ void ContextMenuDialog::Layout()
     x += Scale(72);
     ::MoveWindow(m_hDelete, x, listTop + listHeight + Scale(10),
                  Scale(64), buttonHeight, TRUE);
-    x += Scale(80);
+    x += Scale(72);
+    ::MoveWindow(m_hAddSeparator, x, listTop + listHeight + Scale(10),
+                 Scale(96), buttonHeight, TRUE);
+    x += Scale(104);
+    ::MoveWindow(m_hRename, x, listTop + listHeight + Scale(10),
+                 Scale(88), buttonHeight, TRUE);
+    x += Scale(96);
     ::MoveWindow(m_hRestore, x, listTop + listHeight + Scale(10),
                  Scale(96), buttonHeight, TRUE);
 
@@ -335,6 +370,155 @@ int ContextMenuDialog::SectionOf(const Row& row) const
     case Row::Kind::Manual:     return 2;
     }
     return 0;
+}
+
+std::wstring ContextMenuDialog::RowAliasKey(const Row& row) const
+{
+    switch (row.kind)
+    {
+    case Row::Kind::Builtin:    return BuiltinAliasKey(row.id);
+    case Row::Kind::ThirdParty: return ThirdPartyAliasKey(row.key);
+    case Row::Kind::Manual:     return ManualAliasKey(row.id);
+    case Row::Kind::Separator:  return std::wstring();
+    }
+    return std::wstring();
+}
+
+std::wstring ContextMenuDialog::RowDefaultName(const Row& row) const
+{
+    switch (row.kind)
+    {
+    case Row::Kind::Builtin:    return row.label;
+    case Row::Kind::ThirdParty: return row.appName;
+    case Row::Kind::Manual:     return row.label;
+    case Row::Kind::Separator:  return std::wstring();
+    }
+    return row.label;
+}
+
+std::wstring ContextMenuDialog::RowEffectiveName(const Row& row) const
+{
+    const std::wstring alias = TrimText(row.alias);
+    return alias.empty() ? RowDefaultName(row) : alias;
+}
+
+void ContextMenuDialog::BeginAliasEdit()
+{
+    if (m_hAliasEdit != nullptr) CommitAliasEdit();
+
+    const int row = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
+    if (row < 0 || row >= static_cast<int>(m_rows.size())) return;
+    if (m_rows[row].kind == Row::Kind::Separator) return;
+
+    RECT rc = {};
+    if (!ListView_GetSubItemRect(m_hList, row, 2, LVIR_BOUNDS, &rc))
+    {
+        if (!ListView_GetItemRect(m_hList, row, &rc, LVIR_BOUNDS)) return;
+    }
+    ::MapWindowPoints(m_hList, m_hWnd, reinterpret_cast<POINT*>(&rc), 2);
+    rc.bottom = rc.top + Scale(24);
+
+    const std::wstring text = RowEffectiveName(m_rows[row]);
+    m_hAliasEdit = ::CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", text.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+        m_hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAliasEdit)),
+        ::GetModuleHandleW(nullptr), nullptr);
+    if (m_hAliasEdit == nullptr) return;
+
+    if (m_font != nullptr)
+    {
+        ::SendMessageW(m_hAliasEdit, WM_SETFONT,
+                       reinterpret_cast<WPARAM>(m_font), TRUE);
+    }
+    ::SetWindowSubclass(m_hAliasEdit, AliasEditSubclass, 1,
+                        reinterpret_cast<DWORD_PTR>(this));
+    m_aliasRow = row;
+    ::SetFocus(m_hAliasEdit);
+    ::SendMessageW(m_hAliasEdit, EM_SETSEL, 0, -1);
+}
+
+void ContextMenuDialog::CommitAliasEdit()
+{
+    if (m_hAliasEdit == nullptr) return;
+
+    const int row = m_aliasRow;
+    const int length = ::GetWindowTextLengthW(m_hAliasEdit);
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    if (length > 0)
+    {
+        ::GetWindowTextW(m_hAliasEdit, text.data(), length + 1);
+    }
+    text.resize(static_cast<size_t>(length));
+
+    ::RemoveWindowSubclass(m_hAliasEdit, AliasEditSubclass, 1);
+    ::DestroyWindow(m_hAliasEdit);
+    m_hAliasEdit = nullptr;
+    m_aliasRow = -1;
+
+    if (row >= 0 && row < static_cast<int>(m_rows.size()))
+    {
+        const std::wstring trimmed = TrimText(text);
+        const std::wstring defaultName = TrimText(RowDefaultName(m_rows[row]));
+        if (trimmed.empty() || trimmed == defaultName)
+        {
+            m_rows[row].alias.clear();
+        }
+        else
+        {
+            m_rows[row].alias = trimmed;
+        }
+
+        ReloadList();
+        ListView_SetItemState(m_hList, row, LVIS_SELECTED | LVIS_FOCUSED,
+                              LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(m_hList, row, FALSE);
+    }
+
+    ::SetFocus(m_hList);
+}
+
+void ContextMenuDialog::CancelAliasEdit()
+{
+    if (m_hAliasEdit == nullptr) return;
+    ::RemoveWindowSubclass(m_hAliasEdit, AliasEditSubclass, 1);
+    ::DestroyWindow(m_hAliasEdit);
+    m_hAliasEdit = nullptr;
+    m_aliasRow = -1;
+    ::SetFocus(m_hList);
+}
+
+LRESULT CALLBACK ContextMenuDialog::AliasEditSubclass(
+    HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR refData)
+{
+    auto* self = reinterpret_cast<ContextMenuDialog*>(refData);
+    if (self == nullptr) return ::DefSubclassProc(hWnd, msg, wParam, lParam);
+
+    if (msg == WM_KEYDOWN)
+    {
+        if (wParam == VK_RETURN)
+        {
+            ::PostMessageW(self->m_hWnd, kMsgCommitAlias, 1, 0);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE)
+        {
+            ::PostMessageW(self->m_hWnd, kMsgCommitAlias, 0, 0);
+            return 0;
+        }
+    }
+    else if (msg == WM_KILLFOCUS)
+    {
+        ::PostMessageW(self->m_hWnd, kMsgCommitAlias, 1, 0);
+        return 0;
+    }
+    else if (msg == WM_NCDESTROY)
+    {
+        ::RemoveWindowSubclass(hWnd, AliasEditSubclass, id);
+    }
+
+    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 void ContextMenuDialog::ReloadScene()
@@ -460,6 +644,15 @@ void ContextMenuDialog::ReloadScene()
     }
 
     insertBlock();
+
+    for (Row& row : m_rows)
+    {
+        const std::wstring key = RowAliasKey(row);
+        if (key.empty()) continue;
+        auto it = m_layout.aliases.find(key);
+        if (it != m_layout.aliases.end()) row.alias = it->second;
+    }
+
     ReloadList();
 }
 
@@ -482,6 +675,11 @@ void ContextMenuDialog::ReloadList()
         LVITEMW sub = {};
         sub.iSubItem = 1;
         sub.pszText = const_cast<wchar_t*>(row.note.c_str());
+        ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index, reinterpret_cast<LPARAM>(&sub));
+
+        const std::wstring displayName = RowEffectiveName(row);
+        sub.iSubItem = 2;
+        sub.pszText = const_cast<wchar_t*>(displayName.c_str());
         ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index, reinterpret_cast<LPARAM>(&sub));
 
         ListView_SetCheckState(m_hList, index, row.checked ? TRUE : FALSE);
@@ -559,6 +757,23 @@ void ContextMenuDialog::Commit()
         builtins.pop_back();
     }
 
+    for (const Row& row : m_rows)
+    {
+        const std::wstring key = RowAliasKey(row);
+        if (key.empty()) continue;
+
+        const std::wstring alias = TrimText(row.alias);
+        const std::wstring defaultName = TrimText(RowDefaultName(row));
+        if (alias.empty() || alias == defaultName)
+        {
+            m_layout.aliases.erase(key);
+        }
+        else
+        {
+            m_layout.aliases[key] = alias;
+        }
+    }
+
     // 第三/手动的插入点：在内置属性之前；没有属性就放末尾
     const size_t actionsPos = std::find(builtins.begin(), builtins.end(), L"actions") - builtins.begin();
     if (actionsPos < builtins.size())
@@ -578,6 +793,7 @@ void ContextMenuDialog::Commit()
 
 void ContextMenuDialog::OnSceneChanged()
 {
+    if (m_hAliasEdit != nullptr) CommitAliasEdit();
     Commit();
     m_scene = SelectedScene();
     ReloadScene();
@@ -590,6 +806,7 @@ void ContextMenuDialog::OnSceneChanged()
 void ContextMenuDialog::MoveRow(int delta)
 {
     if (m_rows.empty()) return;
+    SyncRowChecks();
 
     const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
     if (selected < 0) return;
@@ -640,12 +857,102 @@ void ContextMenuDialog::AddProgram()
     ReloadScene();
 }
 
+void ContextMenuDialog::SyncRowChecks()
+{
+    for (size_t i = 0; i < m_rows.size(); ++i)
+    {
+        m_rows[i].checked =
+            ListView_GetCheckState(m_hList, static_cast<int>(i)) != FALSE;
+    }
+}
+
+void ContextMenuDialog::AddSeparator()
+{
+    SyncRowChecks();
+
+    const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
+
+    int insertAt = static_cast<int>(m_rows.size());
+    if (selected >= 0 && selected < static_cast<int>(m_rows.size()) &&
+        SectionOf(m_rows[selected]) == 0)
+    {
+        if (m_rows[selected].kind == Row::Kind::Separator)
+        {
+            MessageBeep(MB_ICONINFORMATION);
+            return;
+        }
+        insertAt = selected + 1;
+    }
+    else
+    {
+        // 没选中内置项：插到第三/手动块前面；没有就插在属性前面/末尾
+        for (size_t i = 0; i < m_rows.size(); ++i)
+        {
+            if (SectionOf(m_rows[i]) > 0)
+            {
+                insertAt = static_cast<int>(i);
+                break;
+            }
+        }
+        if (insertAt == static_cast<int>(m_rows.size()))
+        {
+            for (size_t i = 0; i < m_rows.size(); ++i)
+            {
+                if (m_rows[i].kind == Row::Kind::Builtin && m_rows[i].id == L"properties")
+                {
+                    insertAt = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 不允许连续两条分隔线
+    if (insertAt > 0 && m_rows[insertAt - 1].kind == Row::Kind::Separator)
+    {
+        MessageBeep(MB_ICONINFORMATION);
+        return;
+    }
+    if (insertAt < static_cast<int>(m_rows.size()) &&
+        m_rows[insertAt].kind == Row::Kind::Separator)
+    {
+        MessageBeep(MB_ICONINFORMATION);
+        return;
+    }
+
+    Row separator;
+    separator.kind = Row::Kind::Separator;
+    separator.label = L"──────── 分隔线 ────────";
+    separator.note = L"分隔线";
+    separator.checked = true;
+    m_rows.insert(m_rows.begin() + insertAt, std::move(separator));
+
+    ReloadList();
+    ListView_SetItemState(m_hList, insertAt, LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(m_hList, insertAt, FALSE);
+}
+
 void ContextMenuDialog::DeleteRow()
 {
     const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
     if (selected < 0 || selected >= static_cast<int>(m_rows.size())) return;
 
     const Row& row = m_rows[selected];
+    if (row.kind == Row::Kind::Separator)
+    {
+        SyncRowChecks();
+        m_rows.erase(m_rows.begin() + selected);
+        ReloadList();
+        const int next = std::min(selected, static_cast<int>(m_rows.size()) - 1);
+        if (next >= 0)
+        {
+            ListView_SetItemState(m_hList, next, LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+        }
+        return;
+    }
+
     if (row.kind != Row::Kind::Manual)
     {
         // 第三方靠取消勾选；内置项不能删
@@ -670,6 +977,7 @@ void ContextMenuDialog::RestoreDefaults()
 
 void ContextMenuDialog::Save()
 {
+    if (m_hAliasEdit != nullptr) CommitAliasEdit();
     Commit();
 
     if (!SaveMenuLayout(m_layout))
@@ -692,6 +1000,7 @@ void ContextMenuDialog::Save()
 
 void ContextMenuDialog::Cancel()
 {
+    CancelAliasEdit();
     ::DestroyWindow(m_hWnd);
 }
 
@@ -732,6 +1041,23 @@ LRESULT ContextMenuDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         return reinterpret_cast<LRESULT>(::GetStockObject(WHITE_BRUSH));
     }
 
+    case kMsgCommitAlias:
+        if (wParam != 0) CommitAliasEdit();
+        else CancelAliasEdit();
+        return 0;
+
+    case WM_NOTIFY:
+    {
+        NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
+        if (header != nullptr && header->hwndFrom == m_hList &&
+            header->code == NM_DBLCLK)
+        {
+            BeginAliasEdit();
+            return 0;
+        }
+        break;
+    }
+
     case WM_COMMAND:
     {
         const int id = LOWORD(wParam);
@@ -748,6 +1074,8 @@ LRESULT ContextMenuDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         switch (id)
         {
         case kIdAddProgram: AddProgram(); break;
+        case kIdAddSeparator: AddSeparator(); break;
+        case kIdRename:     BeginAliasEdit(); break;
         case kIdUp:         MoveRow(-1); break;
         case kIdDown:       MoveRow(1); break;
         case kIdDelete:     DeleteRow(); break;
@@ -770,6 +1098,10 @@ LRESULT ContextMenuDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
     case WM_CLOSE:
         Cancel();
         return 0;
+
+    case WM_DESTROY:
+        CancelAliasEdit();
+        break;
 
     default:
         break;

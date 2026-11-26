@@ -98,6 +98,10 @@ struct DynamicOwner
     std::wstring   nameSource;
     std::wstring   probeStatus;
     std::wstring   probeError;   // 失败原因，只写日志/提示，不显示成长菜单
+
+    // 现代包做过一次经典 IContextMenu 能力探测后记下结果，避免每次开设置都重试：
+    // ""=没探测；"ok"=补了经典；"failed"=不支持；"skip"=已有经典来源。
+    std::wstring   classicProbe;
 };
 
 // 缓存文件：%APPDATA%\FileExplorer\menu-owners.json
@@ -111,6 +115,12 @@ bool EnumerateDynamicOwners(std::vector<DynamicOwner>& owners, std::wstring* err
 // 重新生成 owner 缓存：先扫注册表，再对每个 owner 做一次“标题+健康”探测。
 // 探测只把一级菜单文字和可用状态写进缓存，不保存菜单项树、不保存扩展名矩阵。
 bool BuildDynamicOwnerCache();
+
+// 给「只注册了现代菜单、但同一个 CLSID 仍实现经典 IContextMenu」的应用补一条
+// ShellHandler owner。WinRAR 7.x 就是这种情况：PackagedCom 里有它，经典
+// ContextMenuHandlers 里没有，但 RarExt.dll 仍能按经典接口实例化。
+// 只做一次、结果写回 owner 缓存，不写注册表；失败就跳过。
+bool EnsureClassicFallbacks();
 
 // 一个扩展名的采集结果
 struct MenuInventoryExtension

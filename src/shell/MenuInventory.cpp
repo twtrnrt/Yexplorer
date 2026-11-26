@@ -2781,6 +2781,7 @@ bool SaveDynamicOwnerCache(const std::vector<DynamicOwner>& owners)
         j["nameSource"]  = ToUtf8(owner.nameSource);
         j["probeStatus"] = ToUtf8(owner.probeStatus);
         j["probeError"]  = ToUtf8(owner.probeError);
+        j["classicProbe"] = ToUtf8(owner.classicProbe);
         list.push_back(j);
     }
     root["owners"] = list;
@@ -2825,6 +2826,7 @@ bool LoadDynamicOwnerCache(std::vector<DynamicOwner>& owners)
         owner.nameSource  = FromUtf8(j.value("nameSource", std::string()));
         owner.probeStatus = FromUtf8(j.value("probeStatus", std::string()));
         owner.probeError  = FromUtf8(j.value("probeError", std::string()));
+        owner.classicProbe = FromUtf8(j.value("classicProbe", std::string()));
 
         // 旧缓存没有标题字段：先退回应用名，等下次 --build-dynamic-cache 再补真实标题。
         if (owner.displayName.empty()) owner.displayName = owner.appName;
@@ -3381,6 +3383,97 @@ bool BuildDynamicOwnerCache()
                  L"，读取失败 " + std::to_wstring(unavailableCount) +
                  L"，剔除 " + std::to_wstring(invalidCount) + L"）");
     return true;
+}
+
+bool EnsureClassicFallbacks()
+{
+    std::vector<DynamicOwner> owners;
+    if (!LoadDynamicOwnerCache(owners) || owners.empty())
+    {
+        return false;
+    }
+
+    std::set<std::wstring> shellClsids;
+    std::set<std::wstring> shellApps;
+    for (const DynamicOwner& owner : owners)
+    {
+        if (owner.kind != MenuInvokeKind::ShellHandler) continue;
+        shellClsids.insert(ToLower(owner.clsid));
+        if (!owner.appName.empty()) shellApps.insert(ToLower(owner.appName));
+    }
+
+    std::vector<DynamicOwner> additions;
+    bool changed = false;
+
+    for (DynamicOwner& owner : owners)
+    {
+        if (owner.kind != MenuInvokeKind::PackagedCommand) continue;
+        if (!owner.classicProbe.empty()) continue;
+
+        const std::wstring clsid = ToLower(owner.clsid);
+        if (clsid.empty() || shellClsids.count(clsid) != 0 ||
+            (!owner.appName.empty() && shellApps.count(ToLower(owner.appName)) != 0))
+        {
+            owner.classicProbe = L"skip";   // 已经有经典来源，不重复补
+            changed = true;
+            continue;
+        }
+
+        const std::vector<OwnerProbeSpec> specs = BuildProbeSpecs(owner);
+        if (specs.empty())
+        {
+            owner.classicProbe = L"skip";
+            changed = true;
+            continue;
+        }
+
+        // 只试第一个样本（登记时的 sampleExt / 第一个场景），不把每个扩展名都扫一遍。
+        DynamicOwner probe = owner;
+        probe.kind = MenuInvokeKind::ShellHandler;
+
+        std::wstring title;
+        std::wstring error;
+        if (!RunOwnerProbe(probe, specs.front(), title, error))
+        {
+            owner.classicProbe = L"failed";
+            changed = true;
+            Logger::Info(L"经典能力探测失败：" + owner.clsid + L"（" + owner.appName +
+                         L"）：" + error);
+            continue;
+        }
+
+        DynamicOwner classic = owner;
+        classic.kind         = MenuInvokeKind::ShellHandler;
+        classic.key          = L"shellex:" + clsid;
+        classic.displayName  = title.empty() ? owner.displayName : title;
+        classic.nameSource   = L"classic-probe";
+        classic.probeStatus  = L"ok";
+        classic.probeError.clear();
+        classic.classicProbe = L"ok";
+        additions.push_back(std::move(classic));
+
+        owner.classicProbe = L"ok";
+        shellClsids.insert(clsid);
+        if (!owner.appName.empty()) shellApps.insert(ToLower(owner.appName));
+        changed = true;
+
+        Logger::Info(L"已补经典菜单来源：" + owner.appName + L"（" + owner.clsid + L"）");
+    }
+
+    if (!changed) return false;
+
+    const size_t addedCount = additions.size();
+    owners.insert(owners.end(),
+                  std::make_move_iterator(additions.begin()),
+                  std::make_move_iterator(additions.end()));
+    if (!SaveDynamicOwnerCache(owners))
+    {
+        Logger::Warn(L"经典菜单来源写回 owner 缓存失败");
+        return false;
+    }
+    Logger::Info(L"经典菜单来源已写回 owner 缓存：新增 " +
+                 std::to_wstring(addedCount) + L" 条");
+    return addedCount > 0;
 }
 
 // ---------------------------------------------------------------------------
