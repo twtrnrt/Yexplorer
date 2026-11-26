@@ -359,6 +359,31 @@ void TestSeparators()
     ::DeleteFileW(path.c_str());
 }
 
+void TestThirdPartySeparator()
+{
+    const std::wstring path = TempPath(L"yexp-menu-layout-third-sep.json");
+    ::DeleteFileW(path.c_str());
+
+    MenuLayout layout = Defaults();
+    layout.thirdParty[L"file"] = {
+        { L"WPS Office|0", L"WPS Office", 0 },
+        { L"sep", L"", 0 },
+        { L"WPS Office|1", L"WPS Office", 1 }
+    };
+
+    Check(SaveMenuLayoutTo(path, layout), "save third-party separator");
+    MenuLayout loaded = Defaults();
+    Check(LoadMenuLayoutFrom(path, loaded), "load third-party separator");
+    Check(loaded.thirdParty[L"file"].size() == 3, "third-party separator round-trip size");
+    if (loaded.thirdParty[L"file"].size() == 3)
+    {
+        Check(loaded.thirdParty[L"file"][1].key == L"sep",
+              "third-party separator key round-trip");
+    }
+
+    ::DeleteFileW(path.c_str());
+}
+
 } // namespace
 
 int main()
@@ -367,6 +392,7 @@ int main()
     TestResolve();
     TestJson();
     TestSeparators();
+    TestThirdPartySeparator();
 
     if (g_failures != 0)
     {

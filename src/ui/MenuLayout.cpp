@@ -461,6 +461,15 @@ void ParseThirdParty(const json& root, MenuLayout& layout)
             selection.appName = FromUtf8(item.value("app", std::string()));
             selection.key     = FromUtf8(item.value("key", std::string()));
 
+            if (item.value("sep", false) || selection.key == L"sep")
+            {
+                selection.key = L"sep";
+                selection.appName.clear();
+                selection.source = 0;
+                selections.push_back(std::move(selection));
+                continue;
+            }
+
             const std::string source = item.value("source", std::string("classic"));
             selection.source = (source == "modern") ? 1 : 0;
             if (selection.appName.empty()) continue;
@@ -625,6 +634,14 @@ static bool SaveMenuLayoutInternal(const std::wstring& path, const MenuLayout& l
         json array = json::array();
         for (const ThirdPartySelection& selection : it->second)
         {
+            if (selection.key == L"sep")
+            {
+                json item;
+                item["sep"] = true;
+                array.push_back(std::move(item));
+                continue;
+            }
+
             json item;
             item["key"]    = ToUtf8(selection.key);
             item["app"]    = ToUtf8(selection.appName);

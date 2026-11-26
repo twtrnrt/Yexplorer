@@ -363,14 +363,7 @@ MenuScene ContextMenuDialog::SelectedScene() const
 
 int ContextMenuDialog::SectionOf(const Row& row) const
 {
-    switch (row.kind)
-    {
-    case Row::Kind::Builtin:
-    case Row::Kind::Separator:  return 0;
-    case Row::Kind::ThirdParty: return 1;
-    case Row::Kind::Manual:     return 2;
-    }
-    return 0;
+    return row.section;
 }
 
 std::wstring ContextMenuDialog::RowAliasKey(const Row& row) const
@@ -435,12 +428,14 @@ void ContextMenuDialog::BeginAliasEdit()
     }
     ::SetWindowSubclass(m_hAliasEdit, AliasEditSubclass, 1,
                         reinterpret_cast<DWORD_PTR>(this));
+    ::SetWindowSubclass(m_hList, ListClickSubclass, 2,
+                        reinterpret_cast<DWORD_PTR>(this));
     m_aliasRow = row;
     ::SetFocus(m_hAliasEdit);
     ::SendMessageW(m_hAliasEdit, EM_SETSEL, 0, -1);
 }
 
-void ContextMenuDialog::CommitAliasEdit()
+void ContextMenuDialog::CommitAliasEdit(bool selectRow)
 {
     if (m_hAliasEdit == nullptr) return;
 
@@ -454,6 +449,7 @@ void ContextMenuDialog::CommitAliasEdit()
     text.resize(static_cast<size_t>(length));
 
     ::RemoveWindowSubclass(m_hAliasEdit, AliasEditSubclass, 1);
+    ::RemoveWindowSubclass(m_hList, ListClickSubclass, 2);
     ::DestroyWindow(m_hAliasEdit);
     m_hAliasEdit = nullptr;
     m_aliasRow = -1;
@@ -479,18 +475,21 @@ void ContextMenuDialog::CommitAliasEdit()
         ::SendMessageW(m_hList, LVM_SETITEMTEXTW, row,
                        reinterpret_cast<LPARAM>(&aliasText));
 
-        ListView_SetItemState(m_hList, row, LVIS_SELECTED | LVIS_FOCUSED,
-                              LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(m_hList, row, FALSE);
+        if (selectRow)
+        {
+            ListView_SetItemState(m_hList, row, LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(m_hList, row, FALSE);
+            ::SetFocus(m_hList);
+        }
     }
-
-    ::SetFocus(m_hList);
 }
 
 void ContextMenuDialog::CancelAliasEdit()
 {
     if (m_hAliasEdit == nullptr) return;
     ::RemoveWindowSubclass(m_hAliasEdit, AliasEditSubclass, 1);
+    ::RemoveWindowSubclass(m_hList, ListClickSubclass, 2);
     ::DestroyWindow(m_hAliasEdit);
     m_hAliasEdit = nullptr;
     m_aliasRow = -1;
@@ -518,12 +517,52 @@ LRESULT CALLBACK ContextMenuDialog::AliasEditSubclass(
     }
     else if (msg == WM_KILLFOCUS)
     {
-        ::PostMessageW(self->m_hWnd, kMsgCommitAlias, 1, 0);
+        // 失焦提交但不抢回选中行；用户点到别的行就跟着新行走
+        ::PostMessageW(self->m_hWnd, kMsgCommitAlias, 2, 0);
         return 0;
     }
     else if (msg == WM_NCDESTROY)
     {
         ::RemoveWindowSubclass(hWnd, AliasEditSubclass, id);
+    }
+
+    return ::DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK ContextMenuDialog::ListClickSubclass(
+    HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR refData)
+{
+    (void)id;
+    auto* self = reinterpret_cast<ContextMenuDialog*>(refData);
+    if (self == nullptr || self->m_hAliasEdit == nullptr || !::IsWindow(self->m_hAliasEdit))
+    {
+        return ::DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK || msg == WM_LBUTTONUP)
+    {
+        POINT pt = { static_cast<int>(static_cast<short>(LOWORD(lParam))),
+                     static_cast<int>(static_cast<short>(HIWORD(lParam))) };
+        ::MapWindowPoints(hWnd, HWND_DESKTOP, &pt, 1);
+
+        RECT editRect = {};
+        ::GetWindowRect(self->m_hAliasEdit, &editRect);
+        if (::PtInRect(&editRect, pt))
+        {
+            if (msg != WM_LBUTTONUP)
+            {
+                POINT editPt = pt;
+                ::ScreenToClient(self->m_hAliasEdit, &editPt);
+                const LRESULT index = ::SendMessageW(self->m_hAliasEdit, EM_CHARFROMPOS, 0,
+                                                     MAKELPARAM(editPt.x, editPt.y));
+                ::SetFocus(self->m_hAliasEdit);
+                if (index >= 0)
+                {
+                    ::SendMessageW(self->m_hAliasEdit, EM_SETSEL, index, index);
+                }
+            }
+            return 0;
+        }
     }
 
     return ::DefSubclassProc(hWnd, msg, wParam, lParam);
@@ -552,12 +591,25 @@ void ContextMenuDialog::ReloadScene()
     std::vector<std::wstring> usedKeys;
     for (const ThirdPartySelection& selection : selections)
     {
+        if (selection.key == L"sep")
+        {
+            Row row;
+            row.kind = Row::Kind::Separator;
+            row.section = 1;
+            row.label = L"──────── 分隔线 ────────";
+            row.note = L"第三方 · 分隔线";
+            row.checked = true;
+            thirdRows.push_back(std::move(row));
+            continue;
+        }
+
         const shell::AppSourceRow* app = shell::FindAppSourceRow(selection.key);
         if (app == nullptr) continue;
         if ((app->scenes & sceneBit) == 0) continue;
 
         Row row;
         row.kind = Row::Kind::ThirdParty;
+        row.section = 1;
         row.key = selection.key;
         row.appName = selection.appName.empty() ? app->appName : selection.appName;
         row.source = selection.source;
@@ -575,6 +627,7 @@ void ContextMenuDialog::ReloadScene()
 
         Row row;
         row.kind = Row::Kind::ThirdParty;
+        row.section = 1;
         row.key = app.key;
         row.appName = app.appName;
         row.source = static_cast<int>(app.source);
@@ -590,6 +643,7 @@ void ContextMenuDialog::ReloadScene()
     {
         Row row;
         row.kind = Row::Kind::Manual;
+        row.section = 2;
         row.id = action.id;
         row.label = action.title.empty() ? L"（未命名程序）" : action.title;
         row.note = L"手动程序";
@@ -619,6 +673,7 @@ void ContextMenuDialog::ReloadScene()
         {
             Row row;
             row.kind = Row::Kind::Separator;
+            row.section = 0;
             row.label = L"──────── 分隔线 ────────";
             row.note = L"分隔线";
             row.checked = true;
@@ -644,6 +699,7 @@ void ContextMenuDialog::ReloadScene()
 
         Row row;
         row.kind = Row::Kind::Builtin;
+        row.section = 0;
         row.id = info->id;
         row.label = info->label;
         row.note = L"内置项";
@@ -762,9 +818,19 @@ void ContextMenuDialog::Commit()
         switch (row.kind)
         {
         case Row::Kind::Separator:
-            if (checked && !builtins.empty() && builtins.back() != L"sep")
+            if (!checked) break;
+            if (row.section == 0)
             {
-                builtins.push_back(L"sep");
+                if (!builtins.empty() && builtins.back() != L"sep")
+                {
+                    builtins.push_back(L"sep");
+                }
+            }
+            else if (row.section == 1)
+            {
+                ThirdPartySelection selection;
+                selection.key = L"sep";
+                third.push_back(std::move(selection));
             }
             break;
 
@@ -866,9 +932,17 @@ void ContextMenuDialog::MoveRow(int delta)
     const int target = selected + delta;
     if (target < 0 || target >= static_cast<int>(m_rows.size())) return;
 
-    if (SectionOf(m_rows[selected]) != SectionOf(m_rows[target]))
+    const int fromSection = SectionOf(m_rows[selected]);
+    const int toSection = SectionOf(m_rows[target]);
+    if (fromSection != toSection)
     {
-        return;   // 内置 / 第三方 / 手动三块之间不混排
+        // 普通项不跨区；分隔线可以在内置区和第三方区之间移动
+        if (m_rows[selected].kind != Row::Kind::Separator || toSection == 2)
+        {
+            return;
+        }
+        m_rows[selected].section = toSection;
+        m_rows[selected].note = toSection == 1 ? L"第三方 · 分隔线" : L"分隔线";
     }
 
     std::swap(m_rows[selected], m_rows[target]);
@@ -939,6 +1013,7 @@ void ContextMenuDialog::AddProgram()
 
     Row row;
     row.kind = Row::Kind::Manual;
+    row.section = 2;
     row.id = actionId;
     row.label = actionTitle.empty() ? L"（未命名程序）" : actionTitle;
     row.note = L"手动程序";
@@ -968,24 +1043,44 @@ void ContextMenuDialog::AddSeparator()
     const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
 
     int insertAt = static_cast<int>(m_rows.size());
-    if (selected >= 0 && selected < static_cast<int>(m_rows.size()) &&
-        SectionOf(m_rows[selected]) == 0)
+    int section = 0;
+
+    if (selected >= 0 && selected < static_cast<int>(m_rows.size()))
     {
-        // 加在选中行下方；选中的就是分隔线也允许，后面再调位置。
-        insertAt = selected + 1;
+        section = SectionOf(m_rows[selected]);
+        if (section == 2)
+        {
+            // 手动程序区没有分隔线模型：放到第三方块末尾（手动块之前）
+            section = 1;
+            insertAt = static_cast<int>(m_rows.size());
+            for (size_t i = 0; i < m_rows.size(); ++i)
+            {
+                if (SectionOf(m_rows[i]) == 2)
+                {
+                    insertAt = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            insertAt = selected + 1;
+        }
     }
     else
     {
-        // 没选中内置项：插到第三/手动块前面；没有就插在属性前面/末尾
+        // 没选中：插到第三方/手动块前面；没有就插在属性前面/末尾
+        section = 0;
         for (size_t i = 0; i < m_rows.size(); ++i)
         {
             if (SectionOf(m_rows[i]) > 0)
             {
                 insertAt = static_cast<int>(i);
+                section = 1;
                 break;
             }
         }
-        if (insertAt == static_cast<int>(m_rows.size()))
+        if (section == 0)
         {
             for (size_t i = 0; i < m_rows.size(); ++i)
             {
@@ -1000,8 +1095,9 @@ void ContextMenuDialog::AddSeparator()
 
     Row separator;
     separator.kind = Row::Kind::Separator;
+    separator.section = section;
     separator.label = L"──────── 分隔线 ────────";
-    separator.note = L"分隔线";
+    separator.note = section == 1 ? L"第三方 · 分隔线" : L"分隔线";
     separator.checked = true;
 
     const int actual = InsertRow(insertAt, std::move(separator));
@@ -1128,7 +1224,8 @@ LRESULT ContextMenuDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
     }
 
     case kMsgCommitAlias:
-        if (wParam != 0) CommitAliasEdit();
+        if (wParam == 1) CommitAliasEdit(true);
+        else if (wParam == 2) CommitAliasEdit(false);
         else CancelAliasEdit();
         return 0;
 

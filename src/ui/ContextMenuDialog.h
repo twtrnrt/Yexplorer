@@ -63,6 +63,7 @@ private:
         std::wstring label;
         std::wstring note;
         std::wstring alias;    // 右键显示名别名；空 = 用默认
+        int          section = 0;   // 0 内置 / 1 第三方 / 2 手动
         bool         checked = true;
     };
 
@@ -96,9 +97,12 @@ private:
     std::wstring RowDefaultName(const Row& row) const;
     std::wstring RowEffectiveName(const Row& row) const;
     void BeginAliasEdit();
-    void CommitAliasEdit();
+    void CommitAliasEdit(bool selectRow = true);
     void CancelAliasEdit();
     static LRESULT CALLBACK AliasEditSubclass(HWND hWnd, UINT msg, WPARAM wParam,
+                                              LPARAM lParam, UINT_PTR id,
+                                              DWORD_PTR refData);
+    static LRESULT CALLBACK ListClickSubclass(HWND hWnd, UINT msg, WPARAM wParam,
                                               LPARAM lParam, UINT_PTR id,
                                               DWORD_PTR refData);
 

@@ -912,20 +912,35 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
         }
     }
 
-    // 第三方「应用 + 来源」：勾了哪些，就按配置顺序挂哪些动态子菜单
+    // 第三方「应用 + 来源」：勾了哪些，就按配置顺序挂哪些动态子菜单；
+    // key=="sep" 是第三方块内部的分隔线。
     const std::wstring thirdSceneKey = ui::MenuSceneKey(layoutScene);
     const unsigned thirdSceneBit = 1u << static_cast<unsigned>(layoutScene);
-    std::vector<const shell::AppSourceRow*> thirdRows;
+
+    struct ThirdEntry
+    {
+        const shell::AppSourceRow* app = nullptr;
+        bool separator = false;
+    };
+    std::vector<ThirdEntry> thirdItems;
+    bool hasThirdApp = false;
 
     auto thirdIt = layout.thirdParty.find(thirdSceneKey);
     if (thirdIt != layout.thirdParty.end())
     {
         for (const ui::ThirdPartySelection& selection : thirdIt->second)
         {
+            if (selection.key == L"sep")
+            {
+                thirdItems.push_back({ nullptr, true });
+                continue;
+            }
+
             const shell::AppSourceRow* app = shell::FindAppSourceRow(selection.key);
             if (app == nullptr) continue;
             if ((app->scenes & thirdSceneBit) == 0) continue;
-            thirdRows.push_back(app);
+            thirdItems.push_back({ app, false });
+            hasThirdApp = true;
         }
     }
 
@@ -939,7 +954,7 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
     case ui::MenuScene::Multiple:   oldScene = 4; break;
     }
 
-    const bool actionsAvailable = !thirdRows.empty() || !matchingActions.empty();
+    const bool actionsAvailable = hasThirdApp || !matchingActions.empty();
     const std::vector<std::wstring> order =
         ui::ResolveMenuOrder(layout, layoutScene, available, actionsAvailable);
 
@@ -955,11 +970,17 @@ void MainWindow::RenderMenu(HMENU menu, ContextScene scene,
 
         if (token == L"actions")
         {
-            for (const shell::AppSourceRow* row : thirdRows)
+            for (const ThirdEntry& entry : thirdItems)
             {
+                if (entry.separator)
+                {
+                    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                    continue;
+                }
+
                 const std::wstring displayName = ui::MenuAlias(
-                    layout, ui::ThirdPartyAliasKey(row->key), row->appName);
-                AppendThirdPartyGroup(menu, *row, displayName, oldScene,
+                    layout, ui::ThirdPartyAliasKey(entry.app->key), entry.app->appName);
+                AppendThirdPartyGroup(menu, *entry.app, displayName, oldScene,
                                       actionContext.paths, actionContext.currentDir);
             }
 
