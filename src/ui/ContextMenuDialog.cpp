@@ -43,6 +43,7 @@ const int kIdAddSeparator = 3010;
 const int kIdAliasEdit  = 3011;
 const int kIdRename     = 3012;
 const UINT kMsgCommitAlias = WM_APP + 31;
+const UINT kMsgBeginAlias  = WM_APP + 32;
 
 const int kDialogWidth  = 820;
 const int kDialogHeight = 660;
@@ -220,7 +221,7 @@ void ContextMenuDialog::CreateControls()
     m_hDown       = createButton(L"下移", kIdDown);
     m_hDelete     = createButton(L"删除", kIdDelete);
     m_hRestore    = createButton(L"恢复默认", kIdRestore);
-    m_hSave       = createButton(L"保存", kIdSave);
+    m_hSave       = createButton(L"确定", kIdSave);
     m_hCancel     = createButton(L"取消", kIdCancel);
 
     LVCOLUMNW column = {};
@@ -416,7 +417,7 @@ void ContextMenuDialog::BeginAliasEdit()
         if (!ListView_GetItemRect(m_hList, row, &rc, LVIR_BOUNDS)) return;
     }
     ::MapWindowPoints(m_hList, m_hWnd, reinterpret_cast<POINT*>(&rc), 2);
-    rc.bottom = rc.top + Scale(24);
+    if (rc.bottom <= rc.top) rc.bottom = rc.top + Scale(22);
 
     const std::wstring text = RowEffectiveName(m_rows[row]);
     m_hAliasEdit = ::CreateWindowExW(
@@ -470,7 +471,14 @@ void ContextMenuDialog::CommitAliasEdit()
             m_rows[row].alias = trimmed;
         }
 
-        ReloadList();
+        // 只改这一行的第三列，不重建整张表
+        const std::wstring displayName = RowEffectiveName(m_rows[row]);
+        LVITEMW aliasText = {};
+        aliasText.iSubItem = 2;
+        aliasText.pszText = const_cast<wchar_t*>(displayName.c_str());
+        ::SendMessageW(m_hList, LVM_SETITEMTEXTW, row,
+                       reinterpret_cast<LPARAM>(&aliasText));
+
         ListView_SetItemState(m_hList, row, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
         ListView_EnsureVisible(m_hList, row, FALSE);
@@ -672,17 +680,7 @@ void ContextMenuDialog::ReloadList()
             m_hList, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
         if (index < 0) continue;
 
-        LVITEMW sub = {};
-        sub.iSubItem = 1;
-        sub.pszText = const_cast<wchar_t*>(row.note.c_str());
-        ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index, reinterpret_cast<LPARAM>(&sub));
-
-        const std::wstring displayName = RowEffectiveName(row);
-        sub.iSubItem = 2;
-        sub.pszText = const_cast<wchar_t*>(displayName.c_str());
-        ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index, reinterpret_cast<LPARAM>(&sub));
-
-        ListView_SetCheckState(m_hList, index, row.checked ? TRUE : FALSE);
+        FillListItem(index);
     }
 
     if (!m_rows.empty())
@@ -691,6 +689,60 @@ void ContextMenuDialog::ReloadList()
                               LVIS_SELECTED | LVIS_FOCUSED);
         ListView_EnsureVisible(m_hList, 0, FALSE);
     }
+}
+
+void ContextMenuDialog::FillListItem(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_rows.size())) return;
+    const Row& row = m_rows[index];
+
+    LVITEMW text = {};
+    text.iSubItem = 0;
+    text.pszText = const_cast<wchar_t*>(row.label.c_str());
+    ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index,
+                   reinterpret_cast<LPARAM>(&text));
+
+    text.iSubItem = 1;
+    text.pszText = const_cast<wchar_t*>(row.note.c_str());
+    ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index,
+                   reinterpret_cast<LPARAM>(&text));
+
+    const std::wstring displayName = RowEffectiveName(row);
+    text.iSubItem = 2;
+    text.pszText = const_cast<wchar_t*>(displayName.c_str());
+    ::SendMessageW(m_hList, LVM_SETITEMTEXTW, index,
+                   reinterpret_cast<LPARAM>(&text));
+
+    ListView_SetCheckState(m_hList, index, row.checked ? TRUE : FALSE);
+}
+
+int ContextMenuDialog::InsertRow(int index, Row row)
+{
+    if (index < 0 || index > static_cast<int>(m_rows.size())) return -1;
+
+    m_rows.insert(m_rows.begin() + index, std::move(row));
+
+    LVITEMW item = {};
+    item.mask = LVIF_TEXT;
+    item.iItem = index;
+    item.pszText = const_cast<wchar_t*>(m_rows[index].label.c_str());
+    const int actual = static_cast<int>(::SendMessageW(
+        m_hList, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+    if (actual < 0)
+    {
+        m_rows.erase(m_rows.begin() + index);
+        return -1;
+    }
+
+    FillListItem(actual);
+    return actual;
+}
+
+void ContextMenuDialog::RemoveRow(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_rows.size())) return;
+    ::SendMessageW(m_hList, LVM_DELETEITEM, index, 0);
+    m_rows.erase(m_rows.begin() + index);
 }
 
 void ContextMenuDialog::Commit()
@@ -820,7 +872,9 @@ void ContextMenuDialog::MoveRow(int delta)
     }
 
     std::swap(m_rows[selected], m_rows[target]);
-    ReloadList();
+    FillListItem(selected);
+    FillListItem(target);
+
     ListView_SetItemState(m_hList, target, LVIS_SELECTED | LVIS_FOCUSED,
                           LVIS_SELECTED | LVIS_FOCUSED);
     ListView_EnsureVisible(m_hList, target, FALSE);
@@ -853,8 +907,49 @@ void ContextMenuDialog::AddProgram()
     action.enabled   = true;
     action.order     = NextActionOrder(m_layout.actions);
 
+    const std::wstring actionId = action.id;
+    const std::wstring actionTitle = action.title;
+    const bool actionEnabled = action.enabled;
+
     m_layout.actions.push_back(std::move(action));
-    ReloadScene();
+
+    // 手动程序块在第三方块之后、属性之前；插到已有手动程序末尾。
+    int insertAt = static_cast<int>(m_rows.size());
+    bool sawManual = false;
+    for (size_t i = 0; i < m_rows.size(); ++i)
+    {
+        if (m_rows[i].kind == Row::Kind::Manual)
+        {
+            insertAt = static_cast<int>(i) + 1;
+            sawManual = true;
+        }
+    }
+    if (!sawManual)
+    {
+        insertAt = static_cast<int>(m_rows.size());
+        for (size_t i = 0; i < m_rows.size(); ++i)
+        {
+            if (m_rows[i].kind == Row::Kind::Builtin && m_rows[i].id == L"properties")
+            {
+                insertAt = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    Row row;
+    row.kind = Row::Kind::Manual;
+    row.id = actionId;
+    row.label = actionTitle.empty() ? L"（未命名程序）" : actionTitle;
+    row.note = L"手动程序";
+    row.checked = actionEnabled;
+
+    const int actual = InsertRow(insertAt, std::move(row));
+    if (actual < 0) return;
+
+    ListView_SetItemState(m_hList, actual, LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(m_hList, actual, FALSE);
 }
 
 void ContextMenuDialog::SyncRowChecks()
@@ -876,11 +971,7 @@ void ContextMenuDialog::AddSeparator()
     if (selected >= 0 && selected < static_cast<int>(m_rows.size()) &&
         SectionOf(m_rows[selected]) == 0)
     {
-        if (m_rows[selected].kind == Row::Kind::Separator)
-        {
-            MessageBeep(MB_ICONINFORMATION);
-            return;
-        }
+        // 加在选中行下方；选中的就是分隔线也允许，后面再调位置。
         insertAt = selected + 1;
     }
     else
@@ -907,30 +998,18 @@ void ContextMenuDialog::AddSeparator()
         }
     }
 
-    // 不允许连续两条分隔线
-    if (insertAt > 0 && m_rows[insertAt - 1].kind == Row::Kind::Separator)
-    {
-        MessageBeep(MB_ICONINFORMATION);
-        return;
-    }
-    if (insertAt < static_cast<int>(m_rows.size()) &&
-        m_rows[insertAt].kind == Row::Kind::Separator)
-    {
-        MessageBeep(MB_ICONINFORMATION);
-        return;
-    }
-
     Row separator;
     separator.kind = Row::Kind::Separator;
     separator.label = L"──────── 分隔线 ────────";
     separator.note = L"分隔线";
     separator.checked = true;
-    m_rows.insert(m_rows.begin() + insertAt, std::move(separator));
 
-    ReloadList();
-    ListView_SetItemState(m_hList, insertAt, LVIS_SELECTED | LVIS_FOCUSED,
+    const int actual = InsertRow(insertAt, std::move(separator));
+    if (actual < 0) return;
+
+    ListView_SetItemState(m_hList, actual, LVIS_SELECTED | LVIS_FOCUSED,
                           LVIS_SELECTED | LVIS_FOCUSED);
-    ListView_EnsureVisible(m_hList, insertAt, FALSE);
+    ListView_EnsureVisible(m_hList, actual, FALSE);
 }
 
 void ContextMenuDialog::DeleteRow()
@@ -938,12 +1017,12 @@ void ContextMenuDialog::DeleteRow()
     const int selected = ListView_GetNextItem(m_hList, -1, LVNI_SELECTED);
     if (selected < 0 || selected >= static_cast<int>(m_rows.size())) return;
 
+    SyncRowChecks();
+
     const Row& row = m_rows[selected];
     if (row.kind == Row::Kind::Separator)
     {
-        SyncRowChecks();
-        m_rows.erase(m_rows.begin() + selected);
-        ReloadList();
+        RemoveRow(selected);
         const int next = std::min(selected, static_cast<int>(m_rows.size()) - 1);
         if (next >= 0)
         {
@@ -965,7 +1044,14 @@ void ContextMenuDialog::DeleteRow()
         std::remove_if(m_layout.actions.begin(), m_layout.actions.end(),
                        [&id](const CustomAction& action) { return action.id == id; }),
         m_layout.actions.end());
-    ReloadScene();
+
+    RemoveRow(selected);
+    const int next = std::min(selected, static_cast<int>(m_rows.size()) - 1);
+    if (next >= 0)
+    {
+        ListView_SetItemState(m_hList, next, LVIS_SELECTED | LVIS_FOCUSED,
+                              LVIS_SELECTED | LVIS_FOCUSED);
+    }
 }
 
 void ContextMenuDialog::RestoreDefaults()
@@ -1052,11 +1138,17 @@ LRESULT ContextMenuDialog::HandleMessage(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (header != nullptr && header->hwndFrom == m_hList &&
             header->code == NM_DBLCLK)
         {
-            BeginAliasEdit();
+            // 延迟一拍：双击的第二次 mouse-up 还会回到列表，
+            // 立刻建 EDIT 会被那次松开抢走焦点并误提交。
+            ::PostMessageW(hWnd, kMsgBeginAlias, 0, 0);
             return 0;
         }
         break;
     }
+
+    case kMsgBeginAlias:
+        BeginAliasEdit();
+        return 0;
 
     case WM_COMMAND:
     {

@@ -16,7 +16,7 @@
 //   │ ☐ 用 XXX 打开（手动）                                        │
 //   │ ☑ 属性                                                       │
 //   ├──────────────────────────────────────────────────────────────┤
-//   │ [添加程序…] [上移] [下移] [删除] [恢复默认]    [保存] [取消] │
+//   │ [添加程序…] [加分隔线] [改名…] [上移] [下移] [删除] [恢复默认] [确定] [取消] │
 //   └──────────────────────────────────────────────────────────────┘
 //
 // 规则：
@@ -76,6 +76,9 @@ private:
 
     void ReloadScene();
     void ReloadList();
+    void FillListItem(int index);
+    int  InsertRow(int index, Row row);
+    void RemoveRow(int index);
     void Commit();
     void OnSceneChanged();
 
