@@ -32,8 +32,8 @@
 #pragma once
 
 #define YEXP_VER_MAJOR 2
-#define YEXP_VER_MINOR 0
+#define YEXP_VER_MINOR 1
 #define YEXP_VER_PATCH 0
 #define YEXP_VER_BUILD 0
 
-#define YEXP_VER_STRING "2.0.0.0"
+#define YEXP_VER_STRING "2.1.0.0"
