@@ -2705,6 +2705,14 @@ bool CaptureOwnerMenuInternal(MenuInvokeKind kind,
 
         ApplyScope(capture.items, scene, L"");
         out = std::move(capture.items);
+
+        // 把采集代表项随菜单项带走，执行阶段复用同一套查询以对齐菜单布局。
+        std::function<void(MenuInventoryItem&)> fillReps = [&](MenuInventoryItem& it)
+        {
+            it.invoke.queryReps = queryPaths;
+            for (auto& ch : it.children) fillReps(ch);
+        };
+        for (auto& root : out) fillReps(root);
         return true;
     }
 
@@ -2785,6 +2793,9 @@ json ItemToJson(const MenuInventoryItem& item)
     j["invoke"]["commandLine"] = ToUtf8(item.invoke.commandLine);
     j["invoke"]["delegateExecute"] = ToUtf8(item.invoke.delegateExecute);
     j["invoke"]["packageId"] = ToUtf8(item.invoke.packageId);
+    json reps = json::array();
+    for (const std::wstring& rep : item.invoke.queryReps) reps.push_back(ToUtf8(rep));
+    j["invoke"]["queryReps"] = reps;
 
     json exts = json::array();
     for (const std::wstring& ext : item.exts) exts.push_back(ToUtf8(ext));
@@ -2830,6 +2841,10 @@ MenuInventoryItem ItemFromJson(const json& j)
         item.invoke.commandLine = FromUtf8(invoke.value("commandLine", std::string()));
         item.invoke.delegateExecute = FromUtf8(invoke.value("delegateExecute", std::string()));
         item.invoke.packageId = FromUtf8(invoke.value("packageId", std::string()));
+        if (invoke.contains("queryReps") && invoke["queryReps"].is_array())
+        {
+            for (const auto& rep : invoke["queryReps"]) item.invoke.queryReps.push_back(FromUtf8(rep.get<std::string>()));
+        }
     }
 
     if (j.contains("exts") && j["exts"].is_array())
@@ -3911,6 +3926,33 @@ bool RunShellVerb(const MenuInventoryItem& item,
     return true;
 }
 
+// 在菜单树里按标题文字查找命令 ID；命中返回 wID，未命中返回 -1。
+// 采集时菜单文字与这里取到的文字都过 TrimAmpersand 去助记符，可直接比较。
+static int FindCommandIdByText(HMENU menu, const std::wstring& targetText)
+{
+    if (menu == nullptr) return -1;
+    const int count = ::GetMenuItemCount(menu);
+    for (int i = 0; i < count; ++i)
+    {
+        wchar_t buf[1024] = {};
+        MENUITEMINFOW info = {};
+        info.cbSize = sizeof(info);
+        info.fMask = MIIM_STRING | MIIM_ID | MIIM_SUBMENU | MIIM_FTYPE;
+        info.dwTypeData = buf;
+        info.cch = static_cast<UINT>(std::size(buf));
+        if (!::GetMenuItemInfoW(menu, static_cast<UINT>(i), TRUE, &info)) continue;
+
+        if (info.hSubMenu != nullptr)
+        {
+            const int child = FindCommandIdByText(info.hSubMenu, targetText);
+            if (child >= 0) return child;
+        }
+        if ((info.fType & MFT_SEPARATOR) == 0 && TrimAmpersand(buf) == targetText)
+            return static_cast<int>(info.wID);
+    }
+    return -1;
+}
+
 bool InvokeShellHandler(const MenuInventoryItem& item,
                         const std::vector<std::wstring>& targetPaths,
                         const std::wstring& parentFolder,
@@ -3955,70 +3997,150 @@ bool InvokeShellHandler(const MenuInventoryItem& item,
         return false;
     }
 
-    ShellExtContext context;
-    std::wstring initError;
-    {
-        hr = InitializeShellExt(unknown.Get(), targetPaths, parentFolder, context, &initError);
-    }
-    if (FAILED(hr))
-    {
-        if (error != nullptr) *error = initError.empty() ? L"Initialize 失败" : initError;
-        return false;
-    }
-
-    HMENU menu = ::CreatePopupMenu();
-    if (menu == nullptr)
-    {
-        if (error != nullptr) *error = L"CreatePopupMenu 失败";
-        return false;
-    }
-
     const int idFirst = 1;
     const int idLast = 0x7FFF;
+
+    // 老逻辑兜底：新建干净实例，对完整选择 Initialize + Query + Invoke。
+    // 新路径二次绑定不被扩展接受时退到这里，行为与改造前一致（慢但稳）。
+    auto runLegacy = [&](HRESULT& outHr) -> bool
     {
-        hr = contextMenu->QueryContextMenu(menu, 0, idFirst, idLast, CMF_NORMAL);
+        ComPtr<IUnknown> unknown2;
+        if (FAILED(::CoCreateInstance(clsid, nullptr, CLSCTX_ALL,
+                                      IID_PPV_ARGS(unknown2.GetAddressOf()))) || unknown2 == nullptr)
+        {
+            outHr = E_FAIL;
+            return false;
+        }
+        ComPtr<IContextMenu> cm2;
+        if (FAILED(unknown2.As(&cm2)) || cm2 == nullptr)
+        {
+            outHr = E_FAIL;
+            return false;
+        }
+
+        ShellExtContext ctx;
+        std::wstring iErr;
+        const HRESULT hInit = InitializeShellExt(unknown2.Get(), targetPaths, parentFolder, ctx, &iErr);
+        if (FAILED(hInit))
+        {
+            if (error != nullptr) *error = iErr.empty() ? L"Initialize 失败" : iErr;
+            outHr = hInit;
+            return false;
+        }
+
+        HMENU m = ::CreatePopupMenu();
+        if (m == nullptr)
+        {
+            outHr = E_FAIL;
+            return false;
+        }
+        const HRESULT hQuery = cm2->QueryContextMenu(m, 0, idFirst, idLast, CMF_NORMAL);
+        // 个别扩展 Query 返回失败仍能响应 InvokeCommand；仅菜单完全为空时退出。
+        if (FAILED(hQuery) && ::GetMenuItemCount(m) == 0)
+        {
+            ::DestroyMenu(m);
+            outHr = hQuery;
+            if (error != nullptr) *error = L"QueryContextMenu 失败";
+            return false;
+        }
+
+        const bool useVerb2 = !item.invoke.verb.empty();
+        CMINVOKECOMMANDINFOEX inv = {};
+        inv.cbSize = sizeof(inv);
+        inv.fMask = CMIC_MASK_UNICODE;
+        inv.hwnd = owner;
+        inv.nShow = SW_SHOWNORMAL;
+        if (useVerb2)
+        {
+            inv.lpVerb = nullptr;
+            inv.lpVerbW = const_cast<LPWSTR>(item.invoke.verb.c_str());
+        }
+        else
+        {
+            inv.lpVerb = MAKEINTRESOURCEA(static_cast<UINT>(item.invoke.commandOffset));
+            inv.lpVerbW = MAKEINTRESOURCEW(static_cast<UINT>(item.invoke.commandOffset));
+        }
+        const HRESULT hInv = cm2->InvokeCommand(reinterpret_cast<LPCMINVOKECOMMANDINFO>(&inv));
+        ::DestroyMenu(m);
+        outHr = hInv;
+        if (FAILED(hInv) && error != nullptr)
+            *error = L"InvokeCommand 失败，HRESULT=" + Logger::FormatHresult(hInv);
+        return SUCCEEDED(hInv);
+    };
+
+    // ---- 新路径：复用采集代表项查询对齐布局，二次绑定完整选择后按标题定位命令 ----
+
+    // 采集时记下的代表项；老缓存没有该字段时兜底取前 3 个。
+    std::vector<std::wstring> reps = item.invoke.queryReps;
+    if (reps.empty())
+    {
+        reps = targetPaths;
+        if (reps.size() > 3) reps.resize(3);
     }
 
-    // 即使 QueryContextMenu 返回失败，个别扩展仍能响应 InvokeCommand；
-    // 这里只在菜单完全没有命令时提前退出，避免把真实失败吞掉。
-    if (FAILED(hr) && ::GetMenuItemCount(menu) == 0)
+    ShellExtContext repContext;
+    std::wstring repErr;
+    const HRESULT hrInit1 = InitializeShellExt(unknown.Get(), reps, parentFolder, repContext, &repErr);
+
+    HMENU menuRep = nullptr;
+    int matchedOffset = item.invoke.commandOffset;
+    if (SUCCEEDED(hrInit1))
     {
-        ::DestroyMenu(menu);
-        if (error != nullptr) *error = L"QueryContextMenu 失败";
-        return false;
+        menuRep = ::CreatePopupMenu();
+        if (menuRep != nullptr)
+        {
+            contextMenu->QueryContextMenu(menuRep, 0, idFirst, idLast, CMF_NORMAL);
+            // 在代表项菜单树里按标题定位命令号；找不到再用采集偏移兜底。
+            const int matchedId = FindCommandIdByText(menuRep, item.text);
+            if (matchedId >= 0) matchedOffset = matchedId - idFirst;
+        }
     }
 
-    // 优先用采集时取到的规范动词名调用；动词名缺失才回退命令偏移。
-    // 偏移依赖两次 QueryContextMenu 的命令排列一致，动态菜单（如 WPS）下会错位。
-    const bool useVerb = !item.invoke.verb.empty();
-
-    CMINVOKECOMMANDINFOEX invoke = {};
-    invoke.cbSize = sizeof(invoke);
-    invoke.fMask = CMIC_MASK_UNICODE;
-    invoke.hwnd = owner;
-    invoke.nShow = SW_SHOWNORMAL;
-    if (useVerb)
+    // 二次绑定完整选择。Initialize 规范上一般只调一次，这里属兼容尝试；
+    // 拿不到 IShellExtInit、构造 context 失败或 Initialize 返回失败，都回退老逻辑。
+    bool reinitOk = false;
+    ShellExtContext fullContext;
+    ComPtr<IShellExtInit> init;
+    unknown.As(&init);
+    if (SUCCEEDED(hrInit1) && init != nullptr)
     {
-        invoke.lpVerb = nullptr;
-        invoke.lpVerbW = const_cast<LPWSTR>(item.invoke.verb.c_str());
-    }
-    else
-    {
-        invoke.lpVerb = MAKEINTRESOURCEA(static_cast<UINT>(item.invoke.commandOffset));
-        invoke.lpVerbW = MAKEINTRESOURCEW(static_cast<UINT>(item.invoke.commandOffset));
+        std::wstring fullErr;
+        if (BuildShellExtContext(targetPaths, parentFolder, fullContext, &fullErr))
+        {
+            const HRESULT hrInit2 = init->Initialize(fullContext.folder, fullContext.dataObject.Get(), nullptr);
+            reinitOk = SUCCEEDED(hrInit2);
+        }
     }
 
+    if (reinitOk)
     {
+        const bool useVerb = !item.invoke.verb.empty();
+        CMINVOKECOMMANDINFOEX invoke = {};
+        invoke.cbSize = sizeof(invoke);
+        invoke.fMask = CMIC_MASK_UNICODE;
+        invoke.hwnd = owner;
+        invoke.nShow = SW_SHOWNORMAL;
+        if (useVerb)
+        {
+            invoke.lpVerb = nullptr;
+            invoke.lpVerbW = const_cast<LPWSTR>(item.invoke.verb.c_str());
+        }
+        else
+        {
+            invoke.lpVerb = MAKEINTRESOURCEA(static_cast<UINT>(matchedOffset));
+            invoke.lpVerbW = MAKEINTRESOURCEW(static_cast<UINT>(matchedOffset));
+        }
+
         hr = contextMenu->InvokeCommand(reinterpret_cast<LPCMINVOKECOMMANDINFO>(&invoke));
-    }
-    ::DestroyMenu(menu);
+        if (menuRep != nullptr) ::DestroyMenu(menuRep);
 
-    if (FAILED(hr))
-    {
-        if (error != nullptr) *error = L"InvokeCommand 失败，HRESULT=" + Logger::FormatHresult(hr);
-        return false;
+        if (SUCCEEDED(hr)) return true;
+        // 新路径执行失败：落到老逻辑用完整选择重新查询再试一次。
     }
-    return true;
+    if (menuRep != nullptr) ::DestroyMenu(menuRep);
+
+    HRESULT legacyHr = S_OK;
+    return runLegacy(legacyHr);
 }
 
 bool InvokePackagedCommand(const MenuInventoryItem& item,

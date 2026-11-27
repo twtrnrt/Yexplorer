@@ -55,6 +55,7 @@ struct MenuInvoke
     std::wstring   commandLine;      // 静态 verb 的命令行
     std::wstring   delegateExecute;  // 静态 verb 的 DelegateExecute GUID
     std::wstring   packageId;        // PackagedCommand 的包标识
+    std::vector<std::wstring> queryReps; // 采集时用于查询的代表项路径；执行阶段复用同一套以对齐菜单布局
 };
 
 // 一条菜单项。children 保留原始子菜单结构，方便以后按原样显示。
